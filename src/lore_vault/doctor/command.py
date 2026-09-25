@@ -1,4 +1,9 @@
-"""`python -m lore_vault.doctor [--json] [--category NAME ...]` 的進入點。"""
+"""`python -m lore_vault.doctor [--json] [--category NAME ...] [--db PATH]
+[--embedding-dim N]` 的進入點。
+
+`--db` 以唯讀開啟（不建檔、不遷移），放進 context 資源 `"db"`；
+沒給時 storage 類檢查記為 skipped。
+"""
 
 from __future__ import annotations
 
@@ -7,6 +12,9 @@ import json
 import sys
 from collections.abc import Sequence
 from typing import TextIO
+
+from lore_vault.storage.db import connect_readonly
+from lore_vault.storage.errors import StorageError
 
 from .builtin import default_registry
 from .framework import DoctorContext, DoctorReport, Registry, Status
@@ -52,6 +60,10 @@ def main(
     parser.add_argument(
         "--category", action="append", help="只跑指定分類（可重複）", default=None
     )
+    parser.add_argument("--db", help="資料庫路徑（唯讀開啟，供 storage 對帳）")
+    parser.add_argument(
+        "--embedding-dim", type=int, default=None, help="向量維度（對帳用）"
+    )
     args = parser.parse_args(argv)
 
     out = stdout if stdout is not None else sys.stdout
@@ -62,7 +74,24 @@ def main(
         unknown = sorted(set(args.category) - known)
         if unknown:
             parser.error(f"未知分類 {unknown}；可用：{sorted(known)}")
-    report = registry.run(ctx, categories=args.category)
+    db = None
+    if ctx is None:
+        settings: dict[str, object] = {}
+        resources: dict[str, object] = {}
+        if args.embedding_dim is not None:
+            settings["embedding_dim"] = args.embedding_dim
+        if args.db:
+            try:
+                db = connect_readonly(args.db)
+            except (StorageError, OSError) as exc:
+                parser.error(f"無法開啟資料庫：{exc}")
+            resources["db"] = db
+        ctx = DoctorContext(settings=settings, resources=resources)
+    try:
+        report = registry.run(ctx, categories=args.category)
+    finally:
+        if db is not None:
+            db.close()
     if args.json:
         # ensure_ascii：不受主控台編碼影響，機器讀取不失真
         out.write(json.dumps(report.to_dict(), ensure_ascii=True, indent=2) + "\n")

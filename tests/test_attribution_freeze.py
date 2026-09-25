@@ -11,7 +11,8 @@
 
 目前 schema 沒有任何讀取時重算的程式路徑；`test_freeze_test_is_load_bearing`
 把重算邏輯塞進 `Episode.from_dict` 的轉換鉤子，證明一旦有人加了重算，本測試會紅。
-儲存層（T-15 之後）的讀取 API 上線後，應把它的讀取函式也接到 `_read_stored` 同樣驗證。
+讀取流程參數化為兩條：直接 JSON，以及經儲存層寫入 SQLite 再讀回
+（`insert_episode` → `list_episodes`），兩條都必須保持凍結。
 """
 
 from __future__ import annotations
@@ -48,8 +49,9 @@ def _episode_dict(repo: str, repo_root: str, machine: str) -> dict:
         "agent": "claude-code",
         "origin": "human",
         "machine": machine,
-        "started_at": "2026-08-20T02:00:00Z",
-        "ended_at": "2026-08-20T02:05:00Z",
+        # 與 spike 實際格式及儲存層正規化格式相同（毫秒、Z），逐字比對才有意義
+        "started_at": "2026-08-20T02:00:00.000Z",
+        "ended_at": "2026-08-20T02:05:00.000Z",
         "cwd": [repo_root],
         "repo": repo,
         "repo_root": repo_root,
@@ -69,9 +71,34 @@ def _episode_dict(repo: str, repo_root: str, machine: str) -> dict:
     }
 
 
-def _read_stored(stored: str) -> Episode:
+def _read_json(stored: str) -> Episode:
     """讀取流程：儲存形式 → Episode。"""
     return Episode.from_dict(json.loads(stored))
+
+
+@pytest.fixture(params=["json", "storage"])
+def read_stored(request, tmp_path):
+    """讀取流程的兩種實作。storage：每次讀都用新的資料庫檔，寫入後經儲存層讀回。"""
+    if request.param == "json":
+        return _read_json
+
+    from lore_vault.storage.db import connect
+    from lore_vault.storage.records import insert_episode, list_episodes
+    from lore_vault.storage.vaults import upsert_vault
+
+    counter = iter(range(1_000_000))
+
+    def read(stored: str) -> Episode:
+        conn = connect(tmp_path / f"attr-{next(counter)}.db")
+        try:
+            upsert_vault(conn, Vault(key="folder/attr", display="attr"))
+            insert_episode(conn, "folder/attr", Episode.from_dict(json.loads(stored)))
+            [ep] = list_episodes(conn, "folder/attr")
+        finally:
+            conn.close()
+        return ep
+
+    return read
 
 
 def _assert_frozen(ep: Episode, stored: str) -> None:
@@ -116,23 +143,23 @@ def renamed_repo(tmp_path, monkeypatch):
 
 
 @needs_git
-def test_old_episode_keeps_frozen_attribution_after_rename(renamed_repo):
+def test_old_episode_keeps_frozen_attribution_after_rename(renamed_repo, read_stored):
     stored, _ = renamed_repo
-    ep = _read_stored(stored)
+    ep = read_stored(stored)
     _assert_frozen(ep, stored)
     assert (ep.repo, ep.machine) == ("OldName", WRITE_MACHINE)
     assert ep.repo_root is not None and ep.repo_root.endswith("/OldName")
 
 
 @needs_git
-def test_rename_is_joined_by_aliases_not_by_rewriting(renamed_repo):
+def test_rename_is_joined_by_aliases_not_by_rewriting(renamed_repo, read_stored):
     stored, old_key = renamed_repo
     current = resolve_binding(os.getcwd())
     vault = Vault(
         key=current.key, display=current.display, aliases=(old_key, "OldName")
     )
     index = VaultIndex([vault])
-    ep = _read_stored(stored)
+    ep = read_stored(stored)
     # 舊名字透過別名找到現行 vault
     assert index.resolve(ep.repo) is vault
     # 但 episode 本身不被改寫
@@ -140,7 +167,7 @@ def test_rename_is_joined_by_aliases_not_by_rewriting(renamed_repo):
 
 
 @needs_git
-def test_freeze_test_is_load_bearing(renamed_repo):
+def test_freeze_test_is_load_bearing(renamed_repo, read_stored):
     """把「讀取時依環境重算」塞進讀取流程，上面的凍結斷言必須失守。"""
     stored, _ = renamed_repo
     original = Episode._convert.__func__  # type: ignore[attr-defined]
@@ -155,10 +182,10 @@ def test_freeze_test_is_load_bearing(renamed_repo):
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(Episode, "_convert", classmethod(recompute_on_read))
-        ep = _read_stored(stored)
+        ep = read_stored(stored)
         assert (ep.repo, ep.machine) == ("NewName", READ_MACHINE)
         with pytest.raises(AssertionError):
             _assert_frozen(ep, stored)
 
     # 只還原重算鉤子（環境仍是改名後）：恢復凍結
-    _assert_frozen(_read_stored(stored), stored)
+    _assert_frozen(read_stored(stored), stored)
