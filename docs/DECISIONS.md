@@ -18,6 +18,7 @@
 | A12 | 使用者 UI 最後處理，先完成契約（HTTP／MCP）與架構 | 艾斯維爾 2026-09-25 |
 | A13 | 管線中需要 headless `claude -p` 的階段（校準）留在主機排程，不進容器；登入憑證不進容器 | 艾斯維爾 2026-09-25，主機常駐不關機；依據 T-03 |
 | A14 | 摘要由 LLM 非同步產生，細節見 D4 | 艾斯維爾 2026-09-26 同意 D4 提案 |
+| A15 | MCP 為各機器本地 stdio 殼、轉發服務 HTTP，並負責快照拉取與不可達降級；服務自帶 bearer token（本機也需帶），遠端再經 Cloudflare Access service token；`pm-proxy.py` 退役。對外沿用 `pm` 與 `pm-api` 子網域 | 艾斯維爾 2026-09-26 同意 D8 提案（先試做） |
 
 ## 待裁決
 
@@ -131,10 +132,4 @@ Ollama 另裝了 `nomic-embed-text`，PM 未使用。
 
 ### D8 跨機器的 MCP transport 與認證
 
-D3 定為跨機器後新增。要定的：
-
-- 遠端機器的 MCP 直接連服務的 streamable HTTP，或本地 stdio 殼轉發 HTTP（殼可順便負責快照拉取與降級）
-- 認證：沿用 Cloudflare Access（service token）或服務自帶 token；本機連線是否免認證
-- 現行 `pm-proxy.py` 的角色由誰接手
-
-不阻擋 D1。
+**已定案（A15，先試做）。**

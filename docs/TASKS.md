@@ -12,7 +12,6 @@
 |---|---|---|---|
 | D5 | spike 資料目錄是否改名、中間產物去留 | T-46（資料目錄搬遷，切換階段） | 不擋 MIGRATION 建議順序步驟 2「路徑常數集中成設定」（T-10）——常數先集中，值待 D5 定案再填 |
 | D6 | 對 U.E.P 的接口形式（MCP／HTTP／函式庫） | T-32（U.E.P 接口卡） | D3 已定案（HTTP+MCP 薄殼），D6 只等這張卡本身，優先度最低，HTTP／MCP 上線後任何時間點都可定案 |
-| D8 | 跨機器 MCP transport 與認證 | T-29（認證中介層）、T-30（MCP 薄殼 transport 選型）、T-45（Cloudflare tunnel 改導） | 不擋 HTTP API 端點本身（T-23~T-28）與快照格式／atomic 寫入（T-21）；只擋認證、transport 選型、tunnel 改導、`pm-proxy.py` 接手者、快照「由誰拉」的歸屬（殼端或獨立程序） |
 
 ## 第一批可立即開工（不受任何待裁決阻塞）
 
@@ -233,7 +232,7 @@ T-01、T-02、T-03（前置 spike 實測）、T-04、T-05（subtree 併入與既
 - 驗收標準：`VACUUM INTO` 備份出可獨立開啟驗證的檔案；doctor 補「最近一次備份時間」對帳項，測試證明備份腳本沒跑時該項變紅（超過設定門檻時）
 - 預估：M
 
-#### T-28: 認證中介層〔阻塞：D8〕
+#### T-28: 認證中介層
 - 範圍：依 D8 裁決結果（Cloudflare Access service token 或服務自帶 token；本機是否免認證）實作 HTTP API 認證
 - 涉及檔案：`api/`
 - 依賴：T-24、D8 定案
@@ -244,7 +243,7 @@ T-01、T-02、T-03（前置 spike 實測）、T-04、T-05（subtree 併入與既
 
 ### 階段 6：MCP 薄殼
 
-#### T-29: MCP transport 選型與實作〔阻塞：D8〕
+#### T-29: MCP transport 選型與實作
 - 範圍：依 D8 決定遠端機器 MCP 是直連服務的 streamable HTTP，或本地 stdio 殼轉發 HTTP
 - 涉及檔案：`mcp/`
 - 依賴：T-24、D8 定案
@@ -336,7 +335,7 @@ T-01、T-02、T-03（前置 spike 實測）、T-04、T-05（subtree 併入與既
 - 驗收標準：注入路徑延遲量測（不因等網路而變慢）；快照缺失時明確降級（不注入或標示降級，不拋例外中斷編輯）；⚠️ 換排序後（RRF 取代舊 scorer）行為校準要重跑，此卡驗收不含 precision 數字比對
 - 預估：M
 
-#### T-41: 蒸餾／收斂／校準管線服務端化〔可能阻塞：D8〕
+#### T-41: 蒸餾／收斂／校準管線服務端化
 - 分支已定（A13）：需要 `claude -p` 的校準留在主機排程，其餘階段視情況服務端化
 - 範圍：蒸餾／收斂／校準在服務端跑；若 T-03 結論為「容器內可跑 `claude -p`」則管線容器化，否則留在主機排程
 - 涉及檔案：`pipeline/`（延續 spike `distill.py`／`consolidate.py`／`calibrate.py`／`pipeline.py`）

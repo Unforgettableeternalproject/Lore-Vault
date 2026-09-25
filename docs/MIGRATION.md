@@ -89,6 +89,13 @@
 
 `list_notebooks` 的 135 次幾乎都是綁定查找（pm skill 的手動比對流程），由 `vault_resolve` 取代。
 
+### Cloudflare 現況（2026-09-26 查）
+
+- tunnel `pm`（`c70f36ba-…`），設定在 `~/.cloudflared/config.yml`：`pm.unforgettableeternalproject.com → localhost:8502`（Web UI）、`pm-api.unforgettableeternalproject.com → localhost:5055`（API）
+- 遠端經 Cloudflare Access service token（`~/.cloudflared/pm-token.env`，由 `pm-proxy.py` 注入 header）
+- 新服務試做期對外埠用 **5056**，不佔用 5055／8502；切換時把 `pm-api` ingress 改指 5056（需授權，T-45）。`pm` 子網域留給之後的 UI（A12）
+- Access 應用與 policy 的實際設定未查（需 Cloudflare API 權限），切換前確認
+
 ### 已知坑（要在新系統避免重演）
 
 - `search` 的 `notebook_id` 過濾無效，結果是全域的
