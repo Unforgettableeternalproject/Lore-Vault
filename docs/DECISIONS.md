@@ -16,6 +16,7 @@
 | A10 | embedding 沿用 Ollama bge-m3；LLM 用 OpenAI API（key 走 `.env`）；模型寫進設定檔 | 艾斯維爾 2026-09-25（D7） |
 | A11 | 以 Python 為主，專案自有 `.venv`（uv 管理）；hook 路徑只用標準庫。結構可參考上游 open-notebook（本機 `repos/Other/open-notebook`） | 艾斯維爾 2026-09-25（D2） |
 | A12 | 使用者 UI 最後處理，先完成契約（HTTP／MCP）與架構 | 艾斯維爾 2026-09-25 |
+| A13 | 管線中需要 headless `claude -p` 的階段（校準）留在主機排程，不進容器；登入憑證不進容器 | 艾斯維爾 2026-09-25，主機常駐不關機；依據 T-03 |
 
 ## 待裁決
 
@@ -35,7 +36,7 @@
 - **中文檢索**：FTS5 trigram 對 2 字詞**靜默回 0 筆**（本機實測「記憶」→0、「記憶系統」→1），pg_trgm 同樣限制。過去 212 筆 PM 搜尋中 **35% 含 2 字中文詞**、58% 純英文、38% 中英混合、平均 6.8 詞的關鍵詞堆疊。解法在服務層：CJK 連續段切 overlapping bigram 後存索引欄，用 `unicode61 tokenchars '_'`（保住 snake_case 識別字）。實測 2 字、3 字、4 字、多詞、CamelCase 識別字皆命中
 - **混合檢索**：BM25 + 向量在服務層做 RRF 融合，與引擎無關
 - **向量**：不建 ANN 索引。數千條 × 1024 維 ≈ 20MB，暴力 cosine 為毫秒級，且先套 vault 過濾再算、不會有「ANN 候選被範圍過濾掉而少回結果」的靜默漏失（A5）。10 萬條以上再重評。也因此不需要 sqlite-vec
-- **Docker 資料卷**：必須用 **named volume**。SQLite／Postgres 經 bind mount 到 NTFS 都有檔案鎖或權限問題。named volume 會隨 Docker Desktop 重置或 vhdx 損毀一起消失，**定期備份到主機是必要步驟**
+- **Docker 資料卷**：預設用 **named volume**。bind mount 到 NTFS 有檔案鎖或權限問題的回報（本機現行版本未重現，見 T-01）。named volume 會隨 Docker Desktop 重置或 vhdx 損毀一起消失，**定期備份到主機是必要步驟**
 
 隨之而來的設計約束：
 
@@ -49,7 +50,20 @@
 
 要補的 doctor 對帳：每個 vault 的 note 數與內容雜湊（對舊系統匯出）、缺 embedding／summary 的 note 數、FTS 索引列數 vs note 數、快照版本 vs 服務端版本、spool 未推送筆數、最近一次備份時間。
 
-仍需實測：named volume 上 SQLite WAL 在 `docker restart` 中斷下不丟資料；SurrealDB 內舊向量確為 bge-m3、1024 維，以及是一篇一向量還是分塊（決定能否直接搬、向量表形狀）。
+**WAL 中斷實測（T-01，2026-09-25，Docker Desktop 28.3.0 / WSL2，python:3.12-slim，named volume）**：寫入中途 SIGKILL、`wal_checkpoint(TRUNCATE)` 進行中 SIGKILL、正常 `docker restart` 三種情境皆 `integrity_check=ok`、已 commit 交易零遺失、rollback 的交易未落地。範圍是行程崩潰一致性，不含斷電。
+
+- 服務程序必須處理 SIGTERM（或以 `--init` 啟動），否則 PID 1 收不到訊號、會被 docker 等待逾時後硬殺
+- bind mount 到 NTFS 在本機現行版本**未重現**鎖或權限問題；但行為隨 Docker Desktop 版本與檔案系統驅動而異，仍以 named volume 為預設
+
+**舊向量實測（T-02，2026-09-25，隔離副本容器唯讀查詢）**：
+
+- note 共 **1490** 則，其中 1474 則有向量、**16 則缺向量**（匯入時補算）
+- 全數 **1024 維**，**一篇一向量**（存在 `note.embedding` 欄位本身；超過 400 token 的內容在記憶體分塊後 mean-pool 成一個向量，從未落地成多筆 chunk）
+- 確認為 **bge-m3**：`model` 表只登記 `bge-m3:latest`（ollama）；對一則短 note 以本機 bge-m3 重算，與庫內向量 cosine = 0.99999999
+- **量級不一致**：mean-pool 過的長內容 norm ≈ 1，短內容直接存 Ollama 原始輸出 norm ≈ 25。新系統匯入時一律 L2 正規化，之後用點積即等於 cosine
+- 時間戳為 SurrealDB datetime，序列化即 ISO-8601 UTC（`Z` 後綴、奈秒精度），不需時區換算
+
+結論：向量表形狀為 `note_id → 1024 維 float32`，一對一，舊向量可整批搬、正規化後使用。
 
 ### D2 語言與環境
 
@@ -66,7 +80,8 @@ spike 接入跨機器架構——**艾斯維爾同意照以下草案試做**（�
 
 - **收料**：`Stop` hook 仍在各機器本地執行（標準庫），episode 先寫本地 spool，再非同步推給服務；服務不可達時不阻塞、不遺失，doctor 對帳 spool 與服務端
 - **注入**：`PreToolUse` 每次編輯都跑，不能每次走網路——讀本地的 concept 快照，快照由服務定期同步下來
-- **管線**：蒸餾／收斂／校準在服務端跑，但校準需要 headless `claude -p`，要確認容器內能不能跑，否則留在主機排程
+- **管線**：蒸餾／收斂／校準在服務端跑，但校準需要 headless `claude -p`，要確認容器內能不能跑，否則留在主機排程——**已定案 A13：校準留在主機排程**
+  - T-03 實測（無憑證段）：`node:22-slim` 可安裝並執行 Claude Code 2.1.282；stdin 與位置參數皆不會卡住；`CLAUDE_CONFIG_DIR` 可把狀態導到可寫目錄（解 MIGRATION A.8 坑 2、4）。坑 1（全域 CLAUDE.md／SessionStart 注入）與坑 3（Bash allowlist 字面路徑）需要登入憑證才能驗證，未測——容器內 OAuth refresh 可能輪替 token、使主機登入失效
 - **歸屬**：episode 多一個 `machine` 欄位（凍結），`repo_root` 只在同一台機器上有意義
 
 ### D4 摘要（`summary`）由誰產生
@@ -75,7 +90,7 @@ spike 接入跨機器架構——**艾斯維爾同意照以下草案試做**（�
 
 - 模型與額度（本機模型 or API）；與 D7 embedding 是否同一供應來源
 - 同步還是非同步：寫入時等摘要，或先存、背景補（查詢時暫以正文首段頂替）
-- 更新 note 時是否重算、舊 1300 則批次補的成本
+- 更新 note 時是否重算、舊 1490 則批次補的成本
 
 ### D5 spike 資料目錄
 
