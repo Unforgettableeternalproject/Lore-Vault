@@ -5,7 +5,7 @@ hook 由系統 Python 直接執行、不經 `.venv`。只要 hook 模組（或�
 在系統 Python 下就會 ImportError——而且是在使用者編輯檔案的當下才爆。
 
 這裡用 `ast` 靜態掃描，不實際 import hook 模組（hook 可能有副作用）。
-之後 T-14 的 doctor 框架建立後，把 `check_hook_imports` 註冊成一個檢查項。
+在 doctor 框架中以 `hooks.stdlib_only` 註冊（見 `builtin.py`）。
 """
 
 from __future__ import annotations
