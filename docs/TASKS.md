@@ -336,7 +336,7 @@ T-01、T-02、T-03（前置 spike 實測）、T-04、T-05（subtree 併入與既
 - 預估：M
 
 #### T-41: 蒸餾／收斂／校準管線服務端化
-- 分支已定（A13）：需要 `claude -p` 的校準留在主機排程，其餘階段視情況服務端化
+- 分支已定（A13）：蒸餾／收斂／校準都呼叫 `claude -p`，整條管線留在主機排程，改為經服務 HTTP 讀 episode、寫 concept
 - 範圍：蒸餾／收斂／校準在服務端跑；若 T-03 結論為「容器內可跑 `claude -p`」則管線容器化，否則留在主機排程
 - 涉及檔案：`pipeline/`（延續 spike `distill.py`／`consolidate.py`／`calibrate.py`／`pipeline.py`）
 - 依賴：T-03、T-26

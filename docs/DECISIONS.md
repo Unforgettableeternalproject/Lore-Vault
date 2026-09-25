@@ -16,7 +16,7 @@
 | A10 | embedding 沿用 Ollama bge-m3；LLM 用 OpenAI API（key 走 `.env`）；模型寫進設定檔 | 艾斯維爾 2026-09-25（D7） |
 | A11 | 以 Python 為主，專案自有 `.venv`（uv 管理）；hook 路徑只用標準庫。結構可參考上游 open-notebook（本機 `repos/Other/open-notebook`） | 艾斯維爾 2026-09-25（D2） |
 | A12 | 使用者 UI 最後處理，先完成契約（HTTP／MCP）與架構 | 艾斯維爾 2026-09-25 |
-| A13 | 管線中需要 headless `claude -p` 的階段（校準）留在主機排程，不進容器；登入憑證不進容器 | 艾斯維爾 2026-09-25，主機常駐不關機；依據 T-03 |
+| A13 | 管線中需要 headless `claude -p` 的階段留在主機排程，不進容器；登入憑證不進容器。實查 `pipeline.py`：蒸餾、收斂、校準**三階段都**經 `adjudicate_to_file` 呼叫 `claude -p`，故整條管線留在主機，改經服務 HTTP 讀寫 episode／concept | 艾斯維爾 2026-09-25，主機常駐不關機；依據 T-03 |
 | A14 | 摘要由 LLM 非同步產生，細節見 D4 | 艾斯維爾 2026-09-26 同意 D4 提案 |
 | A15 | MCP 為各機器本地 stdio 殼、轉發服務 HTTP，並負責快照拉取與不可達降級；服務自帶 bearer token（本機也需帶），遠端再經 Cloudflare Access service token；`pm-proxy.py` 退役。對外沿用 `pm` 與 `pm-api` 子網域 | 艾斯維爾 2026-09-26 同意 D8 提案（先試做） |
 
