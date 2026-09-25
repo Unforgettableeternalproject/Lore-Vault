@@ -14,6 +14,8 @@
 | A8 | 需要跨機器存取；服務以 docker image 常駐、隨系統啟動 | 艾斯維爾 2026-09-25（D3） |
 | A9 | 儲存：服務端 SQLite（WAL）+ FTS5（CJK bigram）+ BLOB 向量／NumPy 暴力比對；客戶端唯讀快照 | 艾斯維爾 2026-09-25 採用 D1 建議，依據見 D1 |
 | A10 | embedding 沿用 Ollama bge-m3；LLM 用 OpenAI API（key 走 `.env`）；模型寫進設定檔 | 艾斯維爾 2026-09-25（D7） |
+| A11 | 以 Python 為主，專案自有 `.venv`（uv 管理）；hook 路徑只用標準庫。結構可參考上游 open-notebook（本機 `repos/Other/open-notebook`） | 艾斯維爾 2026-09-25（D2） |
+| A12 | 使用者 UI 最後處理，先完成契約（HTTP／MCP）與架構 | 艾斯維爾 2026-09-25 |
 
 ## 待裁決
 
@@ -51,7 +53,7 @@
 
 ### D2 語言與環境
 
-建議 Python 3.12+，專案自有 `.venv`（uv 管理）。hook 路徑維持**只用標準庫**，讓系統 Python 可直接執行。
+**已定案（A11）。**
 
 ### D3 服務形態
 
