@@ -8,7 +8,7 @@ hook 由系統 Python 直接執行，不能 import `lore_vault.config`（它屬�
 | `LORE_VAULT_URL` | 服務位址（`http://` 或 `https://`） |
 | `LORE_VAULT_API_TOKEN` | bearer token（密鑰） |
 | `CF_ACCESS_CLIENT_ID`／`CF_ACCESS_CLIENT_SECRET` | 選用；兩個都有才帶 header（密鑰） |
-| `LORE_VAULT_PUSH_TIMEOUT` | 推送逾時秒數，預設 2 |
+| `LORE_VAULT_PUSH_TIMEOUT` | 推送逾時秒數，預設 1 |
 | `LORE_VAULT_PUSH_BATCH` | 單次最多推幾筆，預設 20 |
 | `LORE_VAULT_CONCEPT_SNAPSHOT` | PreToolUse 讀的快照；未設＝現行 concepts.json |
 
@@ -46,7 +46,7 @@ KNOWN_KEYS = frozenset(
     }
 )
 
-DEFAULT_PUSH_TIMEOUT = 2.0
+DEFAULT_PUSH_TIMEOUT = 1.0
 DEFAULT_PUSH_BATCH = 20
 
 

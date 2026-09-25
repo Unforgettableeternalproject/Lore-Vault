@@ -396,6 +396,9 @@ class Injection(Record):
     prompt_id: str | None
     injected: tuple[str, ...]
     prompt_fingerprint: str | None = None
+    # 重新編號遷移時標記：injected 中曾撞號的 id，無法判定當時是哪一條 concept。
+    # MISSING = 未經重新編號檢查（一般紀錄），輸出時省略。
+    ambiguous_ids: tuple[str, ...] | _Missing = MISSING
 
     REQUIRED: ClassVar[frozenset[str]] = frozenset(
         {"session_id", "prompt_id", "injected"}
@@ -409,6 +412,11 @@ class Injection(Record):
         if self.prompt_id is None and self.prompt_fingerprint is None:
             raise fail(o, "prompt_id", "prompt_id 與 prompt_fingerprint 至少要有一個")
         set_field(self, "injected", str_tuple(o, "injected", self.injected))
+        if self.ambiguous_ids is not MISSING:
+            ids = str_tuple(o, "ambiguous_ids", self.ambiguous_ids)
+            if not set(ids) <= set(self.injected):
+                raise fail(o, "ambiguous_ids", "必須是 injected 的子集")
+            set_field(self, "ambiguous_ids", ids)
 
 
 for _cls in (Vault, Note, ToolCount, Episode, SourceTurn, Concept, Injection):

@@ -15,7 +15,10 @@ from lore_vault.storage import imports as storage_imports
 from lore_vault.storage import ingest_checks as storage_ingest
 
 from .backup_check import backup_recent
-from .concept_snapshot_check import concept_snapshot_age
+from .concept_snapshot_check import (
+    concept_snapshot_age,
+    concept_snapshot_path_agreement,
+)
 from .framework import Check, CheckResult, CheckSkipped, DoctorContext, Registry
 from .hook_imports import DEFAULT_HOOKS_DIR, DEFAULT_SPIKE_DIR, check_hook_imports
 from .snapshot_check import snapshot_age, snapshot_schema
@@ -271,6 +274,14 @@ def default_registry() -> Registry:
             "concept_snapshot",
             concept_snapshot_age,
             "PreToolUse 用的 concept 快照與 manifest 一致且在年齡門檻內",
+        )
+    )
+    registry.add(
+        Check(
+            "concept_snapshot.path_agreement",
+            "concept_snapshot",
+            concept_snapshot_path_agreement,
+            "client.env 的 LORE_VAULT_CONCEPT_SNAPSHOT 與 MCP 快照路徑指向同一檔",
         )
     )
     return registry

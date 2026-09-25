@@ -450,3 +450,71 @@ def test_doctor_cli_flags(tmp_path, capsys):
     by_name = {c["name"]: c for c in report["checks"]}
     assert by_name["spool.pending"]["status"] == "warn"
     assert by_name["spool.pending"]["counts"]["pending"] == 1
+
+
+# ── doctor：hook 與 MCP 的 concept 快照路徑一致 ─────────────────────
+
+
+def _snapshot_env(path: Path, snapshot: Path | None) -> Path:
+    lines = ["LORE_VAULT_URL=http://127.0.0.1:1", f"LORE_VAULT_API_TOKEN={TOKEN}"]
+    if snapshot is not None:
+        lines.append(f"LORE_VAULT_CONCEPT_SNAPSHOT={snapshot}")
+    path.write_text("\n".join(lines) + "\n", "utf-8")
+    return path
+
+
+def _agreement(settings: dict):
+    report = _doctor(settings, ["concept_snapshot"])
+    return _outcome(report, "concept_snapshot.path_agreement")
+
+
+def test_doctor_concept_snapshot_paths_must_agree(tmp_path):
+    shared = tmp_path / "snap" / "concepts.json"
+    env = _snapshot_env(tmp_path / "client.env", shared)
+
+    same = _agreement(
+        {"client_env": str(env), "mcp_concept_snapshot_path": str(shared)}
+    )
+    assert same.status is Status.PASS
+
+    # 同一檔的不同寫法（相對段、大小寫在 Windows 上）仍視為同檔
+    alias = tmp_path / "snap" / ".." / "snap" / "concepts.json"
+    assert (
+        _agreement(
+            {"client_env": str(env), "mcp_concept_snapshot_path": str(alias)}
+        ).status
+        is Status.PASS
+    )
+
+    other = tmp_path / "mcp" / "concepts.json"
+    diff = _agreement({"client_env": str(env), "mcp_concept_snapshot_path": str(other)})
+    assert diff.status is Status.FAIL
+    assert any(str(other) in d for d in diff.details)
+
+
+def test_doctor_concept_snapshot_paths_derive_from_config(tmp_path):
+    """未直接給 MCP 路徑時由設定推導（與殼相同）：
+    未設 concept_snapshot_path 就用 snapshot_dir。"""
+    snap_dir = tmp_path / "snap"
+    env = _snapshot_env(tmp_path / "client.env", tmp_path / "elsewhere.json")
+    config = tmp_path / "lore-vault.toml"
+    config.write_text(f"[mcp]\nsnapshot_dir = '{snap_dir.as_posix()}'\n", "utf-8")
+    settings = {"client_env": str(env), "config": str(config), "environ": {}}
+    assert _agreement(settings).status is Status.FAIL
+
+    _snapshot_env(env, snap_dir / "concepts.json")
+    assert _agreement(settings).status is Status.PASS
+
+
+def test_doctor_concept_snapshot_paths_skipped_when_either_side_unset(tmp_path):
+    env_unset = _snapshot_env(tmp_path / "a.env", None)
+    assert (
+        _agreement(
+            {"client_env": str(env_unset), "mcp_concept_snapshot_path": "x.json"}
+        ).status
+        is Status.SKIPPED
+    )
+    env = _snapshot_env(tmp_path / "b.env", tmp_path / "s.json")
+    no_mcp = {"client_env": str(env), "config": None, "environ": {}}
+    assert _agreement(no_mcp).status is Status.SKIPPED
+    assert _agreement({}).status is Status.SKIPPED

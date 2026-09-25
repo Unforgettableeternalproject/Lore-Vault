@@ -123,7 +123,10 @@ def load_injections(path: Path = INJECTION_LOG) -> dict[tuple[str, str], list[st
                 else:
                     continue
                 # 同一輪可能被注入多次（一輪會改好幾個檔案，每次 PreToolUse 都召回一批），
-                # 累積而不是覆蓋——漏掉任何一條都會讓「這輪看過什麼」失真
+                # 累積而不是覆蓋——漏掉任何一條都會讓「這輪看過什麼」失真。
+                # 帶 `ambiguous_ids` 的紀錄（renumber_concepts 標的：當時的 id 撞號，
+                # 分不出注入的是哪一條）**照樣收**：這輪確實被影響過，丟掉它就會
+                # 把污染的輪次當成乾淨語料。歧義只影響「注入的是哪條」，不影響「有沒有被注入」
                 merged = found.setdefault(key, [])
                 for concept_id in record.get("injected") or []:
                     if concept_id not in merged:

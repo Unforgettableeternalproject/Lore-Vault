@@ -2,7 +2,8 @@
 [--embedding-dim N] [--backup-dir DIR] [--backup-max-age-hours H]
 [--snapshot-dir DIR] [--snapshot-max-age-hours H] [--spool-dir DIR] [--client-env FILE]
 [--spool-warn-age-hours H] [--spool-fail-age-hours H] [--concept-snapshot FILE]
-[--concept-snapshot-max-age-hours H]` 的進入點。
+[--concept-snapshot-max-age-hours H] [--mcp-concept-snapshot-path FILE] [--config FILE]`
+的進入點。
 
 `--db` 以唯讀開啟（不建檔、不遷移），放進 context 資源 `"db"`；
 沒給時 storage 類檢查記為 skipped。
@@ -110,6 +111,13 @@ def main(
         default=None,
         help="concept 快照年齡門檻（小時，預設 24）",
     )
+    parser.add_argument(
+        "--mcp-concept-snapshot-path",
+        help="MCP 殼寫入的 concept 快照（未給則由設定推導；路徑一致性對帳用）",
+    )
+    parser.add_argument(
+        "--config", help="Lore Vault 設定檔（未給則依 LORE_VAULT_CONFIG）"
+    )
     args = parser.parse_args(argv)
 
     out = stdout if stdout is not None else sys.stdout
@@ -141,6 +149,8 @@ def main(
             "spool_fail_age_hours": args.spool_fail_age_hours,
             "concept_snapshot": args.concept_snapshot,
             "concept_snapshot_max_age_hours": args.concept_snapshot_max_age_hours,
+            "mcp_concept_snapshot_path": args.mcp_concept_snapshot_path,
+            "config": args.config,
         }
         settings.update({k: v for k, v in optional.items() if v is not None})
         if args.db:

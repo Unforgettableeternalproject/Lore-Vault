@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).parent))
+from concept_ids import IdAllocator, concept_lock, save_high_water  # noqa: E402
 from hook_stop import DEFAULT_EPISODE_DIR, load_deduped  # noqa: E402
 from transcript import ORIGIN_HUMAN, file_key, file_keys  # noqa: E402
 
@@ -481,16 +482,45 @@ def ingest(result_path: Path, concept_path: Path, task_path: Path,
     tasks = {t["id"]: t for t in json.loads(task_path.read_text(encoding="utf-8"))["tasks"]}
     print(f"[distill] 讀入 {len(sources)} 個結果檔、{len(entries)} 組判定", file=sys.stderr)
 
+    # 讀池子 → 配號 → 寫回整段持鎖：兩個蒸餾同時收料時，
+    # 否則會各自讀到同一個最大號而發出同一個 id
+    watermark = watermark_path or DEFAULT_WATERMARK_PATH
+    with concept_lock(concept_path):
+        concepts, processed, unmatched = _ingest_locked(
+            entries, tasks, concept_path, watermark, append=append)
+
+    kinds: dict[str, int] = {}
+    for c in concepts:
+        kinds[c.get("kind") or "?"] = kinds.get(c.get("kind") or "?", 0) + 1
+    print(f"[distill] 收回 {len(concepts)} 條 concept（去重後）→ {concept_path}", file=sys.stderr)
+    print(f"  kind 分布: {kinds}", file=sys.stderr)
+    print(f"  已蒸餾組數 {len(processed)} 寫入 watermark → {watermark}", file=sys.stderr)
+    if unmatched:
+        print(f"  ⚠ {unmatched} 組結果在 tasks 檔裡找不到對應的 id——"
+              f"結果檔與 tasks 檔可能不同批", file=sys.stderr)
+    return 0
+
+
+def _ingest_locked(entries: list[dict[str, Any]], tasks: dict[str, Any],
+                   concept_path: Path, watermark: Path, *,
+                   append: bool) -> tuple[list[dict[str, Any]], set[str], int]:
+    """ingest 在 concept 鎖內的部分：讀既有池子、配號、寫回 concepts 與 watermark。"""
     concepts: list[dict[str, Any]] = []
     seen_statements: set[str] = set()
     # 已處理過的 task id，含空手的組——它們也花過判斷成本，不該被重跑
     processed: set[str] = set()
     unmatched = 0
 
+    existing: list[dict[str, Any]] = []
+    if concept_path.exists():
+        existing = json.loads(concept_path.read_text(encoding="utf-8"))
+    # 全量模式也從歷來最大號往上配：被覆寫掉的舊檔 id 可能還留在注入紀錄與服務端
+    ids = IdAllocator(concept_path, existing)
+
     if append and concept_path.exists():
         # 增量收回：接在既有 concept 之後，並把既有的陳述納入去重比對，
         # 否則同一件事會在每次增量各進一條
-        concepts = json.loads(concept_path.read_text(encoding="utf-8"))
+        concepts = existing
         seen_statements = {statement_key(c.get("statement")) for c in concepts}
         print(f"[distill] 增量模式：既有 {len(concepts)} 條", file=sys.stderr)
 
@@ -511,7 +541,8 @@ def ingest(result_path: Path, concept_path: Path, task_path: Path,
                 continue
             seen_statements.add(key)
             concepts.append({
-                "id": f"c-{len(concepts):03d}",
+                # 歷來最大號 + 1，刪除後永不重用——見 concept_ids
+                "id": ids.next(),
                 "statement": statement,
                 "kind": concept.get("kind"),
                 # None 代表跨專案通用，三條注入路徑都會放行。
@@ -539,21 +570,12 @@ def ingest(result_path: Path, concept_path: Path, task_path: Path,
                 "probe_result": None,
             })
 
+    # 先推高水位再寫池子：中途失敗只會留下空號，不會讓已發出的號碼被重發
+    save_high_water(concept_path, ids.last)
     concept_path.write_text(json.dumps(concepts, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    watermark = watermark_path or DEFAULT_WATERMARK_PATH
     save_watermark(watermark, load_watermark(watermark) | processed)
-
-    kinds: dict[str, int] = {}
-    for c in concepts:
-        kinds[c.get("kind") or "?"] = kinds.get(c.get("kind") or "?", 0) + 1
-    print(f"[distill] 收回 {len(concepts)} 條 concept（去重後）→ {concept_path}", file=sys.stderr)
-    print(f"  kind 分布: {kinds}", file=sys.stderr)
-    print(f"  已蒸餾組數 {len(processed)} 寫入 watermark → {watermark}", file=sys.stderr)
-    if unmatched:
-        print(f"  ⚠ {unmatched} 組結果在 tasks 檔裡找不到對應的 id——"
-              f"結果檔與 tasks 檔可能不同批", file=sys.stderr)
-    return 0
+    return concepts, processed, unmatched
 
 
 def show(task_path: Path, spec: str) -> int:

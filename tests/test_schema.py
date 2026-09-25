@@ -469,3 +469,17 @@ def test_validation_is_load_bearing(monkeypatch):
     # 還原後全部恢復報錯
     with pytest.raises(SchemaError):
         Note.from_dict(note_dict(vault=""))
+
+
+def test_injection_ambiguous_ids_round_trip_and_subset():
+    from lore_vault.schema import Injection, SchemaError
+
+    base = {"session_id": "s", "prompt_id": "p", "injected": ["c-001", "c-002"]}
+    plain = Injection.from_dict(base)
+    assert "ambiguous_ids" not in plain.to_dict()
+    marked = Injection.from_dict({**base, "ambiguous_ids": ["c-002"]})
+    assert marked.to_dict()["ambiguous_ids"] == ["c-002"]
+    import pytest
+
+    with pytest.raises(SchemaError):
+        Injection.from_dict({**base, "ambiguous_ids": ["c-999"]})

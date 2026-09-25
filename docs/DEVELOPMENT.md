@@ -288,7 +288,7 @@ KEY=VALUE、只用標準庫解析；行程環境變數中同名鍵優先。
 | `LORE_VAULT_URL` | 服務位址（本機 `http://127.0.0.1:5056`，遠端 `https://pm-api...`） |
 | `LORE_VAULT_API_TOKEN` | bearer token |
 | `CF_ACCESS_CLIENT_ID`／`CF_ACCESS_CLIENT_SECRET` | 遠端用；只有一個時視為設定錯誤、不推送 |
-| `LORE_VAULT_PUSH_TIMEOUT`／`LORE_VAULT_PUSH_BATCH` | 推送逾時（預設 2 秒）／單次最多筆數（預設 20） |
+| `LORE_VAULT_PUSH_TIMEOUT`／`LORE_VAULT_PUSH_BATCH` | 推送逾時（預設 1 秒）／單次最多筆數（預設 20） |
 | `LORE_VAULT_CONCEPT_SNAPSHOT` | PreToolUse 改讀的 concept 快照檔；未設＝沿用現行 `concepts.json` |
 
 未設 URL 或 token＝推送未設定：Stop hook 只寫 spool。密鑰不進 log、例外訊息、spool 與 `push_state.json`。
@@ -326,6 +326,7 @@ KEY=VALUE、只用標準庫解析；行程環境變數中同名鍵優先。
 - `spool.pending`：最舊一筆待推送超過 fail 門檻為 fail、超過 warn 門檻為 warn；推送未設定為 warn
 - `spool.conflicts`：`rejected/` 非零為 fail（服務拒收或本地檔損毀，需人工處理）
 - `concept_snapshot.age`：從未拉取、manifest 與檔案 sha256 不一致、格式不符、超過年齡（以 `checked_at` 計）為 fail
+- `concept_snapshot.path_agreement`：client.env 的 `LORE_VAULT_CONCEPT_SNAPSHOT` 與 MCP 快照路徑（`--mcp-concept-snapshot-path`，未給則由設定推導 `mcp.concept_snapshot_path`／`<snapshot_dir>/concepts.json`）不是同一檔為 fail；任一邊未設為 skipped
 
 ### 主機管線轉接（骨架，預設關閉）
 

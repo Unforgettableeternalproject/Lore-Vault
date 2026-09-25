@@ -37,6 +37,13 @@
 7. **對照組兩支**帶過來，README 延續「為什麼不掛」的說明，避免日後誤掛。
 8. **headless `claude -p` 的四個坑**（pipeline 裁決用）：吃全域 CLAUDE.md 與 SessionStart 注入、寫不進 `~/.claude/`、Bash allowlist 認字面路徑、prompt 走 stdin。
 
+### concept id 撞號（2026-09-26 發現）
+
+- 根因：`distill.py` 以 `c-{len(concepts):03d}` 發號，收斂刪除後再新增會撞到仍存在的號碼。已改為高水位 sidecar（`<stem>.id_state.json`）+ 檔案鎖，號碼永不重用
+- 現行資料：1538 筆只有 1273 個唯一 id（251 組重複）；197 筆注入紀錄中 75 筆指向撞號 id
+- 切換時以 `agent_memory_spike/renumber_concepts.py` 重新編號（保留每組第一筆原號，其餘從 c-1809 起），注入紀錄加 `ambiguous_ids` 標記；sidecar 一併改名為 `concepts.id_state.json`。乾跑已驗證新檔 1538 筆經 `POST /v1/concepts` 全數建立、零衝突
+- 無法回溯：已刪除的舊號若曾被重發，當時的注入紀錄指向另一條記憶，現行檔案看不出來
+
 ### 建議順序
 
 1. subtree 併入 → 在本 repo 跑通 134 項測試（未改任何路徑）
