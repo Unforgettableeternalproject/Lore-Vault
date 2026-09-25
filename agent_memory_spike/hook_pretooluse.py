@@ -33,6 +33,14 @@ top-3 + overlap>=2 → precision 43.5%、情境命中率 62%）。
 
     python hook_pretooluse.py --stats        # 看池子裡有多少條可注入
     python hook_pretooluse.py --dry-run ...  # 算出要注入什麼但不寫紀錄
+
+## 記憶來源（階段 8，T-40）
+
+預設讀現行的 ``concepts.json``（``paths.CONCEPT_PATH``）。``client.env`` 設了
+``LORE_VAULT_CONCEPT_SNAPSHOT`` 就改讀那個檔——由 MCP 殼從服務 ``GET /v1/concepts/export``
+定期同步下來的本地快照，格式與 ``concepts.json`` 相同。**不走網路**：每次編輯都跑的 hook
+只讀本地檔。快照缺失或損毀時不注入、stderr 記一行降級，不拋例外。
+挑選邏輯（``load_pool`` 的校準門檻、``select`` 的 scorer）兩個來源完全相同。
 """
 
 from __future__ import annotations
@@ -45,6 +53,10 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).parent))
+# repo 的 src/：只 import 純標準庫的 lore_vault.hooks（doctor hooks.stdlib_only 守著）
+_SRC_DIR = str(Path(__file__).resolve().parents[1] / "src")
+if _SRC_DIR not in sys.path:
+    sys.path.insert(1, _SRC_DIR)
 from transcript import (  # noqa: E402
     INJECTION_LOG,
     TOUCH_LOG,
@@ -59,7 +71,7 @@ from transcript import (  # noqa: E402
     repo_root_name,
 )
 
-from paths import CONCEPT_PATH, WORK_DIR  # noqa: E402
+from paths import CLIENT_ENV_PATH, CONCEPT_PATH, WORK_DIR  # noqa: E402
 
 # 每個 session 一個節流檔，理由同 episode 的每 session 一檔：
 # 不同 session 落在不同檔案，天然沒有跨程序寫入衝突
@@ -117,7 +129,37 @@ def load_pool(path: Path = CONCEPT_PATH) -> list[dict[str, Any]]:
         concepts = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return []
+    return calibrated(concepts)
+
+
+def calibrated(concepts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """校準門檻：``load_pool`` 與快照來源共用同一道，兩邊選出來的池子才會相同。"""
     return [c for c in concepts if (c.get("surprisal") or 0) >= PASS_THRESHOLD]
+
+
+def concept_source() -> tuple[Path, bool]:
+    """(要讀的檔, 是否為服務快照)。client.env 設了 LORE_VAULT_CONCEPT_SNAPSHOT 才讀快照。"""
+    from lore_vault.hooks.client_env import load_client_settings
+
+    snapshot = load_client_settings(CLIENT_ENV_PATH).concept_snapshot
+    if snapshot is not None:
+        return snapshot, True
+    # 在呼叫時才讀模組層的 CONCEPT_PATH：測試會 monkeypatch 它
+    return CONCEPT_PATH, False
+
+
+def current_pool() -> list[dict[str, Any]]:
+    """注入用的池子。快照缺失／損毀 → 空池（不注入）＋ stderr 一行降級紀錄。"""
+    path, is_snapshot = concept_source()
+    if not is_snapshot:
+        return load_pool(path)
+    from lore_vault.hooks.concept_snapshot import load_for_injection
+
+    concepts, degraded = load_for_injection(path)
+    if degraded:
+        print(f"[inject] 降級：{degraded}（{path}），本次不注入", file=sys.stderr)
+        return []
+    return calibrated(concepts)
 
 
 def split_anchors(anchors: list[str]) -> tuple[list[str], list[str]]:
@@ -296,8 +338,9 @@ def run(payload: dict[str, Any], *, dry_run: bool = False) -> dict[str, Any] | N
     symbols.update(s.lower() for s in extract_symbols(payload.get("tool_input") or {}))
 
     already = set(state.get("injected") or [])
-    # 顯式帶入路徑：預設參數在函式定義時就綁定了，那樣測試換不掉它
-    picked = select(load_pool(CONCEPT_PATH), touched, symbols, scope, already)
+    # 來源在呼叫時決定（current_pool 讀模組層 CONCEPT_PATH 或 client.env 指定的快照）：
+    # 預設參數在函式定義時就綁定了，那樣測試換不掉它
+    picked = select(current_pool(), touched, symbols, scope, already)
     new_state = {"injected": sorted(already), "prompt_id": prompt_id,
                  "touched": sorted(touched), "symbols": sorted(symbols)}
     if not picked:

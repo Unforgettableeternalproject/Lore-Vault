@@ -23,6 +23,10 @@ from lore_vault.config import (
     load_config,
 )
 
+# concept 快照在快照目錄下的預設檔名
+# （與 spike 的 concepts.json 不同目錄，不會覆蓋現行檔）
+CONCEPT_SNAPSHOT_NAME = "concepts.json"
+
 
 @dataclass(frozen=True)
 class ShellSettings:
@@ -33,6 +37,8 @@ class ShellSettings:
     snapshot_dir: Path | None = None
     snapshot_interval: float = 900.0
     snapshot_max_age_hours: float = 24.0
+    # PreToolUse 讀的 concept 快照檔（T-40）；None＝不拉
+    concept_snapshot_path: Path | None = None
     # 殼啟動時是否在背景拉快照（測試關掉以便手動控制）
     snapshot_on_start: bool = True
 
@@ -52,12 +58,18 @@ def load_shell_settings(
         Path(mcp.cf_access_env_file).expanduser() if mcp.cf_access_env_file else None
     )
     cf = cf_access_credentials(cf_env_file=cf_file, env_file=env_file, environ=environ)
+    snapshot_dir = Path(mcp.snapshot_dir).expanduser() if mcp.snapshot_dir else None
+    if mcp.concept_snapshot_path:
+        concept_path: Path | None = Path(mcp.concept_snapshot_path).expanduser()
+    else:
+        concept_path = snapshot_dir / CONCEPT_SNAPSHOT_NAME if snapshot_dir else None
     return ShellSettings(
         base_url=mcp.base_url.rstrip("/"),
         token=token,
         cf_access=cf,
         timeout=mcp.timeout,
-        snapshot_dir=Path(mcp.snapshot_dir).expanduser() if mcp.snapshot_dir else None,
+        snapshot_dir=snapshot_dir,
         snapshot_interval=mcp.snapshot_interval,
         snapshot_max_age_hours=mcp.snapshot_max_age_hours,
+        concept_snapshot_path=concept_path,
     )

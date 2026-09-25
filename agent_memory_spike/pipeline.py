@@ -28,6 +28,16 @@ detach 之後失敗是靜默的、難追；而且剛結束工作時機器最忙�
     python pipeline.py --run --dry-run     # 印出要做什麼，不執行
     python pipeline.py --run               # 實跑（受 --max-groups 限制）
     python pipeline.py --run --stage distill   # 只跑一個階段
+
+## 服務轉接層（階段 8，骨架，預設關閉）
+
+A13：三個階段都要 `claude -p`，整條管線留在主機排程，改經服務 HTTP 讀 episode、寫 concept。
+這裡先提供轉接函式與兩個手動旗標，**不接進 STAGES、不改任何階段的判卷邏輯**：
+
+    python pipeline.py --pull-episodes OUT.jsonl [--since UTC]   # GET /v1/episodes（全部 vault）
+    python pipeline.py --push-concepts [--dry-run]               # POST /v1/concepts（upsert + 刪除）
+
+服務位址與 token 讀 `client.env`（同 Stop hook，見 `paths.CLIENT_ENV_PATH`）。
 """
 
 from __future__ import annotations
@@ -50,6 +60,7 @@ HERE = Path(__file__).parent
 from paths import PIPELINE_LOCK_PATH as LOCK_PATH  # noqa: E402
 from paths import PIPELINE_STATE_PATH as STATE_PATH  # noqa: E402
 from paths import WORK_DIR  # noqa: E402
+from paths import CLIENT_ENV_PATH, CONCEPT_PATH  # noqa: E402
 
 # 鎖過期時間。程序被 kill 掉時鎖不會被清掉，沒有這個機制管線會永遠停擺；
 # 訂在 6 小時是因為單輪最慢的階段（校準）實測也遠短於此
@@ -522,6 +533,108 @@ def show_status() -> int:
     return 0
 
 
+# --- 服務轉接層（階段 8 骨架；預設關閉）----------------------------------------
+# 契約見 src/lore_vault/api/spike.py。失敗拋 lore_vault.hooks.service.ServiceError 子類，
+# 呼叫端決定要不要停；這裡不吞例外——管線是排程跑的，失敗要看得見。
+
+SERVICE_TIMEOUT = 60.0
+EPISODE_PAGE_SIZE = 500
+CONCEPT_BATCH_SIZE = 500  # 服務端上限 1000（concepts + delete 合計）
+PUSHED_IDS_KEY = "service_pushed_concept_ids"
+
+
+def service_settings():  # noqa: ANN201 — lore_vault.hooks.client_env.ClientSettings
+    from lore_vault.hooks.client_env import load_client_settings
+
+    settings = load_client_settings(CLIENT_ENV_PATH)
+    if not settings.push_configured:
+        raise RuntimeError(settings.describe())
+    return settings
+
+
+def fetch_episodes(settings, *, vault: str = "*", since: str | None = None,  # noqa: ANN001
+                   page_size: int = EPISODE_PAGE_SIZE, max_pages: int = 10_000,
+                   timeout: float = SERVICE_TIMEOUT) -> list[dict[str, Any]]:
+    """`GET /v1/episodes` 依 cursor 讀到底。每筆是 Episode dict 另加寫入時凍結的 `vault`。"""
+    from lore_vault.hooks.service import ServiceRejected, request_json
+
+    items: list[dict[str, Any]] = []
+    cursor: str | None = None
+    for _ in range(max_pages):
+        query = {"vault": vault, "limit": str(page_size)}
+        if since:
+            query["since"] = since
+        if cursor:
+            query["cursor"] = cursor
+        page = request_json(settings, "GET", "/v1/episodes", timeout=timeout, query=query)
+        if not isinstance(page, dict) or not isinstance(page.get("items"), list):
+            raise ServiceRejected("GET /v1/episodes 回應格式不符（缺 items）")
+        items.extend(page["items"])
+        cursor = page.get("next_cursor")
+        if not cursor:
+            return items
+    raise RuntimeError(f"episode 分頁超過 {max_pages} 頁仍未讀完")
+
+
+def diff_concept_ids(previous: list[str], current: list[dict[str, Any]]) -> list[str]:
+    """上次推過、這次池子裡已不存在的 id（收斂刪掉的）→ 要送 delete 的清單。"""
+    now_ids = {c.get("id") for c in current}
+    return sorted(i for i in previous if i not in now_ids)
+
+
+def push_concept_changes(settings, concepts: list[dict[str, Any]],  # noqa: ANN001
+                         delete: list[str], *, vault: str = "*",
+                         batch_size: int = CONCEPT_BATCH_SIZE,
+                         timeout: float = SERVICE_TIMEOUT) -> list[dict[str, Any]]:
+    """`POST /v1/concepts`（mode=upsert）。每批在服務端是整批成功或整批不寫；
+    超過 `batch_size` 會拆批，拆開的批次之間不保證原子。回傳各批回應。"""
+    from lore_vault.hooks.service import request_json
+
+    responses: list[dict[str, Any]] = []
+    ops: list[tuple[str, Any]] = [("c", c) for c in concepts] + [("d", d) for d in delete]
+    for start in range(0, max(len(ops), 1), batch_size):
+        chunk = ops[start:start + batch_size]
+        if not chunk:
+            break
+        body = {
+            "vault": vault,
+            "mode": "upsert",
+            "concepts": [x for kind, x in chunk if kind == "c"],
+            "delete": [x for kind, x in chunk if kind == "d"],
+        }
+        responses.append(request_json(settings, "POST", "/v1/concepts", body, timeout=timeout))
+    return responses
+
+
+def pull_episodes_command(out: Path, since: str | None) -> int:
+    items = fetch_episodes(service_settings(), since=since)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_suffix(out.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as fh:
+        for item in items:
+            fh.write(json.dumps(item, ensure_ascii=False) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, out)
+    print(f"[pipeline] 從服務讀到 {len(items)} 筆 episode → {out}", file=sys.stderr)
+    return 0
+
+
+def push_concepts_command(*, dry_run: bool, concept_path: Path = CONCEPT_PATH) -> int:
+    concepts = json.loads(concept_path.read_text(encoding="utf-8"))
+    state = load_state()
+    delete = diff_concept_ids(list(state.get(PUSHED_IDS_KEY) or []), concepts)
+    print(f"[pipeline] 推送 concept：upsert {len(concepts)}、刪除 {len(delete)}", file=sys.stderr)
+    if dry_run:
+        return 0
+    responses = push_concept_changes(service_settings(), concepts, delete)
+    state[PUSHED_IDS_KEY] = sorted(c["id"] for c in concepts if c.get("id"))
+    save_state(state)
+    applied = sum(1 for r in responses if isinstance(r, dict) and r.get("applied"))
+    print(f"[pipeline] 服務端套用 {applied}/{len(responses)} 批", file=sys.stderr)
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Phase 3 自動化管線")
     parser.add_argument("--run", action="store_true", help="執行管線")
@@ -530,6 +643,12 @@ def main() -> int:
     parser.add_argument("--stage", type=str, help="只跑指定階段")
     parser.add_argument("--max-groups", type=int, default=DEFAULT_MAX_GROUPS,
                         help="每次執行的組數上限（成本封頂）")
+    parser.add_argument("--pull-episodes", type=Path, metavar="OUT",
+                        help="（服務轉接骨架）從服務讀全部 episode 寫成 JSONL")
+    parser.add_argument("--since", type=str, default=None,
+                        help="搭配 --pull-episodes：只讀 started_at >= since（UTC）")
+    parser.add_argument("--push-concepts", action="store_true",
+                        help="（服務轉接骨架）把 concepts.json 推到服務（upsert + 刪除）")
     args = parser.parse_args()
 
     for stream in (sys.stdout, sys.stderr):
@@ -537,6 +656,11 @@ def main() -> int:
             stream.reconfigure(encoding="utf-8")
         except (AttributeError, OSError):
             pass
+
+    if args.pull_episodes:
+        return pull_episodes_command(args.pull_episodes, args.since)
+    if args.push_concepts:
+        return push_concepts_command(dry_run=args.dry_run)
 
     if args.status or not args.run:
         return show_status()

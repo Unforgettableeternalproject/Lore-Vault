@@ -73,3 +73,6 @@ snapshot_interval = 900.0
 snapshot_max_age_hours = 24.0
 # Cloudflare Access service token 檔（格式同 ~/.cloudflared/pm-token.env）；本機直連不需要
 # cf_access_env_file = "~/.cloudflared/pm-token.env"
+# PreToolUse 讀的 concept 快照檔（GET /v1/concepts/export）；未設定時為 <snapshot_dir>/concepts.json
+# hook 端以 client.env 的 LORE_VAULT_CONCEPT_SNAPSHOT 指向同一個檔才會改讀它
+# concept_snapshot_path = "C:/path/to/lore-vault/snapshot/concepts.json"

@@ -35,6 +35,7 @@ from pydantic import Field
 from lore_vault import notes as notes_service
 from lore_vault.binding import resolve_binding
 from lore_vault.doctor import DoctorContext, default_registry
+from lore_vault.hooks import concept_snapshot
 from lore_vault.notes import InvalidCursor, NoChanges
 from lore_vault.notes.service import DEFAULT_GET_BUDGET, DEFAULT_LIST_LIMIT
 from lore_vault.recall import UnsupportedKind
@@ -56,7 +57,7 @@ from lore_vault.storage.vaults import ALL_VAULTS, get_vault
 
 from .client import ServiceClient, ServiceError, ServiceUnreachable
 from .settings import ShellSettings
-from .snapshot import pull_snapshot
+from .snapshot import pull_concepts, pull_snapshot
 
 logger = logging.getLogger("lore_vault.mcp")
 
@@ -185,6 +186,8 @@ class Shell:
         self._now = now
         self._pull_lock = anyio.Lock()
         self.last_pull_error: str | None = None
+        self._concept_lock = anyio.Lock()
+        self.last_concept_pull_error: str | None = None
 
     async def aclose(self) -> None:
         await self.client.aclose()
@@ -214,9 +217,34 @@ class Shell:
         )
         return manifest
 
+    async def refresh_concepts(self) -> concept_snapshot.ConceptManifest | None:
+        """拉一次 concept 快照（PreToolUse 用）；失敗只記 log，
+        不影響工具與 notes 快照。"""
+        path = self.settings.concept_snapshot_path
+        if path is None:
+            return None
+        async with self._concept_lock:
+            try:
+                manifest = await pull_concepts(self.client, path)
+            except (
+                ServiceUnreachable,
+                ServiceError,
+                concept_snapshot.ConceptSnapshotError,
+                OSError,
+            ) as exc:
+                self.last_concept_pull_error = _describe(exc)
+                logger.warning(
+                    "拉取 concept 快照失敗：%s", self.last_concept_pull_error
+                )
+                return None
+        self.last_concept_pull_error = None
+        logger.info("concept 快照已更新：%d 條", manifest.concepts)
+        return manifest
+
     async def snapshot_loop(self) -> None:
         while True:
             await self.refresh_snapshot()
+            await self.refresh_concepts()
             if self.settings.snapshot_interval <= 0:
                 return
             await anyio.sleep(self.settings.snapshot_interval)
@@ -480,6 +508,12 @@ class Shell:
                 str(self.settings.snapshot_dir) if self.settings.snapshot_dir else None
             ),
             "last_pull_error": self.last_pull_error,
+            "concept_snapshot_path": (
+                str(self.settings.concept_snapshot_path)
+                if self.settings.concept_snapshot_path
+                else None
+            ),
+            "last_concept_pull_error": self.last_concept_pull_error,
             "doctor": report.to_dict(),
         }
 
@@ -519,7 +553,9 @@ def build_server(shell: Shell) -> MCPServer:
     async def lifespan(server: MCPServer) -> AsyncIterator[None]:
         try:
             async with anyio.create_task_group() as tg:
-                if shell.settings.snapshot_on_start and shell.settings.snapshot_dir:
+                if shell.settings.snapshot_on_start and (
+                    shell.settings.snapshot_dir or shell.settings.concept_snapshot_path
+                ):
                     tg.start_soon(shell.snapshot_loop)
                 try:
                     yield None

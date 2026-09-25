@@ -82,11 +82,27 @@ def vault_clause(scope: VaultScope, column: str) -> tuple[str, tuple[str, ...]]:
 # ── vault 本身的讀寫 ────────────────────────────────────────────────
 
 
-def upsert_vault(conn: sqlite3.Connection, vault: Vault) -> None:
+ORIGIN_MANUAL = "manual"
+ORIGIN_EPISODE = "episode"
+ORIGIN_PIPELINE = "pipeline"
+VAULT_ORIGINS = frozenset({ORIGIN_MANUAL, ORIGIN_EPISODE, ORIGIN_PIPELINE})
+AUTO_ORIGINS = frozenset({ORIGIN_EPISODE, ORIGIN_PIPELINE})
+
+
+def upsert_vault(
+    conn: sqlite3.Connection,
+    vault: Vault,
+    *,
+    origin: str = ORIGIN_MANUAL,
+    origin_detail: str | None = None,
+) -> None:
     """新增或更新 vault 與其別名（別名以傳入的為準，整批替換）。
 
     別名不可撞到其他 vault 的 key 或別名；key 也不可撞到其他 vault 的別名。
+    `origin`／`origin_detail` 只在新建時寫入；更新既有 vault 不改來源標記。
     """
+    if origin not in VAULT_ORIGINS:
+        raise ValueError(f"origin 必須是 {sorted(VAULT_ORIGINS)}，得到 {origin!r}")
     with transaction(conn):
         owner = conn.execute(
             "SELECT vault FROM vault_aliases WHERE alias = ?", (vault.key,)
@@ -103,17 +119,51 @@ def upsert_vault(conn: sqlite3.Connection, vault: Vault) -> None:
                 raise VaultConflict(f"別名 {alias!r} 已屬於 vault {owner[0]!r}")
         conn.execute(
             """
-            INSERT INTO vaults (key, display, kind, created) VALUES (?, ?, ?, ?)
+            INSERT INTO vaults (key, display, kind, created, origin, origin_detail)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT (key) DO UPDATE SET display = excluded.display,
                                             kind = excluded.kind
             """,
-            (vault.key, vault.display, vault.kind, utc_now()),
+            (vault.key, vault.display, vault.kind, utc_now(), origin, origin_detail),
         )
         conn.execute("DELETE FROM vault_aliases WHERE vault = ?", (vault.key,))
         conn.executemany(
             "INSERT INTO vault_aliases (alias, vault) VALUES (?, ?)",
             [(alias, vault.key) for alias in vault.aliases],
         )
+
+
+def ensure_vault(
+    conn: sqlite3.Connection,
+    vault: Vault,
+    *,
+    origin: str,
+    origin_detail: str | None = None,
+) -> tuple[str, bool]:
+    """vault（key 或別名）已存在就回傳現行 key；不存在才以 `origin` 建立。
+
+    回傳 (現行 key, 是否新建)。只給明確允許自動建立的路徑用（episode 收料、
+    管線的 `global`）；notes 的 write 仍然不自動建（拼錯字不可產生幽靈範圍）。
+    """
+    if origin not in AUTO_ORIGINS:
+        raise ValueError(f"自動建立的 origin 必須是 {sorted(AUTO_ORIGINS)}")
+    with transaction(conn):
+        try:
+            return resolve_write(conn, vault.key), False
+        except UnknownVault:
+            pass
+        upsert_vault(conn, vault, origin=origin, origin_detail=origin_detail)
+        return vault.key, True
+
+
+def vault_origins(conn: sqlite3.Connection) -> list[tuple[str, str, str | None]]:
+    """所有 vault 的 (key, origin, origin_detail)，依 key 排序（doctor 用）。"""
+    return [
+        (r["key"], r["origin"], r["origin_detail"])
+        for r in conn.execute(
+            "SELECT key, origin, origin_detail FROM vaults ORDER BY key"
+        )
+    ]
 
 
 def _row_to_vault(conn: sqlite3.Connection, row: sqlite3.Row) -> Vault:

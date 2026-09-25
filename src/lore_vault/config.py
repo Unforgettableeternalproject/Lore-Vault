@@ -141,6 +141,10 @@ class McpConfig:
     snapshot_max_age_hours: float = 24.0
     # Cloudflare Access service token 的 env 檔（格式同 ~/.cloudflared/pm-token.env）
     cf_access_env_file: str | None = None
+    # PreToolUse 讀的 concept 快照檔（T-40）；未設定時為
+    # `<snapshot_dir>/concepts.json`，snapshot_dir 也未設定就不拉。
+    # 刻意不預設成 spike 現行的 concepts.json（切換時再改指向）
+    concept_snapshot_path: str | None = None
 
 
 @dataclass(frozen=True)

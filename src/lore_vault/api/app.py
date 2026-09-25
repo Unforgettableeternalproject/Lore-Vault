@@ -18,6 +18,7 @@ from .auth import BearerAuthMiddleware
 from .errors import install_error_handlers
 from .routes import router
 from .settings import ApiSettings, load_settings, validate_token
+from .spike import router as spike_router
 from .state import AppState
 
 
@@ -57,6 +58,7 @@ def create_app(
     app.state.lore = state
     install_error_handlers(app)
     app.include_router(router)
+    app.include_router(spike_router)
 
     @app.get("/healthz", include_in_schema=False)
     def healthz() -> JSONResponse:

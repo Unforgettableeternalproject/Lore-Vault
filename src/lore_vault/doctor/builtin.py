@@ -12,23 +12,36 @@ from pathlib import Path
 from lore_vault.storage import checks as storage_checks
 from lore_vault.storage import enrichment as storage_enrichment
 from lore_vault.storage import imports as storage_imports
+from lore_vault.storage import ingest_checks as storage_ingest
 
 from .backup_check import backup_recent
+from .concept_snapshot_check import concept_snapshot_age
 from .framework import Check, CheckResult, CheckSkipped, DoctorContext, Registry
-from .hook_imports import DEFAULT_HOOKS_DIR, check_hook_imports
+from .hook_imports import DEFAULT_HOOKS_DIR, DEFAULT_SPIKE_DIR, check_hook_imports
 from .snapshot_check import snapshot_age, snapshot_schema
+from .spool_check import spool_conflicts, spool_pending
 
 
 def hooks_stdlib_only(ctx: DoctorContext) -> CheckResult:
-    """hook 路徑只 import 標準庫與 `lore_vault.hooks`。
+    """hook 路徑只 import 標準庫與允許的 `lore_vault` 子套件。
 
-    設定鍵 `hooks_dir` 可覆寫掃描目錄。
+    設定鍵 `hooks_dir` 可覆寫掃描目錄；`spike_dir` 指定 spike hook 目錄
+    （明確指定卻不存在為 fail）。未指定時用 repo 內的 `agent_memory_spike/`，
+    不存在（如 docker 映像）則只掃 `hooks_dir`。
     """
     hooks_dir = Path(ctx.settings.get("hooks_dir", DEFAULT_HOOKS_DIR))
-    report = check_hook_imports(hooks_dir)
+    spike_setting = ctx.settings.get("spike_dir")
+    if spike_setting is not None:
+        spike_dir: Path | None = Path(spike_setting)
+    else:
+        spike_dir = DEFAULT_SPIKE_DIR if DEFAULT_SPIKE_DIR.is_dir() else None
+    report = check_hook_imports(hooks_dir, spike_dir)
     counts = {"scanned": len(report.scanned), "violations": len(report.violations)}
     if report.ok:
-        return CheckResult.ok(f"掃描 {len(report.scanned)} 個檔案", counts=counts)
+        scope = "" if spike_dir is not None else "（無 spike 目錄，只掃 hooks）"
+        return CheckResult.ok(
+            f"掃描 {len(report.scanned)} 個檔案{scope}", counts=counts
+        )
     return CheckResult.fail(
         f"{len(report.violations)} 筆非標準庫 import",
         details=[f"{v.path}:{v.lineno} {v.module}" for v in report.violations],
@@ -117,6 +130,35 @@ def import_on_reconcile(ctx: DoctorContext) -> CheckResult:
         raise CheckSkipped(str(exc)) from None
 
 
+# ── spike 接入對帳（資源 "db"；設定 "now"、"episode_ingest_max_age_hours"（預設 48）、
+#    "auto_vault_warn_above"（未設＝只報數））──
+
+
+def episodes_ingest_recency(ctx: DoctorContext) -> CheckResult:
+    now = ctx.settings.get("now") or datetime.now(UTC)
+    max_age = float(
+        ctx.settings.get(
+            "episode_ingest_max_age_hours",
+            storage_ingest.DEFAULT_EPISODE_INGEST_MAX_AGE_HOURS,
+        )
+    )
+    return _to_result(
+        storage_ingest.episode_ingest_recency(
+            ctx.require("db"), now=now, max_age_hours=max_age
+        )
+    )
+
+
+def vaults_auto_created(ctx: DoctorContext) -> CheckResult:
+    warn_above = ctx.settings.get("auto_vault_warn_above")
+    return _to_result(
+        storage_ingest.auto_created_vaults(
+            ctx.require("db"),
+            warn_above=None if warn_above is None else int(warn_above),
+        )
+    )
+
+
 def default_registry() -> Registry:
     registry = Registry()
     registry.add(
@@ -193,4 +235,42 @@ def default_registry() -> Registry:
         ),
     ):
         registry.add(Check(name, "snapshot", func, description))
+    registry.add(
+        Check(
+            "episodes.ingest_recency",
+            "episodes",
+            episodes_ingest_recency,
+            "各機器 episode 筆數與最近收料時間（超過門檻或從未收料為 warn）",
+        )
+    )
+    registry.add(
+        Check(
+            "vaults.auto_created",
+            "vaults",
+            vaults_auto_created,
+            "episode 收料／管線自動建立的 vault 數與來源（供審視）",
+        )
+    )
+    for name, func, description in (
+        (
+            "spool.pending",
+            spool_pending,
+            "episode spool 未推送筆數與最舊一筆年齡"
+            "（超過門檻 warn／fail；推送未設定為 warn）",
+        ),
+        (
+            "spool.conflicts",
+            spool_conflicts,
+            "服務拒收（conflict／invalid）或損毀而留在 spool 的筆數（非零為 fail）",
+        ),
+    ):
+        registry.add(Check(name, "spool", func, description))
+    registry.add(
+        Check(
+            "concept_snapshot.age",
+            "concept_snapshot",
+            concept_snapshot_age,
+            "PreToolUse 用的 concept 快照與 manifest 一致且在年齡門檻內",
+        )
+    )
     return registry

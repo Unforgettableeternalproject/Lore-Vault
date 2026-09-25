@@ -37,3 +37,8 @@ INJECT_STATE_DIR = WORK_DIR / "inject_state"
 LOG_DIR = WORK_DIR / "logs"
 PIPELINE_STATE_PATH = WORK_DIR / "pipeline_state.json"
 PIPELINE_LOCK_PATH = WORK_DIR / "pipeline.lock"
+
+# 階段 8（spike 接入服務）：hook 端客戶端設定（服務位址、token、concept 快照路徑），
+# 可用 LORE_VAULT_CLIENT_ENV 改位置。episode spool 在 episode 目錄的同層 `spool/`
+# （預設即 WORK_DIR / "spool"），佈局見 src/lore_vault/hooks/spool.py
+CLIENT_ENV_PATH = WORK_DIR / "client.env"

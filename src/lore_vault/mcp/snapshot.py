@@ -12,6 +12,7 @@ import os
 import tempfile
 from pathlib import Path
 
+from lore_vault.hooks import concept_snapshot
 from lore_vault.storage import snapshot as storage_snapshot
 
 from .client import ServiceClient
@@ -69,3 +70,29 @@ async def pull_snapshot(
     finally:
         # install 成功時暫存檔已被 rename 走；其餘情況刪掉半檔
         partial.unlink(missing_ok=True)
+
+
+def _etag_value(headers: dict[str, str]) -> str | None:
+    value = headers.get("etag")
+    if not value:
+        return None
+    value = value.strip()
+    if value.startswith("W/"):
+        value = value[2:]
+    return value.strip('"') or None
+
+
+async def pull_concepts(
+    client: ServiceClient, path: Path
+) -> concept_snapshot.ConceptManifest:
+    """拉一次 concept 快照（T-40）：帶本地 sha256 當 If-None-Match；304 只更新
+    `checked_at`；200 驗證（JSON 陣列、sha256 與 ETag 相符）後原子替換。
+    失敗拋例外（`ServiceUnreachable`／`ServiceError`／`ConceptSnapshotError`／
+    `OSError`），舊快照不動。"""
+    local = concept_snapshot.local_etag(path)
+    status, body, headers = await client.get_concepts_export(if_none_match=local)
+    if status == 304:
+        if local is None:
+            raise concept_snapshot.ConceptSnapshotError("未帶 ETag 卻收到 304")
+        return concept_snapshot.mark_checked(path)
+    return concept_snapshot.install(path, body, expected_sha256=_etag_value(headers))

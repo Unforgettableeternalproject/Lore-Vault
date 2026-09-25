@@ -90,6 +90,16 @@ side-car 紀錄：`{session_id, prompt_id, injected: [concept_id]}`，不含原�
 
 HTTP 契約為 `POST /v1/<工具名>` + JSON body，另有 `POST /v1/vaults` 建 vault（write 不自動建）；所有 `/v1` 需 bearer token，`GET /healthz` 公開。`GET /v1/snapshot` 提供降級用唯讀快照（只含 vaults、notes、FTS，不含向量與 episode／concept／injection）。
 
+spike 接入端點（階段 8，同樣需 bearer；每筆 body 項目 = schema dict 另加 `vault`）：
+
+| 端點 | 契約 |
+|---|---|
+| `POST /v1/episodes` | `{"episodes": [Episode + vault]}`，每批 ≤ 200（超過 400）。回 `{accepted, duplicates, conflicts, invalid, created_vaults, results: [{index, key: [session_id, prompt_id, turn_index], status, vault?, error?}]}`；status：`accepted`／`duplicate`（同鍵同內容，成功）／`conflict`（同鍵不同內容或不同 vault，不覆寫，客戶端留 spool）／`invalid`。vault 不存在時自動建立（kind=repo、display=episode.repo 或 key、`origin='episode'`＋觸發來源）；只有這條路徑自動建 |
+| `GET /v1/episodes` | query `vault`（必填，跨 vault 明示 `*`）、`since`（started_at ≥）、`session_id`、`cursor`、`limit`（預設 200、上限 1000）。依 (started_at, seq) 由舊到新；回 `{items: [Episode + vault], next_cursor}` |
+| `GET /v1/concepts/export` | query `vault` 預設明示 `*`（scope 由客戶端 scorer 判斷），可指定單一 vault。body 與 spike `concepts.json` 同格式（頂層 list、欄位與順序同 spike；`usability` 只在有值時出現）；依寫入順序排序（不依 id）。scope 缺欄位的 concept 不匯出（header `X-Lore-Vault-Excluded-Missing-Scope`）。ETag = body sha256，`If-None-Match` 符合回 304 |
+| `POST /v1/concepts` | `{"vault": key 或 "*", "mode": "upsert"／"create"／"update", "concepts": [Concept + vault?], "delete": [id]}`，合計 ≤ 1000。**整批成功或整批不寫**：任一筆 invalid／conflict 回 400／409（`error.code = batch_rejected`，附逐筆結果）。歸屬：既有 id 沿用原 vault（凍結）；新 id 且 `scope=null` → `global`（kind=global，不存在時自動建、`origin='pipeline'`）；新 id 且 scope 為 repo 名 → 每筆 vault 或批次單一 vault。scope 必須出現。新增排在匯出最後；`delete` 不存在回 `not_found`（冪等） |
+| `POST /v1/injections` | `{"injections": [Injection + vault + recorded?]}`，每批 ≤ 500。status：`accepted`／`duplicate`（同 vault 內容全等的重送，不看 recorded）／`unknown_vault`（不自動建，稍後重送）／`invalid` |
+
 MCP 為各機器本地 stdio 殼（`python -m lore_vault.mcp`，A15）：服務連線失敗、逾時或 502／503／504、Cloudflare 521–524／530 時，`recall`／`get`／`list`／`vault_resolve` 改讀本地快照、只走 lexical 並標 `degraded`；`write`／`update` 直接失敗不排佇列；401／403／其他 4xx 與 500 直接報錯不降級。
 
 目標是讓 agent 用最少的上下文拿到足夠決策的資訊。工具數量刻意壓在個位數。

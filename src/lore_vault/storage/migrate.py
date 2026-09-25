@@ -182,8 +182,32 @@ def _v3(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+# spike 接入（階段 8）：
+# - vaults.origin：vault 從哪條路徑建立。'manual' = 明確建立（POST /v1/vaults、匯入、
+#   upsert_vault），'episode' = episode 收料時自動建，'pipeline' = 管線寫通用 concept 時
+#   自動建 `global`。origin_detail 是自動建立當下的觸發來源（JSON），供日後人工審視。
+#   既有列一律視為 'manual'。
+# - concepts.ord：匯出順序。spike 的 concepts.json 是有序清單，注入 scorer 以穩定排序
+#   取前 K 筆，同分時靠清單順序決勝——順序是行為的一部分，不可用 id 排序頂替。
+#   既有列以 rowid（寫入順序）回填。
+# - episodes(machine, recorded)：doctor 依機器查最近收料時間。
+_V4_STATEMENTS: tuple[str, ...] = (
+    "ALTER TABLE vaults ADD COLUMN origin TEXT NOT NULL DEFAULT 'manual'",
+    "ALTER TABLE vaults ADD COLUMN origin_detail TEXT",
+    "ALTER TABLE concepts ADD COLUMN ord INTEGER NOT NULL DEFAULT 0",
+    "UPDATE concepts SET ord = rowid",
+    "CREATE INDEX concepts_ord ON concepts(ord)",
+    "CREATE INDEX episodes_machine_recorded ON episodes(machine, recorded)",
+)
+
+
+def _v4(conn: sqlite3.Connection) -> None:
+    for statement in _V4_STATEMENTS:
+        conn.execute(statement)
+
+
 # 有序遷移：索引 i 的函式把版本從 i 升到 i+1。只能往後加，不可改動已發佈的項目。
-MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (_v1, _v2, _v3)
+MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (_v1, _v2, _v3, _v4)
 
 SCHEMA_VERSION = len(MIGRATIONS)
 

@@ -29,6 +29,18 @@ Stop hook 觸發時，該輪的記錄**不保證已經完整寫進 transcript**�
     python hook_stop.py --sync <transcript_path>      # 手動同步一份 transcript
     python hook_stop.py --repair <transcript_path>    # 重建，修復殘缺紀錄
     python hook_stop.py --dry-run ...                 # 只解析不寫入
+    python hook_stop.py --push                        # 把本地 spool 推到服務（手動／排程）
+    python hook_stop.py --push --dry-run              # 只看 spool 與推送設定狀態
+
+## 推送到服務（階段 8，T-38／T-39）
+
+新寫入的 episode 另外寫一份到 episode 目錄同層的 ``spool/``（每筆一檔、原子寫入），
+附上寫入當下凍結的 ``machine``（``platform.node()``）與 ``vault``
+（``lore_vault.binding`` 依 ``repo_root`` 算）。原本的 ``episodes/`` jsonl 照寫（過渡期雙寫）。
+
+Stop hook 在寫完後推一批（短逾時、硬性時限、失敗只寫 stderr）；服務不可達後退避一段時間
+不再嘗試，避免每輪都付逾時。推送設定在 ``client.env``（見 ``paths.CLIENT_ENV_PATH``），
+未設定時只寫 spool。
 
 存儲：每個 session 一個 jsonl，append 寫入。
 不同 session 落在不同檔案，天然沒有跨程序寫入衝突。
@@ -44,7 +56,9 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -56,6 +70,12 @@ _T0 = time.perf_counter()
 # 放在 ~/.claude 底下則從根本上不可能被誤 commit。
 # 跨專案集中存放是刻意的——Phase 2 要驗證的正是跨專案一致性。
 sys.path.insert(0, str(Path(__file__).parent))
+# repo 的 src/：只 import 純標準庫的 lore_vault.hooks／binding／schema（doctor hooks.stdlib_only 守著），
+# 不依賴安裝，系統 Python 直接執行也找得到
+_SRC_DIR = str(Path(__file__).resolve().parents[1] / "src")
+if _SRC_DIR not in sys.path:
+    sys.path.insert(1, _SRC_DIR)
+from paths import CLIENT_ENV_PATH  # noqa: E402
 from paths import EPISODE_DIR as DEFAULT_EPISODE_DIR  # noqa: E402  路徑定義見 paths.py
 from transcript import (  # noqa: E402
     ORIGIN_HUMAN,
@@ -240,9 +260,45 @@ def rewrite_episodes(path: Path, episodes: list[dict[str, Any]]) -> None:
     os.replace(tmp, path)
 
 
+def spool_dir_for(episode_dir: Path) -> Path:
+    """spool 放在 episode 目錄同層（預設即 ``WORK_DIR / "spool"``），測試換 episode 目錄時跟著換。"""
+    return episode_dir.parent / "spool"
+
+
+def current_machine() -> str:
+    return platform.node() or "unknown"
+
+
+def spool_written(spool_dir: Path, episodes: list[dict[str, Any]]) -> int:
+    """把剛寫進 jsonl 的輪次另寫一份到 spool。``machine``／``vault`` 在這裡凍結。
+
+    失敗只寫 stderr、不拋例外：spool 壞掉不能連累原本的語料寫入。
+    """
+    if not episodes:
+        return 0
+    try:
+        from lore_vault.hooks import spool as lv_spool
+
+        cache: dict[str, str] = {}
+        return lv_spool.spool_episodes(
+            spool_dir,
+            episodes,
+            machine=current_machine(),
+            vault_for=lambda ep: lv_spool.derive_vault(ep.get("repo_root"), ep.get("repo"), cache),
+        )
+    except Exception as exc:  # noqa: BLE001 — hook 不可因 spool 失敗中斷
+        print(f"[spike] spool 寫入失敗（語料已寫入 jsonl）: {type(exc).__name__}: {exc}",
+              file=sys.stderr)
+        return 0
+
+
 def sync(transcript: Path, episode_dir: Path, session_id: str, *, dry_run: bool = False,
-         injections: dict[tuple[str, str], list[str]] | None = None) -> tuple[int, int]:
-    """增量同步：寫入所有已完成但尚未記錄的輪次。回傳 (寫入數, 跳過數)。"""
+         injections: dict[tuple[str, str], list[str]] | None = None,
+         spool: bool = True) -> tuple[int, int]:
+    """增量同步：寫入所有已完成但尚未記錄的輪次。回傳 (寫入數, 跳過數)。
+
+    ``spool`` 為真時，新寫入的輪次另寫一份到 ``spool_dir_for(episode_dir)`` 等待推送。
+    """
     episodes = completed_episodes(transcript, injections)
     if not episodes:
         return 0, 0
@@ -251,6 +307,7 @@ def sync(transcript: Path, episode_dir: Path, session_id: str, *, dry_run: bool 
     recorded = recorded_prompt_ids(path)
 
     written = skipped = 0
+    fresh: list[dict[str, Any]] = []
     for ep in episodes:
         if _key(ep) in recorded:
             skipped += 1
@@ -258,8 +315,68 @@ def sync(transcript: Path, episode_dir: Path, session_id: str, *, dry_run: bool 
         if not dry_run:
             append_episode(path, ep)
             recorded.add(_key(ep))
+            fresh.append(ep)
         written += 1
+    if spool and fresh:
+        spool_written(spool_dir_for(episode_dir), fresh)
     return written, skipped
+
+
+def load_client_settings():  # noqa: ANN201 — 回傳 lore_vault.hooks.client_env.ClientSettings
+    from lore_vault.hooks.client_env import load_client_settings as _load
+
+    return _load(CLIENT_ENV_PATH)
+
+
+def push_after_stop(spool_dir: Path, *, grace: float = 0.5) -> str:
+    """Stop hook 尾端推一批。硬性時限 = 推送逾時 + ``grace``：
+
+    ``urllib`` 的 timeout 管不到 DNS 解析，所以推送放在 daemon 執行緒、主執行緒最多等這麼久。
+    逾時就放手——檔案要等服務回 accepted／duplicate 才刪，放手最壞只是下次重送（duplicate）。
+    回傳一行摘要給 stderr；任何失敗都不拋例外。
+    """
+    try:
+        from lore_vault.hooks import spool as lv_spool
+
+        settings = load_client_settings()
+        if not settings.push_configured:
+            return "未推送：" + settings.describe()
+        box: dict[str, Any] = {}
+
+        def work() -> None:
+            try:
+                box["result"] = lv_spool.push_pending(spool_dir, settings)
+            except Exception as exc:  # noqa: BLE001
+                box["error"] = f"{type(exc).__name__}: {exc}"
+
+        worker = threading.Thread(target=work, name="spool-push", daemon=True)
+        worker.start()
+        worker.join(settings.push_timeout + grace)
+        if worker.is_alive():
+            return f"推送逾時（>{settings.push_timeout + grace:g}s），留待下次"
+        if "error" in box:
+            return f"推送失敗：{box['error']}"
+        return box["result"].summary()
+    except Exception as exc:  # noqa: BLE001
+        return f"推送失敗：{type(exc).__name__}: {exc}"
+
+
+def push_command(episode_dir: Path, *, dry_run: bool) -> int:
+    """``--push``：推到 spool 清空或失敗為止（忽略退避）。有推送錯誤時 exit 1。"""
+    from lore_vault.hooks import spool as lv_spool
+
+    spool_dir = spool_dir_for(episode_dir)
+    settings = load_client_settings()
+    stats = lv_spool.spool_stats(spool_dir)
+    age = f"，最舊 {stats.oldest_pending_age / 3600:.1f} 小時" if stats.oldest_pending_age else ""
+    print(f"[spool] {spool_dir}：待推送 {stats.pending}{age}、被拒收 {stats.rejected}",
+          file=sys.stderr)
+    print(f"[spool] {settings.describe()}", file=sys.stderr)
+    if dry_run:
+        return 0
+    result = lv_spool.push_all(spool_dir, settings)
+    print(f"[spool] {result.summary()}", file=sys.stderr)
+    return 1 if result.error else 0
 
 
 def repair(transcript: Path, episode_dir: Path, session_id: str,
@@ -764,6 +881,8 @@ def main() -> int:
     parser.add_argument("--episode-dir", type=Path, default=DEFAULT_EPISODE_DIR)
     parser.add_argument("--session-id", type=str, default=None)
     parser.add_argument("--dry-run", action="store_true", help="只解析不寫入")
+    parser.add_argument("--push", action="store_true",
+                        help="把本地 spool 推到服務（推到清空或失敗為止）")
     args = parser.parse_args()
 
     for stream in (sys.stdout, sys.stderr):
@@ -776,6 +895,9 @@ def main() -> int:
         if args.session_id:
             return args.session_id
         return transcript.stem  # transcript 檔名就是 session id
+
+    if args.push:
+        return push_command(args.episode_dir, dry_run=args.dry_run)
 
     if args.sync_all:
         return sync_all(args.episode_dir)
@@ -818,6 +940,9 @@ def main() -> int:
     session_id = payload.get("session_id") or transcript.stem
 
     written, skipped = sync(transcript, args.episode_dir, session_id, dry_run=args.dry_run)
+    if not args.dry_run:
+        # 每次都嘗試（含這輪沒寫新東西時）：否則服務恢復後 spool 要等下一次有新輪次才排得掉
+        print(f"[spool] {push_after_stop(spool_dir_for(args.episode_dir))}", file=sys.stderr)
     elapsed = (time.perf_counter() - _T0) * 1000
 
     if written:

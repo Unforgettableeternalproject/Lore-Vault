@@ -54,6 +54,11 @@ BEFORE = {
     "pipeline.LOCK_PATH": ".claude/agent-memory-spike/pipeline.lock",
     "pipeline.STATE_PATH": ".claude/agent-memory-spike/pipeline_state.json",
     "pipeline.WORK_DIR": ".claude/agent-memory-spike",
+    # 階段 8 新增（不是集中前就有的常數；新名稱在此登記）
+    "hook_pretooluse.CLIENT_ENV_PATH": ".claude/agent-memory-spike/client.env",
+    "hook_stop.CLIENT_ENV_PATH": ".claude/agent-memory-spike/client.env",
+    "pipeline.CLIENT_ENV_PATH": ".claude/agent-memory-spike/client.env",
+    "pipeline.CONCEPT_PATH": ".claude/agent-memory-spike/concepts.json",
     "retrieve.CONTROL_CONCEPT_PATH": ".claude/agent-memory-spike/control_concepts.json",
     "retrieve.DEFAULT_CONCEPT_PATH": ".claude/agent-memory-spike/concepts.json",
     "retrieve.DEFAULT_EPISODE_DIR": ".claude/agent-memory-spike/episodes",

@@ -1,6 +1,8 @@
 """`python -m lore_vault.doctor [--json] [--category NAME ...] [--db PATH]
 [--embedding-dim N] [--backup-dir DIR] [--backup-max-age-hours H]
-[--snapshot-dir DIR] [--snapshot-max-age-hours H]` 的進入點。
+[--snapshot-dir DIR] [--snapshot-max-age-hours H] [--spool-dir DIR] [--client-env FILE]
+[--spool-warn-age-hours H] [--spool-fail-age-hours H] [--concept-snapshot FILE]
+[--concept-snapshot-max-age-hours H]` 的進入點。
 
 `--db` 以唯讀開啟（不建檔、不遷移），放進 context 資源 `"db"`；
 沒給時 storage 類檢查記為 skipped。
@@ -81,6 +83,33 @@ def main(
         default=None,
         help="快照年齡門檻（小時，預設 24）",
     )
+    parser.add_argument(
+        "--spool-dir", help="hook 端 episode spool 目錄（spool 對帳用）"
+    )
+    parser.add_argument(
+        "--client-env", help="hook 端設定檔（預設為 spool 目錄上一層的 client.env）"
+    )
+    parser.add_argument(
+        "--spool-warn-age-hours",
+        type=float,
+        default=None,
+        help="最舊一筆待推送的 warn 門檻（小時，預設 1）",
+    )
+    parser.add_argument(
+        "--spool-fail-age-hours",
+        type=float,
+        default=None,
+        help="最舊一筆待推送的 fail 門檻（小時，預設 24）",
+    )
+    parser.add_argument(
+        "--concept-snapshot", help="PreToolUse 讀的 concept 快照檔（對帳用）"
+    )
+    parser.add_argument(
+        "--concept-snapshot-max-age-hours",
+        type=float,
+        default=None,
+        help="concept 快照年齡門檻（小時，預設 24）",
+    )
     args = parser.parse_args(argv)
 
     out = stdout if stdout is not None else sys.stdout
@@ -105,6 +134,15 @@ def main(
             settings["snapshot_dir"] = args.snapshot_dir
         if args.snapshot_max_age_hours is not None:
             settings["snapshot_max_age_hours"] = args.snapshot_max_age_hours
+        optional = {
+            "spool_dir": args.spool_dir,
+            "client_env": args.client_env,
+            "spool_warn_age_hours": args.spool_warn_age_hours,
+            "spool_fail_age_hours": args.spool_fail_age_hours,
+            "concept_snapshot": args.concept_snapshot,
+            "concept_snapshot_max_age_hours": args.concept_snapshot_max_age_hours,
+        }
+        settings.update({k: v for k, v in optional.items() if v is not None})
         if args.db:
             try:
                 db = connect_readonly(args.db)

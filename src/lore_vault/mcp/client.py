@@ -191,3 +191,28 @@ class ServiceClient:
         except httpx2.TransportError as exc:
             raise _unreachable_from_exc(exc) from None
         return 200, headers
+
+    async def get_concepts_export(
+        self, *, if_none_match: str | None = None
+    ) -> tuple[int, bytes, dict[str, str]]:
+        """`GET /v1/concepts/export`；回傳（狀態碼, 內容, header）。304 時內容為空。
+
+        內容是與 spike `concepts.json` 同格式的 JSON 陣列（數百條，直接讀進記憶體）。
+        """
+        headers_out = {}
+        if if_none_match:
+            headers_out["If-None-Match"] = f'"{if_none_match}"'
+        try:
+            response = await self._client.get(
+                "/v1/concepts/export", headers=headers_out
+            )
+        except httpx2.TransportError as exc:
+            raise _unreachable_from_exc(exc) from None
+        if response.status_code in UNREACHABLE_STATUSES:
+            raise _unreachable_from_status(response)
+        headers = {k.lower(): v for k, v in response.headers.items()}
+        if response.status_code == 304:
+            return 304, b"", headers
+        if response.status_code != 200:
+            raise _status_error(response)
+        return 200, response.content, headers

@@ -141,6 +141,7 @@ stdout 是 MCP 協定通道，log 一律寫 stderr（UTF-8）。設定錯誤時�
 | `mcp.snapshot_interval` | `LORE_VAULT_MCP_SNAPSHOT_INTERVAL` | 900 秒 | 定期拉快照；0＝只在啟動時拉 |
 | `mcp.snapshot_max_age_hours` | `LORE_VAULT_MCP_SNAPSHOT_MAX_AGE_HOURS` | 24 | doctor 快照年齡門檻 |
 | `mcp.cf_access_env_file` | `LORE_VAULT_MCP_CF_ACCESS_ENV_FILE` | 無 | CF Access token 檔（格式同 `~/.cloudflared/pm-token.env`） |
+| `mcp.concept_snapshot_path` | `LORE_VAULT_MCP_CONCEPT_SNAPSHOT_PATH` | `<snapshot_dir>/concepts.json` | PreToolUse 讀的 concept 快照（T-40）；snapshot_dir 也未設＝不拉 |
 
 密鑰只走環境變數或 `--env-file`，設定檔出現 token／secret 類的鍵會拒絕載入：
 
@@ -266,3 +267,68 @@ Git Bash 下帶容器內絕對路徑（如 `--db /data/lore.db`）會被 MSYS �
 doctor `import.on_reconcile`（分類 `import`）：清單有但 note 不在、或 `updated` 未推進而
 (title, body) 雜湊不符 → fail；各 vault 來源筆數 ≠ 清單 ≠ 實際 → fail；匯入後正常修改與新系統新增
 只計數。尚未匯入為 skipped。
+
+## spike 接入：hook 端 spool、推送與 concept 快照（T-38～T-40）
+
+hook 進入點（`agent_memory_spike/hook_stop.py`、`hook_pretooluse.py`）依自身位置把 repo 的 `src/`
+加進 `sys.path`，只 import 純標準庫的 `lore_vault.hooks`（`client_env`、`service`、`spool`、
+`concept_snapshot`）與 `lore_vault.binding`／`lore_vault.schema`。doctor `hooks.stdlib_only` 掃描範圍
+包含 spike `hook_*.py` 及其平鋪 import 的同目錄模組，並遞迴掃允許的子套件；docker 映像內沒有 spike
+目錄時只掃 `lore_vault/hooks`。
+
+**切換（改全域 hook、`~/.claude.json`、排程）是另一張需授權的卡，這裡的程式不會自己生效。**
+
+### hook 端設定 `client.env`
+
+預設 `~/.claude/agent-memory-spike/client.env`（`paths.CLIENT_ENV_PATH`；`LORE_VAULT_CLIENT_ENV` 可改位置），
+KEY=VALUE、只用標準庫解析；行程環境變數中同名鍵優先。
+
+| 鍵 | 說明 |
+|---|---|
+| `LORE_VAULT_URL` | 服務位址（本機 `http://127.0.0.1:5056`，遠端 `https://pm-api...`） |
+| `LORE_VAULT_API_TOKEN` | bearer token |
+| `CF_ACCESS_CLIENT_ID`／`CF_ACCESS_CLIENT_SECRET` | 遠端用；只有一個時視為設定錯誤、不推送 |
+| `LORE_VAULT_PUSH_TIMEOUT`／`LORE_VAULT_PUSH_BATCH` | 推送逾時（預設 2 秒）／單次最多筆數（預設 20） |
+| `LORE_VAULT_CONCEPT_SNAPSHOT` | PreToolUse 改讀的 concept 快照檔；未設＝沿用現行 `concepts.json` |
+
+未設 URL 或 token＝推送未設定：Stop hook 只寫 spool。密鑰不進 log、例外訊息、spool 與 `push_state.json`。
+
+### episode spool 與推送（T-38／T-39）
+
+- Stop hook 照舊寫 `episodes/<session>.jsonl`（過渡期雙寫），新輪次另寫 `spool/pending/<id>.json`
+  （每筆一檔、暫存檔 + `os.replace`），內容附寫入當下凍結的 `machine`（`platform.node()`）與
+  `vault`（`lore_vault.binding` 依 `repo_root`；解析不到退回 `folder/<repo>`，連 repo 都沒有為
+  `folder/unknown`）。推送、重播都原樣送出，不重算
+- Stop hook 尾端推一批（`POST /v1/episodes`）：accepted／duplicate 刪檔；conflict／invalid 移到
+  `spool/rejected/`；其他情況留在 pending。硬性時限＝逾時 + 0.5 秒（推送在 daemon 執行緒，DNS 卡住也不拖住
+  Stop）；失敗後退避 60 秒內不再嘗試
+- 手動／排程：`python agent_memory_spike/hook_stop.py --push`（推到清空或失敗為止，失敗 exit 1）；
+  `--push --dry-run` 只印待推送數與設定狀態
+- 量測（本機、系統 Python、每次 1 筆新輪次）：推送未設定時整支 Stop hook 比 HEAD 多約 100 ms
+  （binding／schema import 25–45 ms、`git remote` 約 35 ms、fsync 約 12 ms）；服務不可達時多一次逾時
+  （預設約 2–2.5 秒，之後 60 秒退避期內 < 1 ms）
+
+### concept 快照（T-40）
+
+- MCP 殼拉 notes 快照時一併拉 `GET /v1/concepts/export`（`If-None-Match` 帶本地 sha256，304 只更新
+  `checked_at`），驗證是 concept 物件陣列且 sha256 等於 ETag 後原子寫成 `mcp.concept_snapshot_path`
+  （同 `concepts.json` 格式）＋ `<檔名>.manifest.json`；失敗舊檔不動
+- PreToolUse 在 `client.env` 設了 `LORE_VAULT_CONCEPT_SNAPSHOT` 才改讀快照（切換時兩邊指到同一個檔）；
+  校準門檻與 scorer 不變（等價測試：`agent_memory_spike/test_service_bridge.py`）。快照缺失／損毀 →
+  不注入、stderr 一行 `[inject] 降級：...`，不拋例外
+
+### doctor
+
+`python -m lore_vault.doctor --category spool --spool-dir DIR [--client-env FILE]
+[--spool-warn-age-hours 1] [--spool-fail-age-hours 24]`、`--category concept_snapshot --concept-snapshot FILE
+[--concept-snapshot-max-age-hours 24]`。
+
+- `spool.pending`：最舊一筆待推送超過 fail 門檻為 fail、超過 warn 門檻為 warn；推送未設定為 warn
+- `spool.conflicts`：`rejected/` 非零為 fail（服務拒收或本地檔損毀，需人工處理）
+- `concept_snapshot.age`：從未拉取、manifest 與檔案 sha256 不一致、格式不符、超過年齡（以 `checked_at` 計）為 fail
+
+### 主機管線轉接（骨架，預設關閉）
+
+`pipeline.py --pull-episodes OUT.jsonl [--since UTC]`（`GET /v1/episodes`，全部 vault、依 cursor 讀到底）、
+`pipeline.py --push-concepts [--dry-run]`（`POST /v1/concepts` upsert；刪除＝上次推過、這次已不在池內的 id，
+記在 `pipeline_state.json`）。尚未接進 STAGES，三個判卷階段不變。

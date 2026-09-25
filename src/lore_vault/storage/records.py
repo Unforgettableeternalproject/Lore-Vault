@@ -18,7 +18,7 @@ from typing import Any
 from lore_vault.schema import MISSING, Concept, Episode, Injection
 
 from .db import transaction
-from .errors import DuplicateRecord
+from .errors import DuplicateRecord, NotFound
 from .timeutil import normalize_opt_utc, normalize_utc, utc_now
 from .vaults import resolve_read, resolve_write, vault_clause
 
@@ -100,6 +100,26 @@ def list_episodes(
     排序與 cursor 都用 `coalesce(started_at, '')`，避免 NULL 參與 tuple 比較時
     整列被靜默排除。
     """
+    rows, next_cursor = list_episode_rows(
+        conn, vault, session_id=session_id, since=since, limit=limit, cursor=cursor
+    )
+    return [episode for _, episode in rows], next_cursor
+
+
+def list_episode_rows(
+    conn: sqlite3.Connection,
+    vault: str,
+    *,
+    session_id: str | None = None,
+    since: str | None = None,
+    limit: int = 1000,
+    cursor: tuple[str, int] | None = None,
+) -> tuple[list[tuple[str, Episode]], tuple[str, int] | None]:
+    """同 `list_episodes`，但每筆附上寫入當下凍結的 vault key：`(vault, Episode)`。
+
+    Episode schema 沒有 vault 欄；跨 vault（`"*"`）讀取的管線要靠這個把
+    concept 寫回正確的 vault。
+    """
     scope = resolve_read(conn, vault)
     _check_limit(limit)
     clause, params = vault_clause(scope, "vault")
@@ -116,14 +136,15 @@ def list_episodes(
         args.extend(cursor)
     rows = conn.execute(
         f"""
-        SELECT data, coalesce(started_at, '') AS started_key, seq FROM episodes
+        SELECT vault, data, coalesce(started_at, '') AS started_key, seq
+        FROM episodes
         WHERE {" AND ".join(conditions)}
         ORDER BY started_key, seq LIMIT ?
         """,
         (*args, limit + 1),
     ).fetchall()
     page = rows[:limit]
-    items = [Episode.from_dict(json.loads(r["data"])) for r in page]
+    items = [(r["vault"], Episode.from_dict(json.loads(r["data"]))) for r in page]
     next_cursor = (
         (page[-1]["started_key"], int(page[-1]["seq"])) if len(rows) > limit else None
     )
@@ -151,32 +172,110 @@ def _scope_columns(concept: Concept) -> tuple[str, str | None]:
     return "repo", concept.scope  # type: ignore[return-value]
 
 
-def upsert_concept(conn: sqlite3.Connection, vault: str, concept: Concept) -> None:
-    """新增或覆蓋 concept（蒸餾／校準會回寫同一 id）。
+CONCEPT_CREATED = "created"
+CONCEPT_UPDATED = "updated"
+CONCEPT_UNCHANGED = "unchanged"
+
+UPSERT_MODES = frozenset({"upsert", "create", "update"})
+
+
+def concept_owner(conn: sqlite3.Connection, concept_id: str) -> str | None:
+    """concept id 目前所屬的 vault key；不存在回 None（id 是全域唯一鍵）。"""
+    row = conn.execute(
+        "SELECT vault FROM concepts WHERE id = ?", (concept_id,)
+    ).fetchone()
+    return None if row is None else row["vault"]
+
+
+def upsert_concept(
+    conn: sqlite3.Connection, vault: str, concept: Concept, *, mode: str = "upsert"
+) -> str:
+    """新增或覆蓋 concept（蒸餾／校準會回寫同一 id）；回傳 created／updated／unchanged。
 
     已存在於另一個 vault 的 id 拒絕覆蓋——歸屬凍結，不因重跑管線而搬家。
+    `mode="create"`：id 已存在即 `DuplicateRecord`（蒸餾新增用，防止 id 撞號時
+    默默蓋掉另一條記憶）；`mode="update"`：id 不存在即 `NotFound`（校準回寫用）。
+    新增的 concept 排在匯出順序最後；覆蓋不改變順序。
     """
+    if mode not in UPSERT_MODES:
+        raise ValueError(f"mode 必須是 {sorted(UPSERT_MODES)}，得到 {mode!r}")
     state, scope = _scope_columns(concept)
     data = _dumps(concept.to_dict())
     with transaction(conn):
         key = resolve_write(conn, vault)
-        owner = conn.execute(
-            "SELECT vault FROM concepts WHERE id = ?", (concept.id,)
+        existing = conn.execute(
+            "SELECT vault, data FROM concepts WHERE id = ?", (concept.id,)
         ).fetchone()
-        if owner is not None and owner["vault"] != key:
+        if existing is not None and existing["vault"] != key:
             raise DuplicateRecord(
-                f"concept {concept.id!r} 已屬於 vault {owner['vault']!r}"
+                f"concept {concept.id!r} 已屬於 vault {existing['vault']!r}"
             )
+        if existing is not None and mode == "create":
+            raise DuplicateRecord(f"concept {concept.id!r} 已存在（mode=create）")
+        if existing is None and mode == "update":
+            raise NotFound(f"concept {concept.id!r} 不存在（mode=update）")
+        if existing is not None:
+            if existing["data"] == data:
+                return CONCEPT_UNCHANGED
+            conn.execute(
+                """
+                UPDATE concepts SET kind = ?, scope_state = ?, scope = ?, data = ?,
+                                    updated = ?
+                WHERE id = ?
+                """,
+                (concept.kind, state, scope, data, utc_now(), concept.id),
+            )
+            return CONCEPT_UPDATED
         conn.execute(
             """
-            INSERT INTO concepts (id, vault, kind, scope_state, scope, data, updated)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (id) DO UPDATE SET kind = excluded.kind,
-                scope_state = excluded.scope_state, scope = excluded.scope,
-                data = excluded.data, updated = excluded.updated
+            INSERT INTO concepts (id, vault, kind, scope_state, scope, data, updated,
+                                  ord)
+            VALUES (?, ?, ?, ?, ?, ?, ?,
+                    (SELECT coalesce(max(ord), 0) + 1 FROM concepts))
             """,
             (concept.id, key, concept.kind, state, scope, data, utc_now()),
         )
+        return CONCEPT_CREATED
+
+
+def delete_concept(conn: sqlite3.Connection, vault: str, concept_id: str) -> bool:
+    """刪除 vault 內的 concept（收斂淘汰輸家）；vault 內沒有這個 id 回 False。
+
+    id 屬於另一個 vault 時拋 `DuplicateRecord`：不可跨 vault 刪，也不假裝「不存在」。
+    """
+    with transaction(conn):
+        key = resolve_write(conn, vault)
+        owner = concept_owner(conn, concept_id)
+        if owner is None:
+            return False
+        if owner != key:
+            raise DuplicateRecord(f"concept {concept_id!r} 屬於 vault {owner!r}")
+        conn.execute("DELETE FROM concepts WHERE id = ?", (concept_id,))
+        return True
+
+
+def export_concepts(conn: sqlite3.Connection, vault: str) -> tuple[list[Concept], int]:
+    """依匯出順序（ord）取出全部 concept，給注入快照用。
+
+    回傳 (concept 清單, 被排除的 scope 缺欄位筆數)。scope 缺欄位（MISSING）的
+    concept 不匯出：spike scorer 以 `concept.get("scope")` 判斷，缺鍵會被當成
+    None＝跨專案通用而放行到所有 repo（spike 的 scope 三態事故）。
+    """
+    scope = resolve_read(conn, vault)
+    clause, params = vault_clause(scope, "vault")
+    rows = conn.execute(
+        f"""
+        SELECT data, scope_state FROM concepts WHERE {clause}
+        ORDER BY ord, id
+        """,
+        params,
+    ).fetchall()
+    concepts = [
+        Concept.from_dict(json.loads(r["data"]))
+        for r in rows
+        if r["scope_state"] != "missing"
+    ]
+    return concepts, len(rows) - len(concepts)
 
 
 def get_concepts(
@@ -234,10 +333,36 @@ def insert_injection(
     injection: Injection,
     *,
     recorded: str | None = None,
-) -> None:
+) -> bool:
+    """寫入一筆注入 side-car；回傳是否實際寫入。
+
+    冪等：同 vault 已有內容完全相同的紀錄（session_id、prompt_id、
+    prompt_fingerprint、injected 全等）→ 視為重送，回傳 False、不寫入。
+    `recorded` 不參與比對（重送時客戶端帶的時間可能不同）。
+    代價：同一輪真的注入兩次完全相同的清單會被併成一筆——spike 的 hook
+    本來就以 session 狀態避免同一條重複注入，不影響「哪些輪次被影響過」的判斷。
+    """
     rec = normalize_utc(recorded) if recorded is not None else utc_now()
+    data = _dumps(injection.to_dict())
     with transaction(conn):
         key = resolve_write(conn, vault)
+        existing = conn.execute(
+            """
+            SELECT 1 FROM injections
+            WHERE vault = ? AND session_id = ? AND prompt_id IS ?
+              AND prompt_fingerprint IS ? AND data = ?
+            LIMIT 1
+            """,
+            (
+                key,
+                injection.session_id,
+                injection.prompt_id,
+                injection.prompt_fingerprint,
+                data,
+            ),
+        ).fetchone()
+        if existing is not None:
+            return False
         conn.execute(
             """
             INSERT INTO injections (vault, session_id, prompt_id, prompt_fingerprint,
@@ -249,10 +374,11 @@ def insert_injection(
                 injection.session_id,
                 injection.prompt_id,
                 injection.prompt_fingerprint,
-                _dumps(injection.to_dict()),
+                data,
                 rec,
             ),
         )
+    return True
 
 
 def list_injections(
