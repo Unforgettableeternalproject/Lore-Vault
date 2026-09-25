@@ -118,7 +118,23 @@ def test_embed_success_and_payload(http):
     assert embedder.embed("文字") == [0.1, 0.2, 0.3, 0.4]
     req = fake.requests[0]
     assert req["url"] == "http://localhost:11434/api/embed"
-    assert req["body"] == {"model": "bge-m3", "input": "文字"}
+    assert req["body"] == {"model": "bge-m3", "input": "文字", "keep_alive": "30m"}
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("10m", "10m"), (" 3600 ", 3600), ("-1", -1), ("0", 0)],
+)
+def test_embed_keep_alive_values(http, raw, expected):
+    fake = http.Transport(http.embed([0.1, 0.2, 0.3, 0.4]))
+    OllamaEmbedder(EmbeddingConfig(dim=4, keep_alive=raw), transport=fake).embed("x")
+    assert fake.requests[0]["body"]["keep_alive"] == expected
+
+
+def test_embed_empty_keep_alive_is_omitted(http):
+    fake = http.Transport(http.embed([0.1, 0.2, 0.3, 0.4]))
+    OllamaEmbedder(EmbeddingConfig(dim=4, keep_alive=""), transport=fake).embed("x")
+    assert "keep_alive" not in fake.requests[0]["body"]
 
 
 def test_embed_dimension_mismatch_is_failure(http):

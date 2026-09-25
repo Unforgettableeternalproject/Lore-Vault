@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from lore_vault.enrich.clients import EnrichTimeout, OllamaEmbedder
+from lore_vault.enrich.clients import EnrichTimeout, OllamaEmbedder, urllib_transport
 from lore_vault.enrich.command import build_worker
 from lore_vault.enrich.worker import EnrichWorker
 from lore_vault.recall.embedder import Embedder
@@ -21,6 +21,7 @@ from lore_vault.storage.snapshot import SnapshotCache
 
 from .background import BackgroundEnricher
 from .settings import ApiSettings
+from .warmup import EmbeddingWarmup
 
 
 class QueryEmbedder:
@@ -40,11 +41,24 @@ class QueryEmbedder:
             raise TimeoutError(str(exc)) from None
 
 
+def _transport(settings: ApiSettings):
+    return settings.embed_transport or urllib_transport
+
+
 def default_query_embedder(settings: ApiSettings) -> Embedder:
     cfg = settings.config.embedding
     return QueryEmbedder(
-        OllamaEmbedder(dataclasses.replace(cfg, timeout=cfg.query_timeout))
+        OllamaEmbedder(
+            dataclasses.replace(cfg, timeout=cfg.query_timeout),
+            transport=_transport(settings),
+        )
     )
+
+
+def default_warmup_embedder(settings: ApiSettings) -> Embedder:
+    """暖機用完整的 `embedding.timeout`：冷啟動可能超過 query_timeout，
+    用短逾時等於沒暖。"""
+    return OllamaEmbedder(settings.config.embedding, transport=_transport(settings))
 
 
 class AppState:
@@ -55,6 +69,10 @@ class AppState:
             settings.query_embedder
             if settings.query_embedder is not None
             else default_query_embedder(settings)
+        )
+        self.warmup = EmbeddingWarmup(
+            default_warmup_embedder(settings) if settings.run_warmup else None,
+            enabled=settings.run_warmup,
         )
         self.enricher: BackgroundEnricher | None = None
         if settings.run_worker:

@@ -21,6 +21,7 @@ from lore_vault.config import (
     load_config,
     openai_api_key,
 )
+from lore_vault.enrich.clients import Transport
 from lore_vault.enrich.worker import EnrichWorker
 from lore_vault.recall.embedder import Embedder
 
@@ -47,6 +48,10 @@ class ApiSettings:
     enrich_worker: bool | None = None
     # 關閉時等 worker 執行緒結束的秒數（進行中的 HTTP 呼叫可能還要一段時間）
     worker_join_timeout: float = 5.0
+    # Ollama HTTP transport（預設 urllib）；查詢 embedder 與暖機 embedder 都用它
+    embed_transport: Transport | None = None
+    # 覆寫 config.api.embedding_warmup
+    embedding_warmup: bool | None = None
     # 快照快取目錄（`GET /v1/snapshot`）；None = 啟動後在系統暫存目錄建一個，關閉時刪除
     snapshot_cache_dir: Path | None = None
 
@@ -55,6 +60,12 @@ class ApiSettings:
         if self.enrich_worker is not None:
             return self.enrich_worker
         return self.config.api.enrich_worker
+
+    @property
+    def run_warmup(self) -> bool:
+        if self.embedding_warmup is not None:
+            return self.embedding_warmup
+        return self.config.api.embedding_warmup
 
 
 def validate_token(token: Secret | None) -> Secret:

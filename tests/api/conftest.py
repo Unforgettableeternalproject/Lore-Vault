@@ -58,6 +58,8 @@ def make_settings(db_path: Path, **overrides) -> ApiSettings:
         "config": Config(embedding=EmbeddingConfig(dim=DIM)),
         "query_embedder": FakeEmbedder(),
         "enrich_worker": False,
+        # 預設不暖機：否則背景執行緒會去連本機 Ollama（暖機另有測試）
+        "embedding_warmup": False,
     }
     base.update(overrides)
     return ApiSettings(**base)

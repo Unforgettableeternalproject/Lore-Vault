@@ -58,6 +58,7 @@ def app(db_path):
             config=Config(embedding=EmbeddingConfig(dim=DIM)),
             query_embedder=NullEmbedder(),
             enrich_worker=False,
+            embedding_warmup=False,
         )
     )
 

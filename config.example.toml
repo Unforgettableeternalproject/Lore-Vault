@@ -19,6 +19,9 @@ timeout = 30.0
 query_timeout = 3.0
 # 每分鐘呼叫上限；0 = 不限
 rate_per_minute = 0
+# Ollama keep_alive：請求後模型留在記憶體多久（Go duration；純整數為秒數、負值＝常駐；
+# 空字串＝不送，用 Ollama 預設 5m）。冷啟動載入約 2 秒，逼近 query_timeout
+keep_alive = "30m"
 
 [summary]
 provider = "openai"
@@ -51,6 +54,9 @@ max_age_hours = 26.0
 [api]
 # HTTP 服務是否在同一程序內跑背景補算 worker（單一寫入程序，A9）；關閉時另跑 python -m lore_vault.enrich
 enrich_worker = true
+# 啟動後在背景做一次 embedding 暖機（用完整 embedding.timeout；不阻擋啟動、失敗只記 log，
+# 結果見 /v1/status 的 embedding.warmup）
+embedding_warmup = true
 
 [mcp]
 # 各機器本地 MCP 殼（python -m lore_vault.mcp）。token 與 CF 憑證是密鑰，不寫在這裡：

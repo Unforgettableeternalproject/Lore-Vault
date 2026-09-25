@@ -287,6 +287,8 @@ def status_(
         "checked_at": format_utc(now),
         "schema": schema,
         "vault": vault_info,
+        # 暖機失敗不算不健康：只代表剛啟動時 recall／查重可能降級
+        "embedding": {"warmup": state.warmup.status()},
         "enrich": {
             "worker": worker,
             "backlog": {

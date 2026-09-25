@@ -1,0 +1,113 @@
+"""管理指令（不提供 MCP 工具）：`python -m lore_vault.cli.admin <子指令>`。
+
+- `delete-note --vault KEY --id NOTE_ID`
+- `delete-vault --key KEY [--force]`：vault 內有 note 或其他紀錄時必須 `--force`
+
+預設 dry-run：只印將刪內容的 metadata（筆數、note id；不印標題與內文）。
+加 `--yes` 才真的刪，刪除在單一交易內完成（見 `lore_vault.storage.admin`）。
+資料庫路徑缺省走設定 `database.path`
+（容器內 `LORE_VAULT_CONFIG` 已指向 /data/lore.db）。
+不遷移資料庫：schema 版本與程式不符時拒絕執行（先讓服務啟動遷移）。
+
+exit code：0 成功（含 dry-run）；1 找不到、需要 --force、schema 不符等；2 參數錯誤。
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from collections.abc import Sequence
+from pathlib import Path
+from typing import TextIO
+
+from lore_vault.storage import admin
+from lore_vault.storage.db import connect
+from lore_vault.storage.errors import StorageError
+from lore_vault.storage.migrate import SCHEMA_VERSION, current_version
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="python -m lore_vault.cli.admin")
+    parser.add_argument("--db", help="資料庫路徑（覆寫 database.path）")
+    parser.add_argument("--config", help="設定檔（缺省走 LORE_VAULT_CONFIG）")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_note = sub.add_parser("delete-note", help="刪除單則 note")
+    p_note.add_argument("--vault", required=True, help="vault key 或別名")
+    p_note.add_argument("--id", required=True, dest="note_id", help="note id")
+    p_note.add_argument("--yes", action="store_true", help="真的刪除（預設 dry-run）")
+
+    p_vault = sub.add_parser("delete-vault", help="刪除整個 vault")
+    p_vault.add_argument("--key", required=True, help="vault 正式 key（不接受別名）")
+    p_vault.add_argument(
+        "--force", action="store_true", help="vault 內有 note 或其他紀錄時仍刪除"
+    )
+    p_vault.add_argument("--yes", action="store_true", help="真的刪除（預設 dry-run）")
+    return parser
+
+
+def _db_path(args: argparse.Namespace) -> str:
+    if args.db:
+        return args.db
+    from lore_vault.config import load_config
+
+    path = load_config(args.config).database.path
+    if not path:
+        raise StorageError("缺少資料庫路徑：用 --db 或設定 database.path")
+    return path
+
+
+def _existing(path: str) -> str:
+    # connect() 會建新檔；路徑打錯時不可默默建出空資料庫
+    if not Path(path).is_file():
+        raise StorageError(f"資料庫檔案不存在：{path}")
+    return path
+
+
+def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> int:
+    from lore_vault.config import ConfigError
+
+    out = stdout or sys.stdout
+    args = _parser().parse_args(argv)
+    try:
+        conn = connect(_existing(_db_path(args)), run_migrations=False)
+    except (ConfigError, StorageError, OSError) as exc:
+        print(f"錯誤：{exc}", file=sys.stderr)
+        return 1
+    try:
+        version = current_version(conn)
+        if version != SCHEMA_VERSION:
+            print(
+                f"錯誤：資料庫 schema 版本 {version} 與程式 {SCHEMA_VERSION} 不符；"
+                "先讓服務啟動完成遷移",
+                file=sys.stderr,
+            )
+            return 1
+        if args.command == "delete-note":
+            if args.yes:
+                plan = admin.delete_note(conn, args.vault, args.note_id)
+            else:
+                plan = admin.plan_note_deletion(conn, args.vault, args.note_id)
+        else:
+            if args.yes:
+                plan = admin.delete_vault(conn, args.key, force=args.force)
+            else:
+                plan = admin.plan_vault_deletion(conn, args.key)
+        result = {"mode": "deleted" if args.yes else "dry_run", **plan.to_dict()}
+        if not args.yes:
+            if plan.requires_force and not args.force:
+                result["hint"] = "vault 內有資料：確定要刪請加 --force --yes"
+            else:
+                result["hint"] = "確認無誤後加 --yes 執行"
+        out.write(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+        return 0
+    except StorageError as exc:
+        print(f"錯誤：{exc}", file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

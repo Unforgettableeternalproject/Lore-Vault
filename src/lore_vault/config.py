@@ -76,6 +76,10 @@ class EmbeddingConfig:
     query_timeout: float = 3.0
     # 每分鐘呼叫上限；0 = 不限
     rate_per_minute: int = 0
+    # Ollama `keep_alive`：請求後模型留在記憶體多久（Go duration，如 "30m"；
+    # 純整數視為秒數，負值＝常駐）。空字串＝不送，交給 Ollama 預設（5m）。
+    # 冷啟動載入約 2 秒，逼近 query_timeout，所以預設拉長避免閒置後被卸載。
+    keep_alive: str = "30m"
 
 
 @dataclass(frozen=True)
@@ -106,6 +110,9 @@ class WorkerConfig:
 class ApiConfig:
     # HTTP 服務是否在同一程序內以背景執行緒跑補算 worker（A9：單一寫入程序）
     enrich_worker: bool = True
+    # 服務啟動後在背景做一次 embedding 暖機（載入 Ollama 模型）；
+    # 不阻擋啟動、失敗只記 log
+    embedding_warmup: bool = True
 
 
 @dataclass(frozen=True)

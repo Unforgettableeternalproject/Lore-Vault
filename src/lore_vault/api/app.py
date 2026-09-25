@@ -1,6 +1,7 @@
 """HTTP 服務進入點：`uvicorn --factory lore_vault.api.app:create_app`。
 
-啟動順序（lifespan）：遷移資料庫 → 啟動背景補算 worker（可關閉）；
+啟動順序（lifespan）：遷移資料庫 → 背景 embedding 暖機（不等它完成）→
+啟動背景補算 worker（可關閉）；
 關閉時（uvicorn 收到 SIGTERM／SIGINT → lifespan 結束）停止 worker 並等它結束。
 token 缺少或不合格時 `create_app` 直接拋 `ConfigError`，服務不會啟動。
 """
@@ -34,6 +35,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         state.migrate()
+        state.warmup.start()
         if state.enricher is not None:
             state.enricher.start()
         try:

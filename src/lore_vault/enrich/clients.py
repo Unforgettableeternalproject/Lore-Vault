@@ -141,6 +141,18 @@ def _identity(text: str) -> str:
     return text
 
 
+def _keep_alive_value(raw: str) -> str | int | None:
+    """設定值 → Ollama `keep_alive`：空白＝不送；純整數（含負數）送秒數，
+    其餘原樣送 duration 字串。"""
+    text = raw.strip()
+    if not text:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        return text
+
+
 class OllamaEmbedder:
     """Ollama `/api/embed`；回傳向量先驗維度。"""
 
@@ -151,13 +163,17 @@ class OllamaEmbedder:
         self.model = config.model
         self.dim = config.dim
         self.timeout = config.timeout
+        self.keep_alive = _keep_alive_value(config.keep_alive)
         self._transport = transport
 
     def __repr__(self) -> str:
         return f"OllamaEmbedder(base_url={self.base_url!r}, model={self.model!r})"
 
     def embed(self, text: str) -> list[float]:
-        payload = json.dumps({"model": self.model, "input": text}).encode()
+        body: dict[str, Any] = {"model": self.model, "input": text}
+        if self.keep_alive is not None:
+            body["keep_alive"] = self.keep_alive
+        payload = json.dumps(body).encode()
         resp = self._transport(
             f"{self.base_url}/api/embed",
             payload,

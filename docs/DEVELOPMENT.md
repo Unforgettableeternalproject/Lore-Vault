@@ -109,6 +109,13 @@ uv run uvicorn --factory lore_vault.api.app:create_app --host 127.0.0.1 --port 8
   `/v1/status` 的 `ok` 同時反映 doctor 與 worker 是否起得來（`fatal_error`）。
 - recall 與 write 查重的 embedding 用短逾時 `embedding.query_timeout`（預設 3 秒），
   逾時即降級為只走 lexical 並標 `degraded`；背景補算仍用 `embedding.timeout`。
+- 冷啟動：Ollama 載入 bge-m3 約 2 秒，逼近 `query_timeout`。兩道處理：
+  - 每個 `/api/embed` 請求帶 `keep_alive`（`embedding.keep_alive`，預設 `"30m"`；純整數為秒數、
+    負值＝常駐、空字串＝不送），閒置 30 分鐘內模型不會被卸載
+  - 啟動時（lifespan，遷移之後）背景執行緒做一次暖機 embed（`api.embedding_warmup`，預設開），
+    用完整 `embedding.timeout`，不阻擋啟動；失敗只記 log、不影響 `ok`。
+    `/v1/status` 的 `embedding.warmup`：`status`（`pending`／`running`／`ok`／`failed`／`disabled`）、
+    `started_at`、`finished_at`、`elapsed_ms`、`error`
 - 測試一律用 FastAPI `TestClient`（`tests/api/`），不啟動長駐服務。
 
 ## MCP 殼（T-29～T-31）
@@ -203,6 +210,37 @@ token 放在 repo 外的 env 檔，不寫進 `.claude.json`：
 `mcp.env`：`LORE_VAULT_API_TOKEN=...`（遠端機器另加 `CF_ACCESS_CLIENT_ID`／`CF_ACCESS_CLIENT_SECRET`，
 或在 `mcp.toml` 設 `cf_access_env_file = "~/.cloudflared/pm-token.env"`）。
 `mcp.toml` 至少設 `[mcp] snapshot_dir`，遠端再設 `base_url`。
+
+## 管理用刪除（不提供 MCP 工具）
+
+`python -m lore_vault.cli.admin [--db PATH] [--config FILE] <子指令>`；`--db` 缺省走 `database.path`
+（容器內即 `/data/lore.db`）。不遷移資料庫，schema 版本不符或 DB 檔不存在直接失敗（不建空檔）。
+
+| 子指令 | 說明 |
+|---|---|
+| `delete-note --vault KEY --id NOTE_ID [--yes]` | 刪單則 note（vault 可用別名） |
+| `delete-vault --key KEY [--force] [--yes]` | 刪整個 vault；只接受正式 key。vault 內有 note 或 episode／concept／injection 時必須 `--force` |
+
+- 預設 dry-run：stdout 印 JSON（`mode`、`vault`、`counts`、`note_ids`、`requires_force`），
+  只有 id 與筆數、不含標題與內文。加 `--yes` 才刪；exit code 0 成功、1 找不到／需要 `--force`／schema 不符、2 參數錯誤
+- 單一交易：FTS 列、向量與補算紀錄（CASCADE）、別名（CASCADE）、episodes／concepts／injections
+  一併刪；刪完核對實際筆數與規劃、檢查無孤兒向量／補算列，不符整段 rollback
+- 匯入對帳（`import_sources`／`import_vault_counts` 刻意無外鍵）採**退帳**：刪 note 時刪它的清單列、
+  該 (source, vault) 來源筆數減一；刪 vault 時清掉該 vault 的清單列與筆數列。刪後 `import.on_reconcile`
+  與 `storage.fts_rows` 維持綠。代價：doctor 不區分「刻意刪除」與「從未匯入」（清單已無該筆），
+  且重跑 `import_on import` 會把刻意刪掉的 note 匯回來（匯入本來就整批重寫清單）。
+  要「重匯不復活」需墓碑表（schema 變更），目前不做
+- 服務執行中可直接用（WAL + busy_timeout；與匯入工具同樣直接寫 DB）。快照快取以內容指紋判斷，刪除後下次拉取即更新
+
+容器內：
+
+```bash
+docker exec lore-vault python -m lore_vault.cli.admin delete-vault --key folder/x            # dry-run
+docker exec lore-vault python -m lore_vault.cli.admin delete-vault --key folder/x --force --yes
+docker exec lore-vault python -m lore_vault.cli.admin delete-note --vault folder/x --id note:abc --yes
+```
+
+Git Bash 下帶容器內絕對路徑（如 `--db /data/lore.db`）會被 MSYS 轉成 Windows 路徑，前面加 `MSYS_NO_PATHCONV=1`。
 
 ## Open Notebook 匯入（T-33～T-37）
 
