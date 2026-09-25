@@ -49,7 +49,7 @@
 
 | 欄位 | 說明 |
 |---|---|
-| `key` | 穩定識別，git remote 正規化（如 `github.com/owner/repo`），無 remote 時 `folder/<name>` |
+| `key` | 穩定識別，git remote 正規化（如 `github.com/owner/repo`），無 remote 時 `folder/<name>`；一律存小寫 |
 | `display` | 顯示名稱，保留大小寫 |
 | `aliases` | 改名前的舊 key／舊 repo 名（取代 spike 的 `REPO_ALIASES`） |
 | `kind` | `repo` / `global`（跨專案觀察） |
@@ -70,8 +70,8 @@
 ### Episode（發生過的事）
 
 沿用 spike 的 schema：每輪對話一筆，含 `session_id`、`prompt_id`、`turn_index`、`origin`、
-`cwd`、`repo`、`repo_root`（凍結）、`files_edited`、`files_read`、`symbols_edited`、
-`tool_sequence`、`user_text`、`assistant_text`、`injected`。
+`cwd`（清單，一輪可能跨多個目錄）、`repo`、`repo_root`（凍結）、`machine`（凍結）、`files_edited`、`files_read`、`symbols_edited`、
+`tool_sequence`、`user_text`、`assistant_text`、`injected`。完整欄位以 `lore_vault.schema.Episode` 為準。
 
 ⚠️ 含商業專案原文。**資料目錄在 repo 外**，不進版控。
 
