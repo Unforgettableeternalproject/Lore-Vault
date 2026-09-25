@@ -11,6 +11,7 @@ from pathlib import Path
 
 from lore_vault.storage import checks as storage_checks
 from lore_vault.storage import enrichment as storage_enrichment
+from lore_vault.storage import imports as storage_imports
 
 from .backup_check import backup_recent
 from .framework import Check, CheckResult, CheckSkipped, DoctorContext, Registry
@@ -100,6 +101,22 @@ def enrich_backlog(ctx: DoctorContext) -> CheckResult:
     return _to_result(rec)
 
 
+# ── 匯入對帳（資源 "db"；設定 "import_source"：來源名稱，預設 open-notebook）──
+
+DEFAULT_IMPORT_SOURCE = "open-notebook"
+
+
+def import_on_reconcile(ctx: DoctorContext) -> CheckResult:
+    db = ctx.require("db")
+    source = str(ctx.settings.get("import_source", DEFAULT_IMPORT_SOURCE))
+    try:
+        if source not in storage_imports.import_sources(db):
+            raise CheckSkipped(f"沒有 {source} 的匯入對帳清單（尚未匯入）")
+        return _to_result(storage_imports.reconcile(db, source))
+    except storage_imports.MissingImportTables as exc:
+        raise CheckSkipped(str(exc)) from None
+
+
 def default_registry() -> Registry:
     registry = Registry()
     registry.add(
@@ -147,6 +164,14 @@ def default_registry() -> Registry:
         ),
     ):
         registry.add(Check(name, "enrich", func, description))
+    registry.add(
+        Check(
+            "import.on_reconcile",
+            "import",
+            import_on_reconcile,
+            "Open Notebook 匯入對帳：漏筆、內容竄改、各 vault 筆數與來源一致",
+        )
+    )
     registry.add(
         Check(
             "backup.recent",

@@ -203,3 +203,28 @@ token 放在 repo 外的 env 檔，不寫進 `.claude.json`：
 `mcp.env`：`LORE_VAULT_API_TOKEN=...`（遠端機器另加 `CF_ACCESS_CLIENT_ID`／`CF_ACCESS_CLIENT_SECRET`，
 或在 `mcp.toml` 設 `cf_access_env_file = "~/.cloudflared/pm-token.env"`）。
 `mcp.toml` 至少設 `[mcp] snapshot_dir`，遠端再設 `base_url`。
+
+## Open Notebook 匯入（T-33～T-37）
+
+`python -m lore_vault.cli.import_on <export|map|import|estimate>`。所有輸出（匯出目錄、mapping、報告、
+資料庫）含商業原文，程式拒絕寫進 repo 內；stdout 只印統計。
+
+1. `export --out DIR [--base-url http://localhost:5055]`：只用 GET。ON 1.14.0 沒有分頁；
+   `GET /api/notes?notebook_id=` 不回內容，筆數必須等於 `/api/notebooks` 的 `note_count`，
+   內容逐筆 `GET /api/notes/{id}` 取（全量 `GET /api/notes` 能用時改用它，並可列出孤兒 note）。
+   任何筆數不一致即失敗、不寫檔。產出 `notebooks.jsonl`、`notes.jsonl`、`manifest.json`（含檔案雜湊）。
+2. `map --export DIR [--search-root DIR ...]`：產生 `mapping.json`。`[bind: key]` → 小寫 key；
+   無標記的 `[PM] <name>` → `folder/<name>` 並標 `needs_review`（`--search-root` 會找同名 repo 附上
+   git remote 建議 key）；`[PM] Global…` → key `global`、kind `global`；共用 key、多歸屬 note 也標待確認。
+   人工改完把 `needs_review` 設 false；`skip: true` 可略過整本。
+3. `import --export DIR --mapping FILE --db PATH [--allow-unreviewed]`：vault 不存在才建；note id 沿用
+   ON 原 id（`note:xxxx`）、保留 created／updated（轉 `…sssZ`）；summary 與向量留空交給 enrich。
+   先整批寫對帳清單（`import_sources`／`import_vault_counts`，schema v3）再寫 note。重跑冪等：
+   未變跳過、來源變了且本地未改 → 更新、本地已改（updated 推進）→ 不覆寫並列報告。
+   `[[標題]]` 同 vault 依標題解析進 `links`，歧義／跨 vault／解析不到保留原文並列在報告檔。
+4. `estimate --db PATH [--config]`：待補摘要／向量筆數與 token、時間粗估，不呼叫任何 API。
+   實際補算用 `python -m lore_vault.enrich`（或服務內 worker）。
+
+doctor `import.on_reconcile`（分類 `import`）：清單有但 note 不在、或 `updated` 未推進而
+(title, body) 雜湊不符 → fail；各 vault 來源筆數 ≠ 清單 ≠ 實際 → fail；匯入後正常修改與新系統新增
+只計數。尚未匯入為 skipped。

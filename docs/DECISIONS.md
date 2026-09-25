@@ -59,11 +59,11 @@
 
 **舊向量實測（T-02，2026-09-25，隔離副本容器唯讀查詢）**：
 
-- note 共 **1490** 則，其中 1474 則有向量、**16 則缺向量**（匯入時補算）
+- note 共 **1490** 則，其中 1474 則有向量、**16 則缺向量**（匯入時補算）。其中只有 **1452** 則屬於某本 notebook（T-33 實測），約 38 則孤兒 note 不屬任何 notebook，且含一則 null byte 使 `GET /api/notes` 全量端點回 500
 - 全數 **1024 維**，**一篇一向量**（存在 `note.embedding` 欄位本身；超過 400 token 的內容在記憶體分塊後 mean-pool 成一個向量，從未落地成多筆 chunk）
 - 確認為 **bge-m3**：`model` 表只登記 `bge-m3:latest`（ollama）；對一則短 note 以本機 bge-m3 重算，與庫內向量 cosine = 0.99999999
 - **量級不一致**：mean-pool 過的長內容 norm ≈ 1，短內容直接存 Ollama 原始輸出 norm ≈ 25。新系統匯入時一律 L2 正規化，之後用點積即等於 cosine
-- 時間戳為 SurrealDB datetime，序列化即 ISO-8601 UTC（`Z` 後綴、奈秒精度），不需時區換算
+- 時間戳為 SurrealDB datetime，皆為 UTC；REST API 回傳格式為 `YYYY-MM-DD HH:MM:SS.ffffff+00:00`（T-33 實測），匯入時統一轉成 `…sssZ`
 
 結論：向量表形狀為 `note_id → 1024 維 float32`，一對一，舊向量可整批搬、正規化後使用。
 

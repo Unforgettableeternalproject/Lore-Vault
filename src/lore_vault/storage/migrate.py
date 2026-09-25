@@ -144,8 +144,46 @@ def _v2(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+# 外部來源匯入的對帳清單（T-37）：匯入前先整批寫入「來源應有什麼」，再逐筆匯入 note。
+# 刻意不設指向 notes 的外鍵：note 遺失或被刪時清單仍在，doctor 才看得出漏筆。
+# - import_sources：每則來源 note 一列。content_sha256 = 來源 (title, body) 雜湊；
+#   imported_updated 為 NULL 表示清單已登記、note 尚未成功匯入。
+# - import_vault_counts：每個 vault 的來源筆數（對照來源端自己回報的數字）。
+_V3_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE import_sources (
+        source           TEXT NOT NULL CHECK (length(trim(source)) > 0),
+        source_id        TEXT NOT NULL CHECK (length(trim(source_id)) > 0),
+        note_id          TEXT NOT NULL CHECK (length(trim(note_id)) > 0),
+        vault            TEXT NOT NULL,
+        content_sha256   TEXT NOT NULL CHECK (length(content_sha256) = 64),
+        source_updated   TEXT NOT NULL,
+        imported_updated TEXT,
+        imported_at      TEXT,
+        PRIMARY KEY (source, source_id)
+    ) STRICT
+    """,
+    "CREATE UNIQUE INDEX import_sources_note ON import_sources(note_id)",
+    "CREATE INDEX import_sources_vault ON import_sources(source, vault)",
+    """
+    CREATE TABLE import_vault_counts (
+        source       TEXT NOT NULL,
+        vault        TEXT NOT NULL,
+        source_count INTEGER NOT NULL CHECK (source_count >= 0),
+        recorded     TEXT NOT NULL,
+        PRIMARY KEY (source, vault)
+    ) STRICT
+    """,
+)
+
+
+def _v3(conn: sqlite3.Connection) -> None:
+    for statement in _V3_STATEMENTS:
+        conn.execute(statement)
+
+
 # 有序遷移：索引 i 的函式把版本從 i 升到 i+1。只能往後加，不可改動已發佈的項目。
-MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (_v1, _v2)
+MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (_v1, _v2, _v3)
 
 SCHEMA_VERSION = len(MIGRATIONS)
 
