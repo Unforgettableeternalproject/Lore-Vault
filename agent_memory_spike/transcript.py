@@ -27,6 +27,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Iterator
 
+from paths import INJECTION_LOG, TOUCH_LOG
+
 # 這輪內容的來源。**區分 human 與其他來源是必要的**：
 # 背景 agent 完成時會以 user 記錄的形式送進 task-notification（實測有一筆 3402 字元），
 # 若當成使用者指示存進記憶，等於把 agent 自己的輸出偽裝成使用者的要求。
@@ -48,7 +50,7 @@ _repo_root_cache: dict[str, Path | None] = {}
 # 注入紀錄的 side-car。**注入 hook 自己寫，不從 transcript 反推**——
 # additionalContext 在 transcript 裡的形狀沒有保證，靠猜會得到一個
 # 「看起來正常但其實對不上」的欄位，那正是這個專案反覆踩到的坑。
-INJECTION_LOG = Path.home() / ".claude" / "agent-memory-spike" / "injections.jsonl"
+# 路徑定義在 paths.py（T-10），這裡保留名稱供各 hook import 與測試 monkeypatch。
 
 # 注入 hook 每次看到一個編輯目標就記一行。**這是「hook 有沒有漏看」的唯一依據。**
 #
@@ -59,7 +61,7 @@ INJECTION_LOG = Path.home() / ".claude" / "agent-memory-spike" / "injections.jso
 # 這份 append-only 的紀錄讓 doctor 能比對「語料說這輪改了哪些檔案」與
 # 「hook 說它看到了哪些」。抓不到根因至少要抓得到症狀，
 # 不然掛上全域之後同型的遺漏只會安靜地累積。
-TOUCH_LOG = Path.home() / ".claude" / "agent-memory-spike" / "touches.jsonl"
+# 路徑同樣定義在 paths.py，名稱由上方 import 綁定。
 
 # SessionStart 注入用的哨兵 prompt_id。那個觸發點在第一輪之前就跑完，
 # payload 裡根本沒有 prompt_id，而它的影響及於整個 session 而非某一輪。

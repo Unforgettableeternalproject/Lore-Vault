@@ -59,11 +59,11 @@ from transcript import (  # noqa: E402
     repo_root_name,
 )
 
-WORK_DIR = INJECTION_LOG.parent
-CONCEPT_PATH = WORK_DIR / "concepts.json"
+from paths import CONCEPT_PATH, WORK_DIR  # noqa: E402
+
 # 每個 session 一個節流檔，理由同 episode 的每 session 一檔：
 # 不同 session 落在不同檔案，天然沒有跨程序寫入衝突
-STATE_DIR = WORK_DIR / "inject_state"
+from paths import INJECT_STATE_DIR as STATE_DIR  # noqa: E402
 
 # 這三個常數與 retrieve.py 的實測結果一致。刻意複製而不 import：
 # hook 每次工具呼叫都會跑，import retrieve 會連帶拉進 BM25、向量索引與 ollama 客戶端

@@ -50,8 +50,9 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).parent))
 from hook_stop import DEFAULT_EPISODE_DIR  # noqa: E402
 
-WORK_DIR = DEFAULT_EPISODE_DIR.parent
-DEFAULT_CONCEPT_PATH = WORK_DIR / "concepts.json"
+from paths import CONCEPT_PATH as DEFAULT_CONCEPT_PATH  # noqa: E402
+from paths import WORK_DIR  # noqa: E402
+
 DEFAULT_PROBE_PATH = WORK_DIR / "probe_tasks.json"
 
 # 判定 → surprisal 分數。

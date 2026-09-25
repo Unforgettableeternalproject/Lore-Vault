@@ -47,8 +47,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 from hook_stop import DEFAULT_EPISODE_DIR, load_deduped  # noqa: E402
 from transcript import ORIGIN_HUMAN, file_key_overlap, file_keys  # noqa: E402
 
-WORK_DIR = DEFAULT_EPISODE_DIR.parent
-DEFAULT_CONCEPT_PATH = WORK_DIR / "concepts.json"
+from paths import CONCEPT_PATH as DEFAULT_CONCEPT_PATH  # noqa: E402
+from paths import WORK_DIR  # noqa: E402
+
 CONTROL_CONCEPT_PATH = WORK_DIR / "control_concepts.json"
 
 # query 短於這個長度就不列入評測——「這個可以，換下一個」本來就不該召回任何東西，

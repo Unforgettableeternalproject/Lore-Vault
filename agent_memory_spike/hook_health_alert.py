@@ -33,11 +33,15 @@ import time
 from pathlib import Path
 from typing import Any
 
-WORK_DIR = Path.home() / ".claude" / "agent-memory-spike"
-STATE_PATH = WORK_DIR / "pipeline_state.json"
-LOG_DIR = WORK_DIR / "logs"
-INJECTION_LOG = WORK_DIR / "injections.jsonl"
-EPISODE_DIR = WORK_DIR / "episodes"
+# paths.py 只用標準庫、不 import 同目錄模組，不破壞本 hook「不 import transcript」的性質
+sys.path.insert(0, str(Path(__file__).parent))
+from paths import (  # noqa: E402
+    EPISODE_DIR,
+    INJECTION_LOG,
+    LOG_DIR,
+    WORK_DIR,
+)
+from paths import PIPELINE_STATE_PATH as STATE_PATH  # noqa: E402
 
 # 各項的容忍天數。定得比實際週期寬一格，寧可晚一天發現，
 # 也不要因為「昨天剛好沒編輯任何檔案」這種正常情況每天喊狼來了。

@@ -47,9 +47,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 from hook_stop import DEFAULT_EPISODE_DIR  # noqa: E402
 
 HERE = Path(__file__).parent
-WORK_DIR = DEFAULT_EPISODE_DIR.parent
-LOCK_PATH = WORK_DIR / "pipeline.lock"
-STATE_PATH = WORK_DIR / "pipeline_state.json"
+from paths import PIPELINE_LOCK_PATH as LOCK_PATH  # noqa: E402
+from paths import PIPELINE_STATE_PATH as STATE_PATH  # noqa: E402
+from paths import WORK_DIR  # noqa: E402
 
 # 鎖過期時間。程序被 kill 掉時鎖不會被清掉，沒有這個機制管線會永遠停擺；
 # 訂在 6 小時是因為單輪最慢的階段（校準）實測也遠短於此

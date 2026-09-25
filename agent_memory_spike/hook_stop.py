@@ -55,9 +55,8 @@ _T0 = time.perf_counter()
 # 包含商業專案。放在 repo 內就算有 gitignore，仍有 `git add -f` 或規則變動而外洩的風險；
 # 放在 ~/.claude 底下則從根本上不可能被誤 commit。
 # 跨專案集中存放是刻意的——Phase 2 要驗證的正是跨專案一致性。
-DEFAULT_EPISODE_DIR = Path.home() / ".claude" / "agent-memory-spike" / "episodes"
-
 sys.path.insert(0, str(Path(__file__).parent))
+from paths import EPISODE_DIR as DEFAULT_EPISODE_DIR  # noqa: E402  路徑定義見 paths.py
 from transcript import (  # noqa: E402
     ORIGIN_HUMAN,
     episodes_from_transcript,

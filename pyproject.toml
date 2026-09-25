@@ -39,7 +39,7 @@ norecursedirs = ["data", "experiment", ".*", "__pycache__"]
 
 [tool.ruff]
 line-length = 88
-# agent_memory_spike 是凍結的併入子樹（T-05 要求零改動），不納入 lint。
+# agent_memory_spike 是併入的 spike 子樹，維持原有風格、只做最小改動，不納入 lint。
 extend-exclude = ["agent_memory_spike"]
 
 [tool.ruff.lint]
