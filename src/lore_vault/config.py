@@ -26,6 +26,8 @@ ENV_PREFIX = "LORE_VAULT_"
 CONFIG_PATH_ENV = "LORE_VAULT_CONFIG"
 OPENAI_KEY_ENV = "OPENAI_API_KEY"
 API_TOKEN_ENV = "LORE_VAULT_API_TOKEN"
+CF_ACCESS_ID_ENV = "CF_ACCESS_CLIENT_ID"
+CF_ACCESS_SECRET_ENV = "CF_ACCESS_CLIENT_SECRET"
 
 # 設定檔中不可出現的鍵（名稱等於或以這些字樣結尾即拒絕）；密鑰只走環境變數。
 # 用結尾比對而非包含：`max_completion_tokens` 不是密鑰。
@@ -117,6 +119,24 @@ class BackupConfig:
 
 
 @dataclass(frozen=True)
+class McpConfig:
+    """各機器本地 MCP 殼（A15）：轉發服務 HTTP、拉快照、不可達時降級。"""
+
+    # 服務位址（本機 docker 為 127.0.0.1:5056；遠端走 Cloudflare 子網域）
+    base_url: str = "http://127.0.0.1:5056"
+    # 每個 HTTP 請求的逾時（秒）；逾時視為服務不可達
+    timeout: float = 10.0
+    # 本地唯讀快照目錄；未設定 = 不拉快照、服務不可達時無法降級
+    snapshot_dir: str | None = None
+    # 定期拉快照的間隔（秒）；0 = 只在殼啟動時拉一次
+    snapshot_interval: float = 900.0
+    # doctor「快照年齡」門檻（小時）
+    snapshot_max_age_hours: float = 24.0
+    # Cloudflare Access service token 的 env 檔（格式同 ~/.cloudflared/pm-token.env）
+    cf_access_env_file: str | None = None
+
+
+@dataclass(frozen=True)
 class Config:
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
@@ -124,6 +144,7 @@ class Config:
     worker: WorkerConfig = field(default_factory=WorkerConfig)
     backup: BackupConfig = field(default_factory=BackupConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
+    mcp: McpConfig = field(default_factory=McpConfig)
 
 
 _SECTIONS: dict[str, type] = {
@@ -133,6 +154,7 @@ _SECTIONS: dict[str, type] = {
     "worker": WorkerConfig,
     "backup": BackupConfig,
     "api": ApiConfig,
+    "mcp": McpConfig,
 }
 
 # 布林設定可接受的寫法（環境變數是字串；TOML 可直接寫 true／false）
@@ -276,6 +298,8 @@ def _validate(config: Config) -> None:
         "worker.poll_interval": config.worker.poll_interval,
         "backup.keep": config.backup.keep,
         "backup.max_age_hours": config.backup.max_age_hours,
+        "mcp.timeout": config.mcp.timeout,
+        "mcp.snapshot_max_age_hours": config.mcp.snapshot_max_age_hours,
     }
     for name, value in positive.items():
         if value <= 0:
@@ -284,10 +308,13 @@ def _validate(config: Config) -> None:
         "embedding.rate_per_minute": config.embedding.rate_per_minute,
         "summary.rate_per_minute": config.summary.rate_per_minute,
         "worker.retry_backoff": config.worker.retry_backoff,
+        "mcp.snapshot_interval": config.mcp.snapshot_interval,
     }
     for name, value in non_negative.items():
         if value < 0:
             raise ConfigError(f"{name} 不可為負")
+    if not config.mcp.base_url.startswith(("http://", "https://")):
+        raise ConfigError("mcp.base_url 必須以 http:// 或 https:// 開頭")
 
 
 def openai_api_key(
@@ -311,3 +338,29 @@ def api_token(
     env = _merged_environ(os.environ if environ is None else environ, env_file)
     value = env.get(API_TOKEN_ENV, "").strip()
     return Secret(value) if value else None
+
+
+def cf_access_credentials(
+    *,
+    cf_env_file: str | PathLike[str] | None = None,
+    env_file: str | PathLike[str] | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> tuple[Secret, Secret] | None:
+    """Cloudflare Access service token（`CF_ACCESS_CLIENT_ID`／`..._SECRET`）。
+
+    來源優先序：環境變數 > `env_file`（`.env`）> `cf_env_file`（如
+    `~/.cloudflared/pm-token.env`）。兩者都沒有回 None（本機直連不需要）；
+    只有其中一個時拋 `ConfigError`（半套設定不可默默略過）。訊息不含值。
+    """
+    merged: dict[str, str] = {}
+    if cf_env_file is not None:
+        merged.update(_merged_environ({}, cf_env_file))
+    merged.update(_merged_environ(os.environ if environ is None else environ, env_file))
+    client_id = merged.get(CF_ACCESS_ID_ENV, "").strip()
+    secret = merged.get(CF_ACCESS_SECRET_ENV, "").strip()
+    if not client_id and not secret:
+        return None
+    if not client_id or not secret:
+        missing = CF_ACCESS_ID_ENV if not client_id else CF_ACCESS_SECRET_ENV
+        raise ConfigError(f"Cloudflare Access 設定不完整：缺少 {missing}")
+    return Secret(client_id), Secret(secret)

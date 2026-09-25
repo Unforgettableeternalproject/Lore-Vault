@@ -1,5 +1,6 @@
 """`python -m lore_vault.doctor [--json] [--category NAME ...] [--db PATH]
-[--embedding-dim N] [--backup-dir DIR] [--backup-max-age-hours H]` 的進入點。
+[--embedding-dim N] [--backup-dir DIR] [--backup-max-age-hours H]
+[--snapshot-dir DIR] [--snapshot-max-age-hours H]` 的進入點。
 
 `--db` 以唯讀開啟（不建檔、不遷移），放進 context 資源 `"db"`；
 沒給時 storage 類檢查記為 skipped。
@@ -71,6 +72,15 @@ def main(
         default=None,
         help="最近一次備份的門檻（小時，預設 26）",
     )
+    parser.add_argument(
+        "--snapshot-dir", help="MCP 殼的本地快照目錄（snapshot 對帳用）"
+    )
+    parser.add_argument(
+        "--snapshot-max-age-hours",
+        type=float,
+        default=None,
+        help="快照年齡門檻（小時，預設 24）",
+    )
     args = parser.parse_args(argv)
 
     out = stdout if stdout is not None else sys.stdout
@@ -91,6 +101,10 @@ def main(
             settings["backup_dir"] = args.backup_dir
         if args.backup_max_age_hours is not None:
             settings["backup_max_age_hours"] = args.backup_max_age_hours
+        if args.snapshot_dir:
+            settings["snapshot_dir"] = args.snapshot_dir
+        if args.snapshot_max_age_hours is not None:
+            settings["snapshot_max_age_hours"] = args.snapshot_max_age_hours
         if args.db:
             try:
                 db = connect_readonly(args.db)

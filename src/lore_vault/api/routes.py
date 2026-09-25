@@ -1,4 +1,4 @@
-"""`/v1` 端點：七個 MCP 工具一對一的 RPC 式 HTTP 契約，外加建 vault。
+"""`/v1` 端點：七個 MCP 工具一對一的 RPC 式 HTTP 契約，外加建 vault 與唯讀快照。
 
 薄轉接：參數原樣交給服務層（驗證、vault 硬範圍、預算都在服務層），
 回應直接用服務層的 `to_dict()`。每個請求在同一執行緒內開、用、關自己的連線。
@@ -10,7 +10,7 @@ import sqlite3
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, Request, status
+from fastapi import APIRouter, Body, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from lore_vault import notes as notes_service
@@ -23,6 +23,7 @@ from lore_vault.recall.service import DEFAULT_LIMIT as RECALL_DEFAULT_LIMIT
 from lore_vault.recall.service import MODE_HYBRID
 from lore_vault.schema import Vault, canonical_key
 from lore_vault.storage import enrichment as storage_enrichment
+from lore_vault.storage import snapshot as storage_snapshot
 from lore_vault.storage.db import transaction
 from lore_vault.storage.errors import UnknownVault, VaultRequired
 from lore_vault.storage.migrate import SCHEMA_VERSION, current_version
@@ -296,3 +297,32 @@ def status_(
         },
         "doctor": report.to_dict(),
     }
+
+
+# ── 唯讀快照（T-31）──
+
+
+@router.get("/snapshot")
+def snapshot(request: Request) -> Response:
+    """MCP 殼降級用的一致性唯讀副本：vaults、別名、notes、FTS（不含向量與 episode）。
+
+    - 服務端快取最近一份；資料指紋（白名單資料表的內容雜湊）未變就不重建
+    - ETag 為快照檔 sha256；`If-None-Match` 符合回 304（不傳檔）
+    - 版本、產生時間、sha256、筆數放在 header（304 也帶，殼端據此更新確認時間）
+    """
+    state = _state(request)
+    info, content = state.snapshot_cache().get(request.headers.get("if-none-match"))
+    headers = {
+        "ETag": storage_snapshot.etag(info.sha256),
+        storage_snapshot.HEADER_GENERATED_AT: info.generated_at,
+        storage_snapshot.HEADER_SCHEMA_VERSION: str(info.schema_version),
+        storage_snapshot.HEADER_SERVICE_VERSION: request.app.version,
+        storage_snapshot.HEADER_SHA256: info.sha256,
+        storage_snapshot.HEADER_NOTES: str(info.notes),
+        "Cache-Control": "no-cache",
+    }
+    if content is None:
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
+    return Response(
+        content=content, media_type=storage_snapshot.MEDIA_TYPE, headers=headers
+    )

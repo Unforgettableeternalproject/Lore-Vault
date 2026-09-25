@@ -88,13 +88,15 @@ side-car 紀錄：`{session_id, prompt_id, injected: [concept_id]}`，不含原�
 
 ## MCP 介面（草案）
 
-HTTP 契約為 `POST /v1/<工具名>` + JSON body，另有 `POST /v1/vaults` 建 vault（write 不自動建）；所有 `/v1` 需 bearer token，`GET /healthz` 公開。
+HTTP 契約為 `POST /v1/<工具名>` + JSON body，另有 `POST /v1/vaults` 建 vault（write 不自動建）；所有 `/v1` 需 bearer token，`GET /healthz` 公開。`GET /v1/snapshot` 提供降級用唯讀快照（只含 vaults、notes、FTS，不含向量與 episode／concept／injection）。
+
+MCP 為各機器本地 stdio 殼（`python -m lore_vault.mcp`，A15）：服務連線失敗、逾時或 502／503／504、Cloudflare 521–524／530 時，`recall`／`get`／`list`／`vault_resolve` 改讀本地快照、只走 lexical 並標 `degraded`；`write`／`update` 直接失敗不排佇列；401／403／其他 4xx 與 500 直接報錯不降級。
 
 目標是讓 agent 用最少的上下文拿到足夠決策的資訊。工具數量刻意壓在個位數。
 
 | 工具 | 回傳 | 說明 |
 |---|---|---|
-| `vault_resolve(key)` | vault key、display、note 數 | 客戶端（MCP 殼）以 `lore_vault.binding` 從 cwd 算出 key，服務端做別名解析；取代 pm-bind 的手動步驟 |
+| `vault_resolve(cwd?, create?, display?)` | vault key、display、note 數、binding | MCP 殼以 `lore_vault.binding` 從 cwd 算 key，服務端做別名解析；`create=True` 才建 vault（HTTP `POST /v1/vaults`）；取代 pm-bind 的手動步驟 |
 | `recall(query, vault, kinds?, limit?, budget?)` | `[{id, kind, title, summary, score, updated}]` | 統一檢索 Notes 與 Concepts；**預設不含全文**；`vault` 必填，跨範圍用 `vault="*"` 明示 |
 | `get(vault, ids, budget?)` | 全文 | 可批次；超過預算時截斷並標示；vault 必填（A5） |
 | `list(vault, since?, topics?, cursor?)` | 標題清單 | 分頁，回傳是否還有下一頁 |

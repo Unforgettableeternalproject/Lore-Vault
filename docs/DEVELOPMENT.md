@@ -110,3 +110,96 @@ uv run uvicorn --factory lore_vault.api.app:create_app --host 127.0.0.1 --port 8
 - recall 與 write 查重的 embedding 用短逾時 `embedding.query_timeout`（預設 3 秒），
   逾時即降級為只走 lexical 並標 `degraded`；背景補算仍用 `embedding.timeout`。
 - 測試一律用 FastAPI `TestClient`（`tests/api/`），不啟動長駐服務。
+
+## MCP 殼（T-29～T-31）
+
+每台機器跑一個本地 **stdio** MCP 殼，轉發到服務 HTTP（A15）。用本 repo `.venv` 的 Python 啟動
+（它不是 hook，可以用第三方套件）：
+
+```bash
+uv run python -m lore_vault.mcp [--config PATH] [--env-file PATH]
+```
+
+stdout 是 MCP 協定通道，log 一律寫 stderr（UTF-8）。設定錯誤時印出原因並以 2 結束。
+
+### 設定
+
+優先序同 `lore_vault.config`：環境變數 > 設定檔 `[mcp]` 區段 > 預設值（見 `config.example.toml`）。
+
+| 項目 | 環境變數 | 預設 | 說明 |
+|---|---|---|---|
+| `mcp.base_url` | `LORE_VAULT_MCP_BASE_URL` | `http://127.0.0.1:5056` | 服務位址；遠端填 Cloudflare 子網域 |
+| `mcp.timeout` | `LORE_VAULT_MCP_TIMEOUT` | 10 秒 | 每個請求逾時，逾時視為不可達 |
+| `mcp.snapshot_dir` | `LORE_VAULT_MCP_SNAPSHOT_DIR` | 無 | 本地快照目錄；未設定＝不拉快照、不可達時無法降級 |
+| `mcp.snapshot_interval` | `LORE_VAULT_MCP_SNAPSHOT_INTERVAL` | 900 秒 | 定期拉快照；0＝只在啟動時拉 |
+| `mcp.snapshot_max_age_hours` | `LORE_VAULT_MCP_SNAPSHOT_MAX_AGE_HOURS` | 24 | doctor 快照年齡門檻 |
+| `mcp.cf_access_env_file` | `LORE_VAULT_MCP_CF_ACCESS_ENV_FILE` | 無 | CF Access token 檔（格式同 `~/.cloudflared/pm-token.env`） |
+
+密鑰只走環境變數或 `--env-file`，設定檔出現 token／secret 類的鍵會拒絕載入：
+
+- `LORE_VAULT_API_TOKEN`（必填，本機也要帶）
+- `CF_ACCESS_CLIENT_ID`／`CF_ACCESS_CLIENT_SECRET`（選用；兩個都有才加 `CF-Access-Client-*` header，
+  只有一個直接報錯）。來源優先序：環境變數 > `--env-file` > `mcp.cf_access_env_file`
+
+密鑰不會出現在 log、工具回傳與例外訊息（`Secret` 包裝；錯誤只寫要檢查哪個設定）。
+
+### 工具
+
+`vault_resolve(cwd?, create?, display?)`、`recall(query, vault, kinds?, limit?, budget?)`、
+`get(vault, ids, budget?)`、`list(vault, since?, topics?, cursor?, limit?)`、
+`write(vault, title, body, topics?, links?, supersedes?)`、
+`update(vault, id, expected_updated, title?, body?, topics?, links?, supersedes?)`、`status(vault?)`。
+
+- 建 vault 併入 `vault_resolve(create=True)`，沒有獨立工具。`cwd` 省略時用殼的工作目錄
+  （Claude Code 啟動殼時的專案目錄）；key 由殼端 `lore_vault.binding` 從 git remote 算
+- 成功回服務 JSON 原樣（緊湊、不縮排）；錯誤是工具錯誤，內容 `{"error": {...}, "hint", "http_status"}`。
+  409 版本衝突附 `current`，以 `current.updated` 當 `expected_updated` 重試
+
+### 快照與降級
+
+- 服務端 `GET /v1/snapshot`（需 bearer）：同一讀取交易內把 `vaults`、`vault_aliases`、`notes`、`note_fts`
+  複製到新檔（白名單；不含向量、episode、concept、injection），header 帶 schema 版本、產生時間、sha256、筆數
+- 服務端快取最近一份快照：每次請求先算白名單資料表的內容指紋（vaults、別名、notes 全欄位的 sha256），
+  未變就沿用、不重建。不用「max(updated) + 筆數」：背景補摘要不推進 `updated`；`PRAGMA data_version`
+  只在同一連線內有效。快取目錄預設在系統暫存、服務關閉時刪除（`ApiSettings.snapshot_cache_dir` 可指定）
+- ETag = 快照檔 sha256；`If-None-Match` 符合回 304（不傳檔，header 仍帶版本資訊）
+- 殼端在啟動時（背景，不擋 initialize）與每 `snapshot_interval` 秒拉一次：寫同目錄暫存檔 → 驗 sha256、
+  integrity、schema 版本、筆數 → `os.replace` 成 `snapshot.db` → 寫 `snapshot.json`（manifest）。
+  本地快照與 manifest 一致時帶 `If-None-Match`；收到 304 就沿用舊快照、只更新 manifest 的 `checked_at`。
+  失敗只記 log，暫存檔刪除、舊快照不動
+- 降級矩陣：
+
+| 服務回應 | `recall`／`get`／`list`／`vault_resolve` | `write`／`update`／建 vault | `status` |
+|---|---|---|---|
+| 連線失敗、逾時、協定錯誤、502／503／504 | 讀快照（只走 lexical），標 `degraded`、`degraded_reason: "service_unreachable"`、`snapshot.generated_at`／`checked_at` | 失敗，不排佇列 | 回殼端狀態、`ok: false` |
+| 3xx（Access 導向登入）、401、403、其他 4xx、500 等其餘 5xx | 直接報錯（設定、請求或服務端資料錯誤，不降級） | 同左 | 同左 |
+
+- 降級路徑沿用服務層函式對快照唯讀查詢，vault 硬範圍、別名、參數驗證與服務端一致
+- doctor：`python -m lore_vault.doctor --category snapshot --snapshot-dir DIR [--snapshot-max-age-hours H]`。
+  從未拉取、manifest 與快照檔 sha256 不一致、schema 版本（manifest 或檔案）與程式不符、超過年齡門檻皆為 fail。
+  年齡以最近一次向服務確認的時間（`checked_at`，含 304）計，資料長期沒變不會誤紅
+
+### Claude Code 設定範例
+
+**只是文件範例；不要由 agent 修改 `~/.claude.json`**（切換見 docs/MIGRATION.md）。
+token 放在 repo 外的 env 檔，不寫進 `.claude.json`：
+
+```json
+{
+  "mcpServers": {
+    "lore-vault": {
+      "type": "stdio",
+      "command": "C:/path/to/Lore-Vault/.venv/Scripts/python.exe",
+      "args": [
+        "-m", "lore_vault.mcp",
+        "--config", "C:/Users/<you>/.lore-vault/mcp.toml",
+        "--env-file", "C:/Users/<you>/.lore-vault/mcp.env"
+      ]
+    }
+  }
+}
+```
+
+`mcp.env`：`LORE_VAULT_API_TOKEN=...`（遠端機器另加 `CF_ACCESS_CLIENT_ID`／`CF_ACCESS_CLIENT_SECRET`，
+或在 `mcp.toml` 設 `cf_access_env_file = "~/.cloudflared/pm-token.env"`）。
+`mcp.toml` 至少設 `[mcp] snapshot_dir`，遠端再設 `base_url`。

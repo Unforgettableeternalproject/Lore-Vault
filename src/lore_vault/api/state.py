@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import dataclasses
+import shutil
 import sqlite3
+import tempfile
+import threading
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 from lore_vault.enrich.clients import EnrichTimeout, OllamaEmbedder
@@ -13,6 +17,7 @@ from lore_vault.enrich.command import build_worker
 from lore_vault.enrich.worker import EnrichWorker
 from lore_vault.recall.embedder import Embedder
 from lore_vault.storage.db import connect
+from lore_vault.storage.snapshot import SnapshotCache
 
 from .background import BackgroundEnricher
 from .settings import ApiSettings
@@ -59,6 +64,9 @@ class AppState:
                 poll_interval=settings.config.worker.poll_interval,
                 join_timeout=settings.worker_join_timeout,
             )
+        self._snapshot_cache: SnapshotCache | None = None
+        self._snapshot_tmp: Path | None = None
+        self._snapshot_lock = threading.Lock()
 
     def _default_worker(
         self, conn: sqlite3.Connection, should_stop: Callable[[], bool]
@@ -82,6 +90,24 @@ class AppState:
             yield conn
         finally:
             conn.close()
+
+    def snapshot_cache(self) -> SnapshotCache:
+        with self._snapshot_lock:
+            if self._snapshot_cache is None:
+                cache_dir = self.settings.snapshot_cache_dir
+                if cache_dir is None:
+                    cache_dir = self._snapshot_tmp = Path(
+                        tempfile.mkdtemp(prefix="lore-snapshot-cache-")
+                    )
+                self._snapshot_cache = SnapshotCache(self.settings.db_path, cache_dir)
+            return self._snapshot_cache
+
+    def close(self) -> None:
+        """關閉時清掉自建的快照快取目錄（設定指定的目錄不動）。"""
+        if self._snapshot_tmp is not None:
+            shutil.rmtree(self._snapshot_tmp, ignore_errors=True)
+            self._snapshot_tmp = None
+            self._snapshot_cache = None
 
     def wake_worker(self) -> None:
         if self.enricher is not None:

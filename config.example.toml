@@ -51,3 +51,19 @@ max_age_hours = 26.0
 [api]
 # HTTP 服務是否在同一程序內跑背景補算 worker（單一寫入程序，A9）；關閉時另跑 python -m lore_vault.enrich
 enrich_worker = true
+
+[mcp]
+# 各機器本地 MCP 殼（python -m lore_vault.mcp）。token 與 CF 憑證是密鑰，不寫在這裡：
+# LORE_VAULT_API_TOKEN、CF_ACCESS_CLIENT_ID／CF_ACCESS_CLIENT_SECRET 走環境變數或 --env-file。
+# 服務位址：本機 docker 為 127.0.0.1:5056；遠端改成 Cloudflare 子網域（https://...）
+base_url = "http://127.0.0.1:5056"
+# 每個請求的逾時（秒）；逾時視為服務不可達（讀取降級、寫入失敗）
+timeout = 10.0
+# 本地唯讀快照目錄（無預設；未設定時服務不可達就無法降級讀取）
+# snapshot_dir = "C:/path/to/lore-vault/snapshot"
+# 定期拉快照的間隔（秒）；0 = 只在殼啟動時拉一次
+snapshot_interval = 900.0
+# doctor 快照年齡門檻（小時）
+snapshot_max_age_hours = 24.0
+# Cloudflare Access service token 檔（格式同 ~/.cloudflared/pm-token.env）；本機直連不需要
+# cf_access_env_file = "~/.cloudflared/pm-token.env"

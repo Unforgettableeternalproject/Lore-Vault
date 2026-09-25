@@ -41,6 +41,7 @@ def create_app(
         finally:
             if state.enricher is not None:
                 state.enricher.stop()
+            state.close()
 
     app = FastAPI(
         title="Lore Vault",

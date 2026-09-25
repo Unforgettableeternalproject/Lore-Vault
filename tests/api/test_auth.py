@@ -110,6 +110,7 @@ def test_openapi_is_served_behind_auth(anon):
         "/v1/update",
         "/v1/status",
         "/v1/vaults",
+        "/v1/snapshot",
     } == paths
 
 

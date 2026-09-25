@@ -15,6 +15,7 @@ from lore_vault.storage import enrichment as storage_enrichment
 from .backup_check import backup_recent
 from .framework import Check, CheckResult, CheckSkipped, DoctorContext, Registry
 from .hook_imports import DEFAULT_HOOKS_DIR, check_hook_imports
+from .snapshot_check import snapshot_age, snapshot_schema
 
 
 def hooks_stdlib_only(ctx: DoctorContext) -> CheckResult:
@@ -154,4 +155,17 @@ def default_registry() -> Registry:
             "最近一次備份在門檻內（從未備份為 fail）",
         )
     )
+    for name, func, description in (
+        (
+            "snapshot.schema_version",
+            snapshot_schema,
+            "本地快照與 manifest 一致、schema 版本等於程式預期",
+        ),
+        (
+            "snapshot.age",
+            snapshot_age,
+            "本地快照產生時間在門檻內（從未拉取為 fail）",
+        ),
+    ):
+        registry.add(Check(name, "snapshot", func, description))
     return registry
