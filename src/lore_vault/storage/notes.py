@@ -126,12 +126,15 @@ def list_notes(
     vault: str,
     *,
     since: str | None = None,
+    topics: Sequence[str] | None = None,
     limit: int = 50,
     cursor: tuple[str, str] | None = None,
 ) -> tuple[list[Note], tuple[str, str] | None]:
     """依 (updated, id) 由新到舊分頁。回傳 (本頁, 下一頁 cursor 或 None)。
 
     `since`：只列 updated >= since 的 note（ISO-8601 UTC）。
+    `topics`：只列至少含其中一個 topic 的 note（大小寫精確比對）；在 SQL 內、
+    LIMIT 之前過濾，分頁不會因為事後過濾而少回。
     """
     scope = resolve_read(conn, vault)
     if limit <= 0:
@@ -142,6 +145,17 @@ def list_notes(
     if since is not None:
         conditions.append("updated >= ?")
         args.append(normalize_utc(since))
+    if topics is not None:
+        if isinstance(topics, str):
+            raise TypeError("topics 必須是清單，不可傳單一字串")
+        if not topics:
+            raise ValueError("topics 不可為空清單；不過濾請傳 None")
+        placeholders = ",".join("?" * len(topics))
+        conditions.append(
+            f"EXISTS (SELECT 1 FROM json_each(notes.topics) WHERE value IN "
+            f"({placeholders}))"
+        )
+        args.extend(topics)
     if cursor is not None:
         conditions.append("(updated, id) < (?, ?)")
         args.extend(cursor)

@@ -6,9 +6,11 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 from lore_vault.storage import checks as storage_checks
+from lore_vault.storage import enrichment as storage_enrichment
 
 from .framework import Check, CheckResult, CheckSkipped, DoctorContext, Registry
 from .hook_imports import DEFAULT_HOOKS_DIR, check_hook_imports
@@ -62,9 +64,38 @@ def storage_missing_embeddings(ctx: DoctorContext) -> CheckResult:
     return _to_result(storage_checks.missing_embeddings(ctx.require("db")))
 
 
+def storage_missing_summaries(ctx: DoctorContext) -> CheckResult:
+    return _to_result(storage_checks.missing_summaries(ctx.require("db")))
+
+
 def storage_vector_dimension(ctx: DoctorContext) -> CheckResult:
     db = ctx.require("db")
     return _to_result(storage_checks.vector_dimension(db, dim=_embedding_dim(ctx)))
+
+
+# ── 背景補算對帳（資源 "db"；設定 "enrich_backlog_max_age"：秒，預設 3600；
+#    "now"：datetime，測試注入用）──
+
+DEFAULT_BACKLOG_MAX_AGE = 3600.0
+
+
+def enrich_failed(ctx: DoctorContext) -> CheckResult:
+    try:
+        return _to_result(storage_enrichment.failed_enrichments(ctx.require("db")))
+    except storage_enrichment.MissingEnrichmentTable as exc:
+        raise CheckSkipped(str(exc)) from None
+
+
+def enrich_backlog(ctx: DoctorContext) -> CheckResult:
+    now = ctx.settings.get("now") or datetime.now(UTC)
+    max_age = float(ctx.settings.get("enrich_backlog_max_age", DEFAULT_BACKLOG_MAX_AGE))
+    try:
+        rec = storage_enrichment.enrichment_backlog(
+            ctx.require("db"), now=now, max_age_seconds=max_age
+        )
+    except storage_enrichment.MissingEnrichmentTable as exc:
+        raise CheckSkipped(str(exc)) from None
+    return _to_result(rec)
 
 
 def default_registry() -> Registry:
@@ -90,10 +121,28 @@ def default_registry() -> Registry:
             "缺 embedding 的 note 數（非零為 warn）",
         ),
         (
+            "storage.missing_summaries",
+            storage_missing_summaries,
+            "缺 summary 的 note 數（非零為 warn）",
+        ),
+        (
             "storage.vector_dimension",
             storage_vector_dimension,
             "向量維度與設定 embedding_dim 一致",
         ),
     ):
         registry.add(Check(name, "storage", func, description))
+    for name, func, description in (
+        (
+            "enrich.failed",
+            enrich_failed,
+            "補算超過重試上限的項目數（非零為 fail：不會自癒，需人工處理後 reset）",
+        ),
+        (
+            "enrich.backlog",
+            enrich_backlog,
+            "待補算積壓；最舊一筆等太久為 warn（worker 可能沒在跑）",
+        ),
+    ):
+        registry.add(Check(name, "enrich", func, description))
     return registry

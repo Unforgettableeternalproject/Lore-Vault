@@ -20,7 +20,7 @@ def test_episode_round_trip_and_idempotent_resend(conn, vault, make_episode):
     ep = make_episode()
     assert records.insert_episode(conn, V, ep) is True
     assert records.insert_episode(conn, V, ep) is False  # spool 重送
-    assert records.list_episodes(conn, V) == [ep]
+    assert records.list_episodes(conn, V) == ([ep], None)
     assert records.count_episodes(conn, V) == 1
 
 
@@ -42,7 +42,7 @@ def test_episode_injected_three_states(conn, vault, make_episode):
     assert missing.injected is MISSING
     for ep in (missing, empty, filled):
         records.insert_episode(conn, V, ep)
-    got = {e.prompt_id: e for e in records.list_episodes(conn, V)}
+    got = {e.prompt_id: e for e in records.list_episodes(conn, V)[0]}
     assert got["p-missing"].injected is MISSING
     assert got["p-empty"].injected == ()
     assert got["p-filled"].injected == ("c-1",)
@@ -61,13 +61,13 @@ def test_episode_timestamps_normalized_and_filterable(conn, vault, make_episode)
     records.insert_episode(
         conn, V, make_episode(prompt_id="p-2", started_at=None, ended_at=None)
     )
-    [first, second] = records.list_episodes(conn, V)
+    [first, second], _ = records.list_episodes(conn, V)
     assert first.started_at is None  # NULL 排前面
     assert second.started_at == "2026-09-01T02:00:00.000Z"
     assert second.ended_at == "2026-09-01T02:05:00.000Z"
     assert [
         e.prompt_id
-        for e in records.list_episodes(conn, V, since="2026-09-01T01:00:00Z")
+        for e in records.list_episodes(conn, V, since="2026-09-01T01:00:00Z")[0]
     ] == ["p-1"]
 
 
@@ -93,7 +93,7 @@ def test_concept_upsert_overwrites_but_cannot_change_vault(conn, vault, add_vaul
     records.upsert_concept(
         conn, V, Concept(id="c-1", statement="v2", kind=None, surprisal=0.5)
     )
-    [got] = records.list_concepts(conn, V)
+    [got], _ = records.list_concepts(conn, V)
     assert (got.statement, got.surprisal) == ("v2", 0.5)
     other = add_vault("folder/other")
     with pytest.raises(DuplicateRecord):
@@ -107,7 +107,82 @@ def test_injection_round_trip(conn, vault):
     )
     records.insert_injection(conn, V, a)
     records.insert_injection(conn, V, b, recorded="2026-09-01T00:00:00+00:00")
-    assert records.list_injections(conn, V) == [a, b]
-    assert records.list_injections(conn, V, session_id="s-2") == [b]
+    assert records.list_injections(conn, V) == ([a, b], None)
+    assert records.list_injections(conn, V, session_id="s-2") == ([b], None)
     rec = conn.execute("SELECT recorded FROM injections ORDER BY seq").fetchall()
     assert rec[1][0] == "2026-09-01T00:00:00.000Z"
+
+
+# ── 分頁：預設上限截斷時呼叫端必須看得到 ─────────────────────────────
+
+
+def _drain(fetch):
+    """沿著 cursor 取完所有頁；回傳 (全部項目, 頁數)。"""
+    items, cursor = fetch(None)
+    pages = 1
+    while cursor is not None:
+        more, cursor = fetch(cursor)
+        items += more
+        pages += 1
+    return items, pages
+
+
+def test_episode_pagination_reports_truncation_across_null_started_at(
+    conn, vault, make_episode
+):
+    # started_at 為 NULL 的列跨在頁界上：tuple 比較遇 NULL 會靜默丟列
+    for i, started in enumerate([None, None, "2026-09-01T02:00:00Z", None]):
+        records.insert_episode(
+            conn,
+            V,
+            make_episode(prompt_id=f"p-{i}", started_at=started, ended_at=None),
+        )
+    page, cursor = records.list_episodes(conn, V, limit=2)
+    assert len(page) == 2 and cursor is not None
+    everything, pages = _drain(
+        lambda c: records.list_episodes(conn, V, limit=2, cursor=c)
+    )
+    assert pages == 2
+    assert [e.prompt_id for e in everything] == ["p-0", "p-1", "p-3", "p-2"]
+    assert records.list_episodes(conn, V, limit=4)[1] is None
+
+
+def test_concept_and_injection_pagination_reports_truncation(conn, vault):
+    for i in range(5):
+        records.upsert_concept(conn, V, Concept(id=f"c-{i}", statement="s", kind=None))
+        records.insert_injection(
+            conn, V, Injection(session_id=f"s-{i}", prompt_id="p", injected=[])
+        )
+    page, cursor = records.list_concepts(conn, V, limit=3)
+    assert len(page) == 3 and cursor == "c-2"
+    concepts, _ = _drain(lambda c: records.list_concepts(conn, V, limit=3, cursor=c))
+    assert [c.id for c in concepts] == [f"c-{i}" for i in range(5)]
+    page, cursor = records.list_injections(conn, V, limit=3)
+    assert len(page) == 3 and cursor is not None
+    injections, _ = _drain(
+        lambda c: records.list_injections(conn, V, limit=3, cursor=c)
+    )
+    assert [i.session_id for i in injections] == [f"s-{i}" for i in range(5)]
+    assert records.list_concepts(conn, V, limit=5)[1] is None
+    assert records.list_injections(conn, V, limit=5)[1] is None
+
+
+def test_truncation_hint_is_load_bearing(conn, vault, make_episode, monkeypatch):
+    """把「多抓一筆判斷下一頁」拿掉（只抓 limit 筆），截斷提示必須消失——
+    上面兩個分頁測試就是靠這個提示才會綠，拿掉即紅。"""
+    for i in range(3):
+        records.insert_episode(conn, V, make_episode(prompt_id=f"p-{i}"))
+        records.upsert_concept(conn, V, Concept(id=f"c-{i}", statement="s", kind=None))
+    original = conn.execute
+
+    class NoLookahead:
+        def execute(self, sql, params=()):
+            if "LIMIT ?" in sql:
+                params = (*params[:-1], params[-1] - 1)
+            return original(sql, params)
+
+    broken = NoLookahead()
+    assert records.list_episodes(broken, V, limit=2)[1] is None
+    assert records.list_concepts(broken, V, limit=2)[1] is None
+    assert records.list_episodes(conn, V, limit=2)[1] is not None
+    assert records.list_concepts(conn, V, limit=2)[1] is not None

@@ -93,7 +93,7 @@ def read_stored(request, tmp_path):
         try:
             upsert_vault(conn, Vault(key="folder/attr", display="attr"))
             insert_episode(conn, "folder/attr", Episode.from_dict(json.loads(stored)))
-            [ep] = list_episodes(conn, "folder/attr")
+            [ep], _ = list_episodes(conn, "folder/attr")
         finally:
             conn.close()
         return ep

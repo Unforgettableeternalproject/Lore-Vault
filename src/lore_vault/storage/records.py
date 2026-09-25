@@ -3,6 +3,9 @@
 schema 型別沒有 vault 欄；vault 由呼叫端（binding 解析結果）在寫入當下傳入並凍結，
 不在讀取時依 `repo` 重算（A7）。完整記錄以 JSON 存在 `data`，`to_dict` 省略
 MISSING 欄位，所以「值／None／欄位不存在」三態都能原樣讀回（spike 的 scope 事故）。
+
+列表函式一律回傳 `(本頁, 下一頁 cursor 或 None)`：預設上限截斷時呼叫端必須看得到，
+不可只回前 N 筆而不提示（與 `notes.list_notes` 相同，多抓一筆判斷是否還有下一頁）。
 """
 
 from __future__ import annotations
@@ -89,8 +92,14 @@ def list_episodes(
     session_id: str | None = None,
     since: str | None = None,
     limit: int = 1000,
-) -> list[Episode]:
-    """依 started_at、seq 由舊到新。`since` 比對 started_at（>=）。"""
+    cursor: tuple[str, int] | None = None,
+) -> tuple[list[Episode], tuple[str, int] | None]:
+    """依 started_at、seq 由舊到新分頁。`since` 比對 started_at（>=）。
+
+    回傳 (本頁, 下一頁 cursor 或 None)。started_at 可為 NULL（排最前面）；
+    排序與 cursor 都用 `coalesce(started_at, '')`，避免 NULL 參與 tuple 比較時
+    整列被靜默排除。
+    """
     scope = resolve_read(conn, vault)
     _check_limit(limit)
     clause, params = vault_clause(scope, "vault")
@@ -102,14 +111,23 @@ def list_episodes(
     if since is not None:
         conditions.append("started_at >= ?")
         args.append(normalize_utc(since))
+    if cursor is not None:
+        conditions.append("(coalesce(started_at, ''), seq) > (?, ?)")
+        args.extend(cursor)
     rows = conn.execute(
         f"""
-        SELECT data FROM episodes WHERE {" AND ".join(conditions)}
-        ORDER BY started_at, seq LIMIT ?
+        SELECT data, coalesce(started_at, '') AS started_key, seq FROM episodes
+        WHERE {" AND ".join(conditions)}
+        ORDER BY started_key, seq LIMIT ?
         """,
-        (*args, limit),
+        (*args, limit + 1),
     ).fetchall()
-    return [Episode.from_dict(json.loads(r["data"])) for r in rows]
+    page = rows[:limit]
+    items = [Episode.from_dict(json.loads(r["data"])) for r in page]
+    next_cursor = (
+        (page[-1]["started_key"], int(page[-1]["seq"])) if len(rows) > limit else None
+    )
+    return items, next_cursor
 
 
 def count_episodes(conn: sqlite3.Connection, vault: str) -> int:
@@ -180,16 +198,31 @@ def get_concepts(
 
 
 def list_concepts(
-    conn: sqlite3.Connection, vault: str, *, limit: int = 10000
-) -> list[Concept]:
+    conn: sqlite3.Connection,
+    vault: str,
+    *,
+    limit: int = 10000,
+    cursor: str | None = None,
+) -> tuple[list[Concept], str | None]:
+    """依 id 排序分頁；回傳 (本頁, 下一頁 cursor（最後一筆的 id）或 None)。"""
     scope = resolve_read(conn, vault)
     _check_limit(limit)
     clause, params = vault_clause(scope, "vault")
+    conditions = [clause]
+    args: list[Any] = [*params]
+    if cursor is not None:
+        conditions.append("id > ?")
+        args.append(cursor)
     rows = conn.execute(
-        f"SELECT data FROM concepts WHERE {clause} ORDER BY id LIMIT ?",
-        (*params, limit),
+        f"""
+        SELECT id, data FROM concepts WHERE {" AND ".join(conditions)}
+        ORDER BY id LIMIT ?
+        """,
+        (*args, limit + 1),
     ).fetchall()
-    return [Concept.from_dict(json.loads(r["data"])) for r in rows]
+    page = rows[:limit]
+    items = [Concept.from_dict(json.loads(r["data"])) for r in page]
+    return items, (page[-1]["id"] if len(rows) > limit else None)
 
 
 # ── Injection ───────────────────────────────────────────────────────
@@ -228,7 +261,9 @@ def list_injections(
     *,
     session_id: str | None = None,
     limit: int = 10000,
-) -> list[Injection]:
+    cursor: int | None = None,
+) -> tuple[list[Injection], int | None]:
+    """依寫入順序分頁；回傳 (本頁, 下一頁 cursor（最後一筆的 seq）或 None)。"""
     scope = resolve_read(conn, vault)
     _check_limit(limit)
     clause, params = vault_clause(scope, "vault")
@@ -237,11 +272,16 @@ def list_injections(
     if session_id is not None:
         conditions.append("session_id = ?")
         args.append(session_id)
+    if cursor is not None:
+        conditions.append("seq > ?")
+        args.append(cursor)
     rows = conn.execute(
         f"""
-        SELECT data FROM injections WHERE {" AND ".join(conditions)}
+        SELECT seq, data FROM injections WHERE {" AND ".join(conditions)}
         ORDER BY seq LIMIT ?
         """,
-        (*args, limit),
+        (*args, limit + 1),
     ).fetchall()
-    return [Injection.from_dict(json.loads(r["data"])) for r in rows]
+    page = rows[:limit]
+    items = [Injection.from_dict(json.loads(r["data"])) for r in page]
+    return items, (int(page[-1]["seq"]) if len(rows) > limit else None)

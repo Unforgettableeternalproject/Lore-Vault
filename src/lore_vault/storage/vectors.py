@@ -132,3 +132,25 @@ def search_vectors(
     # 同分依 note id 排序，結果穩定
     order = sorted(top.tolist(), key=lambda i: (-float(scores[i]), rows[i][0]))
     return [VectorHit(rows[i][0], rows[i][1], float(scores[i])) for i in order]
+
+
+def count_without_vector(conn: sqlite3.Connection, vault: str, *, dim: int) -> int:
+    """範圍內沒有可用向量（缺向量，或維度與設定不符而不參與比對）的 note 數。
+
+    recall 用來告知呼叫端：向量那一路只涵蓋部分 note。
+    """
+    _validate_dim(dim)
+    scope = resolve_read(conn, vault)
+    clause, params = vault_clause(scope, "n.vault")
+    return int(
+        conn.execute(
+            f"""
+            SELECT count(*) FROM notes n
+            WHERE {clause} AND NOT EXISTS (
+                SELECT 1 FROM note_embeddings e
+                WHERE e.note_seq = n.seq AND e.dim = ? AND length(e.vector) = ?
+            )
+            """,
+            (*params, dim, dim * _DTYPE.itemsize),
+        ).fetchone()[0]
+    )

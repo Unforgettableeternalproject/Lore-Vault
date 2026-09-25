@@ -112,6 +112,31 @@ def missing_embeddings(conn: sqlite3.Connection) -> Reconciliation:
     )
 
 
+def missing_summaries(conn: sqlite3.Connection) -> Reconciliation:
+    """沒有 summary 的 note 數（逐 vault）。
+
+    摘要由背景佇列非同步補（A14／D4），期間 recall 以正文首段頂替並標
+    `summary_source: "lead"`，所以非零是 warn 而非 fail。
+    """
+    rows = conn.execute(
+        """
+        SELECT vault, count(*) AS missing FROM notes WHERE summary IS NULL
+        GROUP BY vault ORDER BY vault
+        """
+    ).fetchall()
+    total = int(conn.execute("SELECT count(*) FROM notes").fetchone()[0])
+    missing = sum(int(r[1]) for r in rows)
+    counts = {"notes": total, "missing": missing}
+    if missing == 0:
+        return Reconciliation("pass", f"{total} 則 note 皆有 summary", counts)
+    return Reconciliation(
+        "warn",
+        f"{missing} 則 note 缺 summary（補齊前 recall 以正文首段頂替）",
+        counts,
+        tuple(f"{r[0]}: {r[1]}" for r in rows[:MAX_DETAILS]),
+    )
+
+
 def vector_dimension(conn: sqlite3.Connection, *, dim: int) -> Reconciliation:
     """維度與設定不符（或 BLOB 長度與宣告維度不符）的向量數。
 

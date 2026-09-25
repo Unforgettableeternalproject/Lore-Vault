@@ -118,8 +118,34 @@ def _v1(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+# 背景補算（summary／embedding）的嘗試紀錄與失敗狀態（T-19）。
+# 佇列本身不存：「缺 summary／缺 embedding」直接從 notes 推導；這張表只記嘗試。
+# for_updated：這些嘗試針對的 note 版本；note 內容變了，舊嘗試不再算數。
+_V2_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE note_enrichment (
+        note_seq     INTEGER NOT NULL REFERENCES notes(seq) ON DELETE CASCADE,
+        kind         TEXT NOT NULL CHECK (kind IN ('summary', 'embedding')),
+        for_updated  TEXT NOT NULL,
+        attempts     INTEGER NOT NULL CHECK (attempts >= 0),
+        status       TEXT NOT NULL CHECK (status IN ('pending', 'failed')),
+        last_error   TEXT,
+        last_attempt TEXT NOT NULL,
+        next_attempt TEXT NOT NULL,
+        PRIMARY KEY (note_seq, kind)
+    ) STRICT
+    """,
+    "CREATE INDEX note_enrichment_status ON note_enrichment(kind, status)",
+)
+
+
+def _v2(conn: sqlite3.Connection) -> None:
+    for statement in _V2_STATEMENTS:
+        conn.execute(statement)
+
+
 # 有序遷移：索引 i 的函式把版本從 i 升到 i+1。只能往後加，不可改動已發佈的項目。
-MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (_v1,)
+MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (_v1, _v2)
 
 SCHEMA_VERSION = len(MIGRATIONS)
 

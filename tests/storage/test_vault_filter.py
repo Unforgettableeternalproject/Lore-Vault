@@ -28,6 +28,9 @@ def _readers():
             c, v, [1, 0, 0, 0], dim=DIM
         ),
         "get_embedding": lambda c, v: vectors.get_embedding(c, v, "a-1"),
+        "count_without_vector": lambda c, v: vectors.count_without_vector(
+            c, v, dim=DIM
+        ),
         "list_episodes": lambda c, v: records.list_episodes(c, v),
         "count_episodes": lambda c, v: records.count_episodes(c, v),
         "list_concepts": lambda c, v: records.list_concepts(c, v),
@@ -177,13 +180,13 @@ def _leaks(conn) -> list[str]:
         found.append("search_vectors")
     if vectors.get_embedding(conn, "folder/a", "b-1") is not None:
         found.append("get_embedding")
-    if [c.id for c in records.list_concepts(conn, "folder/a")] != ["c-a"]:
+    if [c.id for c in records.list_concepts(conn, "folder/a")[0]] != ["c-a"]:
         found.append("list_concepts")
     if records.get_concepts(conn, "folder/a", ["c-b"]):
         found.append("get_concepts")
-    if [i.session_id for i in records.list_injections(conn, "folder/a")] != ["s-a"]:
+    if [i.session_id for i in records.list_injections(conn, "folder/a")[0]] != ["s-a"]:
         found.append("list_injections")
-    if [e.session_id for e in records.list_episodes(conn, "folder/a")] != ["s-a"]:
+    if [e.session_id for e in records.list_episodes(conn, "folder/a")[0]] != ["s-a"]:
         found.append("list_episodes")
     if records.count_episodes(conn, "folder/a") != 1:
         found.append("count_episodes")

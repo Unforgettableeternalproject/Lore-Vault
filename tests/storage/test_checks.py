@@ -17,6 +17,7 @@ STORAGE_CHECKS = {
     "storage.schema_version",
     "storage.fts_rows",
     "storage.missing_embeddings",
+    "storage.missing_summaries",
     "storage.vector_dimension",
 }
 
@@ -25,7 +26,7 @@ STORAGE_CHECKS = {
 def healthy(conn, add_vault, add_note):
     v = add_vault("folder/chk")
     for i in range(3):
-        add_note(v, f"n-{i}", f"標題 {i}", "正文")
+        add_note(v, f"n-{i}", f"標題 {i}", "正文", summary=f"摘要 {i}")
         vectors.set_embedding(conn, v, f"n-{i}", [1, i, 0, 0], dim=DIM)
     return conn
 
@@ -35,6 +36,7 @@ def _run(conn, dim=DIM):
         "schema_version": checks.schema_version(conn),
         "fts_rows": checks.fts_rows(conn),
         "missing_embeddings": checks.missing_embeddings(conn),
+        "missing_summaries": checks.missing_summaries(conn),
         "vector_dimension": checks.vector_dimension(conn, dim=dim),
     }
 
@@ -156,7 +158,7 @@ def _cli(*argv):
 def test_cli_opens_db_readonly_and_reports(healthy, db_path):
     code, report = _cli("--db", str(db_path), "--embedding-dim", str(DIM))
     assert code == 0
-    assert report["summary"]["pass"] == 4
+    assert report["summary"]["pass"] == len(STORAGE_CHECKS)
 
     healthy.execute("DELETE FROM note_fts WHERE rowid = 1")
     code, report = _cli("--db", str(db_path), "--embedding-dim", str(DIM))
@@ -184,3 +186,15 @@ def test_cli_missing_db_is_usage_error(tmp_path):
     with pytest.raises(SystemExit) as exc:
         doctor_main(["--db", str(tmp_path / "absent.db")], stdout=io.StringIO())
     assert exc.value.code == 2
+
+
+def test_missing_summaries_warns_and_counts(healthy, add_note):
+    add_note("folder/chk", "n-new", "新標題", "還沒有摘要")
+    healthy.execute("UPDATE notes SET summary = NULL WHERE id = 'n-0'")
+    rec = checks.missing_summaries(healthy)
+    assert rec.status == "warn"
+    assert rec.counts == {"notes": 4, "missing": 2}
+    assert rec.details == ("folder/chk: 2",)
+    assert _doctor(healthy, embedding_dim=DIM)["storage.missing_summaries"] is (
+        Status.WARN
+    )

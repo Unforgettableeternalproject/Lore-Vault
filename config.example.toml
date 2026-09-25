@@ -1,0 +1,38 @@
+# Lore Vault 設定範例（複製成 config.toml 後修改；以 --config 或環境變數 LORE_VAULT_CONFIG 指定）。
+# 優先序：環境變數 LORE_VAULT_<區段>_<項目>（例：LORE_VAULT_EMBEDDING_BASE_URL）> 本檔 > 預設值。
+# 密鑰不可寫在這裡：OpenAI key 只從環境變數 OPENAI_API_KEY（或 .env）讀取，
+# 本檔出現 api_key／token／secret／password 之類的鍵會直接拒絕載入。
+
+[database]
+# 資料庫路徑（資料目錄尚未定案，見 D5；無預設值）
+# path = "C:/path/to/lore.db"
+
+[embedding]
+provider = "ollama"
+# docker 內請改 http://host.docker.internal:11434
+base_url = "http://localhost:11434"
+model = "bge-m3"
+dim = 1024
+timeout = 30.0
+# 每分鐘呼叫上限；0 = 不限
+rate_per_minute = 0
+
+[summary]
+provider = "openai"
+base_url = "https://api.openai.com/v1"
+model = "gpt-6-luna"
+# 必須明確設定：不指定時推理會吃光 max_completion_tokens、回傳空字串（D4）
+reasoning_effort = "low"
+max_completion_tokens = 1000
+timeout = 60.0
+rate_per_minute = 30
+
+[worker]
+# 同一版本最多嘗試幾次，超過標記失敗（doctor enrich.failed 會紅）
+max_attempts = 3
+# 每輪每種補算最多處理幾則
+batch_size = 50
+# 失敗後重試間隔（秒）：第 n 次失敗後等 retry_backoff * 2^(n-1)
+retry_backoff = 60.0
+# 常駐模式兩輪之間的間隔（秒）
+poll_interval = 30.0
