@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# 環境與密鑰
+.env
+*.env
+
+# 本機資料（語料含商業專案原文，一律不進版控）
+data/*
+!data/golden_memories.json
+*.db
+*.sqlite
+*.bak-*
+
+# 編輯器與 agent 本機設定
+.vscode/
+.idea/
+.claude/
+
+# 本地Agent相關檔案
+CLAUDE.md
+AGENTS.md
+
+# 暫時不追蹤的檔案
+README.md
