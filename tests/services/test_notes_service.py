@@ -139,13 +139,22 @@ def test_write_rejects_wildcard_vault(vaults):
         write(vaults, "*", "t", "b")
 
 
-def test_dedup_embedding_text_matches_enrich():
-    """查重用的 embedding 輸入必須與背景補算一致，cosine 才可比。"""
-    worker = pytest.importorskip("lore_vault.enrich.worker")
-    for title, body in [("標題", "正文"), ("標題", "")]:
-        assert notes_service.embedding_text(title, body) == worker.embedding_text(
-            title, body
-        )
+def test_embedding_text_has_single_source():
+    """查重與背景補算用同一個函式算 embedding 輸入，cosine 才可比。"""
+    from lore_vault.enrich import worker
+    from lore_vault.notes import text
+
+    assert notes_service.embedding_text is text.embedding_text
+    assert worker.embedding_text is text.embedding_text
+    assert text.embedding_text("標題", "正文") == "標題\n\n正文"
+    assert text.embedding_text("標題", "") == "標題"
+
+
+def test_dedup_embeds_title_and_body(vaults, add_note, embedder):
+    add_note(A, "old", "舊標題", "舊內容")
+    embedder.calls.clear()
+    write(vaults, A, "新標題", "新內容", embedder=embedder, dim=DIM)
+    assert embedder.calls == ["新標題\n\n新內容"]
 
 
 # ── update ──────────────────────────────────────────────────────────

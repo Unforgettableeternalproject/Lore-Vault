@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from lore_vault.config import WorkerConfig
+from lore_vault.notes.text import embedding_text
 from lore_vault.storage import enrichment as store
 from lore_vault.storage.db import transaction
 from lore_vault.storage.errors import DimensionMismatch
@@ -79,9 +80,8 @@ class RunStats:
         }
 
 
-def embedding_text(title: str, body: str) -> str:
-    """embedding 的輸入：title + body（與 storage 在 title／body 變動時刪向量一致）。"""
-    return f"{title}\n\n{body}" if body else title
+# `should_stop` 觸發時 KindStats.stopped 的值
+STOPPED_SHUTDOWN = "服務關閉中，本輪中止"
 
 
 def _utc_now() -> datetime:
@@ -100,9 +100,11 @@ class EnrichWorker:
         summary_limiter: RateLimiter | None = None,
         now: Callable[[], datetime] = _utc_now,
         unavailable: dict[str, str] | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> None:
         """`embedder`／`summarizer` 為 None 時該種補算本輪略過；
-        `unavailable` 可帶略過原因（例如缺 API key）。"""
+        `unavailable` 可帶略過原因（例如缺 API key）。
+        `should_stop` 在每則 note 之前檢查，回 True 時本輪立刻結束（服務關閉用）。"""
         self.conn = conn
         self.config = config
         self.embedder = embedder
@@ -111,6 +113,7 @@ class EnrichWorker:
         self.summary_limiter = summary_limiter or RateLimiter(0)
         self.now = now
         self.unavailable = dict(unavailable or {})
+        self.should_stop = should_stop or (lambda: False)
 
     def run_once(self, *, limit: int | None = None) -> RunStats:
         stats = RunStats()
@@ -129,6 +132,9 @@ class EnrichWorker:
             self.conn, kind, now=format_utc(self.now()), limit=batch
         )
         for item in todo:
+            if self.should_stop():
+                stats.stopped = STOPPED_SHUTDOWN
+                return
             limiter.acquire()
             try:
                 if kind == "summary":

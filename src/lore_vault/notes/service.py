@@ -36,6 +36,7 @@ from lore_vault.storage.timeutil import normalize_utc, utc_now
 from lore_vault.storage.vaults import resolve_write
 
 from .summary import display_summary
+from .text import embedding_text
 
 # ── 查重門檻 ────────────────────────────────────────────────────────
 # 向量：bge-m3 cosine。2026-09-26 以合成句對實測（非正式語料）：改寫同義句
@@ -86,12 +87,6 @@ class InvalidCursor(ValueError):
 
 
 # ── 共用 ────────────────────────────────────────────────────────────
-
-
-def embedding_text(title: str, body: str) -> str:
-    """查重時的 embedding 輸入。必須與 `lore_vault.enrich.worker.embedding_text`
-    一致，cosine 才能和庫內向量比較（tests 有對照測試）。"""
-    return f"{title}\n\n{body}" if body else title
 
 
 def _token_set(text: str) -> set[str]:

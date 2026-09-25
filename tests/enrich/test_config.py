@@ -151,3 +151,56 @@ def test_import_has_no_side_effects(tmp_path):
     )
     assert result.stdout.strip() == "absent"
     assert sorted(p.name for p in tmp_path.iterdir()) == [".env"]
+
+
+# ── HTTP API 相關設定（T-24／T-28）──────────────────────────────────
+
+
+def test_api_defaults_and_query_timeout():
+    cfg = load_config(environ={})
+    assert cfg.api.enrich_worker is True
+    assert cfg.embedding.query_timeout == 3.0
+    assert cfg.embedding.timeout == 30.0  # 補算用的長逾時不受影響
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("true", True), ("1", True), ("YES", True), ("off", False), ("0", False)],
+)
+def test_bool_setting_from_env(raw, expected):
+    cfg = load_config(environ={"LORE_VAULT_API_ENRICH_WORKER": raw})
+    assert cfg.api.enrich_worker is expected
+
+
+def test_bool_setting_from_file_and_invalid_values(tmp_path):
+    path = tmp_path / "c.toml"
+    path.write_text("[api]\nenrich_worker = false\n", encoding="utf-8")
+    assert load_config(path, environ={}).api.enrich_worker is False
+    path.write_text("[api]\nenrich_worker = 1\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="布林"):
+        load_config(path, environ={})
+    with pytest.raises(ConfigError, match="布林"):
+        load_config(environ={"LORE_VAULT_API_ENRICH_WORKER": "maybe"})
+
+
+def test_query_timeout_must_be_positive():
+    with pytest.raises(ConfigError, match="query_timeout"):
+        load_config(environ={"LORE_VAULT_EMBEDDING_QUERY_TIMEOUT": "0"})
+
+
+def test_api_token_only_from_env():
+    from lore_vault.config import api_token
+
+    assert api_token(environ={}) is None
+    assert api_token(environ={"LORE_VAULT_API_TOKEN": "  "}) is None
+    token = api_token(environ={"LORE_VAULT_API_TOKEN": SENTINEL})
+    assert isinstance(token, Secret) and token.reveal() == SENTINEL
+    assert SENTINEL not in repr(token)
+
+
+def test_api_token_in_config_file_is_refused(tmp_path):
+    path = tmp_path / "c.toml"
+    path.write_text(f'[api]\ntoken = "{SENTINEL}"\n', encoding="utf-8")
+    with pytest.raises(ConfigError) as info:
+        load_config(path, environ={})
+    assert SENTINEL not in str(info.value)

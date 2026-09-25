@@ -12,6 +12,7 @@ from pathlib import Path
 from lore_vault.storage import checks as storage_checks
 from lore_vault.storage import enrichment as storage_enrichment
 
+from .backup_check import backup_recent
 from .framework import Check, CheckResult, CheckSkipped, DoctorContext, Registry
 from .hook_imports import DEFAULT_HOOKS_DIR, check_hook_imports
 
@@ -145,4 +146,12 @@ def default_registry() -> Registry:
         ),
     ):
         registry.add(Check(name, "enrich", func, description))
+    registry.add(
+        Check(
+            "backup.recent",
+            "backup",
+            backup_recent,
+            "最近一次備份在門檻內（從未備份為 fail）",
+        )
+    )
     return registry

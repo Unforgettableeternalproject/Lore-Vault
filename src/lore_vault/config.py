@@ -25,6 +25,7 @@ from typing import Any
 ENV_PREFIX = "LORE_VAULT_"
 CONFIG_PATH_ENV = "LORE_VAULT_CONFIG"
 OPENAI_KEY_ENV = "OPENAI_API_KEY"
+API_TOKEN_ENV = "LORE_VAULT_API_TOKEN"
 
 # 設定檔中不可出現的鍵（名稱等於或以這些字樣結尾即拒絕）；密鑰只走環境變數。
 # 用結尾比對而非包含：`max_completion_tokens` 不是密鑰。
@@ -68,6 +69,9 @@ class EmbeddingConfig:
     model: str = "bge-m3"
     dim: int = 1024
     timeout: float = 30.0
+    # 請求路徑（HTTP API 的 recall 與 write 查重）的 embedding 逾時（秒）。
+    # 與背景補算的 `timeout` 分開：請求端不能被 Ollama 拖住，逾時即降級。
+    query_timeout: float = 3.0
     # 每分鐘呼叫上限；0 = 不限
     rate_per_minute: int = 0
 
@@ -97,11 +101,29 @@ class WorkerConfig:
 
 
 @dataclass(frozen=True)
+class ApiConfig:
+    # HTTP 服務是否在同一程序內以背景執行緒跑補算 worker（A9：單一寫入程序）
+    enrich_worker: bool = True
+
+
+@dataclass(frozen=True)
+class BackupConfig:
+    # 備份目錄（容器內預設 /backups，由主機 bind mount；只放備份檔、不放 live DB）
+    dir: str | None = None
+    # 保留最近幾份
+    keep: int = 7
+    # doctor「最近一次備份」門檻（小時）；超過或從未備份為 fail
+    max_age_hours: float = 26.0
+
+
+@dataclass(frozen=True)
 class Config:
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     summary: SummaryConfig = field(default_factory=SummaryConfig)
     worker: WorkerConfig = field(default_factory=WorkerConfig)
+    backup: BackupConfig = field(default_factory=BackupConfig)
+    api: ApiConfig = field(default_factory=ApiConfig)
 
 
 _SECTIONS: dict[str, type] = {
@@ -109,7 +131,13 @@ _SECTIONS: dict[str, type] = {
     "embedding": EmbeddingConfig,
     "summary": SummaryConfig,
     "worker": WorkerConfig,
+    "backup": BackupConfig,
+    "api": ApiConfig,
 }
+
+# 布林設定可接受的寫法（環境變數是字串；TOML 可直接寫 true／false）
+_TRUE = frozenset({"1", "true", "yes", "on"})
+_FALSE = frozenset({"0", "false", "no", "off"})
 
 
 def _looks_secret(key: str) -> bool:
@@ -125,7 +153,15 @@ def _coerce(section: str, key: str, value: Any, default: Any, source: str) -> An
             raise ConfigError(f"{where} 必須是字串")
         return value
     if isinstance(default, bool):
-        raise ConfigError(f"{where} 型別不支援")  # 目前沒有布林設定
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in _TRUE:
+                return True
+            if lowered in _FALSE:
+                return False
+        raise ConfigError(f"{where} 必須是布林值（true／false／1／0）")
     if isinstance(default, int):
         if isinstance(value, bool):
             raise ConfigError(f"{where} 必須是整數")
@@ -232,11 +268,14 @@ def _validate(config: Config) -> None:
     positive = {
         "embedding.dim": config.embedding.dim,
         "embedding.timeout": config.embedding.timeout,
+        "embedding.query_timeout": config.embedding.query_timeout,
         "summary.max_completion_tokens": config.summary.max_completion_tokens,
         "summary.timeout": config.summary.timeout,
         "worker.max_attempts": config.worker.max_attempts,
         "worker.batch_size": config.worker.batch_size,
         "worker.poll_interval": config.worker.poll_interval,
+        "backup.keep": config.backup.keep,
+        "backup.max_age_hours": config.backup.max_age_hours,
     }
     for name, value in positive.items():
         if value <= 0:
@@ -259,4 +298,16 @@ def openai_api_key(
     """從環境變數（或 `.env`）取 OpenAI key；沒有或空白時回 None。"""
     env = _merged_environ(os.environ if environ is None else environ, env_file)
     value = env.get(OPENAI_KEY_ENV, "").strip()
+    return Secret(value) if value else None
+
+
+def api_token(
+    *,
+    env_file: str | PathLike[str] | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> Secret | None:
+    """HTTP API 的 bearer token（A15），只從環境變數 `LORE_VAULT_API_TOKEN`
+    （或 `.env`）讀；沒有或空白時回 None。長度等規則由 API 層檢查。"""
+    env = _merged_environ(os.environ if environ is None else environ, env_file)
+    value = env.get(API_TOKEN_ENV, "").strip()
     return Secret(value) if value else None

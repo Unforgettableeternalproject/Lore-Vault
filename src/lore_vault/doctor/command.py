@@ -1,5 +1,5 @@
 """`python -m lore_vault.doctor [--json] [--category NAME ...] [--db PATH]
-[--embedding-dim N]` 的進入點。
+[--embedding-dim N] [--backup-dir DIR] [--backup-max-age-hours H]` 的進入點。
 
 `--db` 以唯讀開啟（不建檔、不遷移），放進 context 資源 `"db"`；
 沒給時 storage 類檢查記為 skipped。
@@ -64,6 +64,13 @@ def main(
     parser.add_argument(
         "--embedding-dim", type=int, default=None, help="向量維度（對帳用）"
     )
+    parser.add_argument("--backup-dir", help="備份目錄（backup.recent 對帳用）")
+    parser.add_argument(
+        "--backup-max-age-hours",
+        type=float,
+        default=None,
+        help="最近一次備份的門檻（小時，預設 26）",
+    )
     args = parser.parse_args(argv)
 
     out = stdout if stdout is not None else sys.stdout
@@ -80,6 +87,10 @@ def main(
         resources: dict[str, object] = {}
         if args.embedding_dim is not None:
             settings["embedding_dim"] = args.embedding_dim
+        if args.backup_dir:
+            settings["backup_dir"] = args.backup_dir
+        if args.backup_max_age_hours is not None:
+            settings["backup_max_age_hours"] = args.backup_max_age_hours
         if args.db:
             try:
                 db = connect_readonly(args.db)

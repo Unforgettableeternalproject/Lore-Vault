@@ -65,30 +65,29 @@ def insert_note(conn: sqlite3.Connection, vault: str, note: Note) -> Note:
             created=normalize_utc(note.created),
             updated=normalize_utc(note.updated),
         )
-        try:
-            cursor = conn.execute(
-                """
-                INSERT INTO notes (id, vault, title, summary, body, topics, links,
-                                   supersedes, created, updated)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    stored.id,
-                    key,
-                    stored.title,
-                    stored.summary,
-                    stored.body,
-                    json.dumps(list(stored.topics), ensure_ascii=False),
-                    json.dumps(list(stored.links), ensure_ascii=False),
-                    stored.supersedes,
-                    stored.created,
-                    stored.updated,
-                ),
-            )
-        except sqlite3.IntegrityError as exc:
-            if "notes.id" in str(exc):
-                raise DuplicateRecord(f"note id 已存在：{note.id!r}") from exc
-            raise
+        # 在同一個 BEGIN IMMEDIATE 交易內先查存在（已持有寫鎖，無競態），
+        # 不靠 IntegrityError 的訊息字串判斷是哪個約束
+        if conn.execute("SELECT 1 FROM notes WHERE id = ?", (stored.id,)).fetchone():
+            raise DuplicateRecord(f"note id 已存在：{note.id!r}")
+        cursor = conn.execute(
+            """
+            INSERT INTO notes (id, vault, title, summary, body, topics, links,
+                               supersedes, created, updated)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                stored.id,
+                key,
+                stored.title,
+                stored.summary,
+                stored.body,
+                json.dumps(list(stored.topics), ensure_ascii=False),
+                json.dumps(list(stored.links), ensure_ascii=False),
+                stored.supersedes,
+                stored.created,
+                stored.updated,
+            ),
+        )
         seq = cursor.lastrowid
         assert seq is not None
         fts.upsert_row(

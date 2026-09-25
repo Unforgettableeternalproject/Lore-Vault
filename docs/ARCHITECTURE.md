@@ -88,13 +88,15 @@ side-car 紀錄：`{session_id, prompt_id, injected: [concept_id]}`，不含原�
 
 ## MCP 介面（草案）
 
+HTTP 契約為 `POST /v1/<工具名>` + JSON body，另有 `POST /v1/vaults` 建 vault（write 不自動建）；所有 `/v1` 需 bearer token，`GET /healthz` 公開。
+
 目標是讓 agent 用最少的上下文拿到足夠決策的資訊。工具數量刻意壓在個位數。
 
 | 工具 | 回傳 | 說明 |
 |---|---|---|
-| `vault_resolve(cwd)` | vault key、display、note 數 | 取代 pm-bind 的手動步驟 |
+| `vault_resolve(key)` | vault key、display、note 數 | 客戶端（MCP 殼）以 `lore_vault.binding` 從 cwd 算出 key，服務端做別名解析；取代 pm-bind 的手動步驟 |
 | `recall(query, vault, kinds?, limit?, budget?)` | `[{id, kind, title, summary, score, updated}]` | 統一檢索 Notes 與 Concepts；**預設不含全文**；`vault` 必填，跨範圍用 `vault="*"` 明示 |
-| `get(ids, budget?)` | 全文 | 可批次；超過預算時截斷並標示 |
+| `get(vault, ids, budget?)` | 全文 | 可批次；超過預算時截斷並標示；vault 必填（A5） |
 | `list(vault, since?, topics?, cursor?)` | 標題清單 | 分頁，回傳是否還有下一頁 |
 | `write(vault, title, body, topics?, supersedes?)` | id、疑似重複清單 | 寫入前自動查重，回傳相似 note 讓 agent 決定改用 `update` |
 | `update(id, body?, title?, topics?)` | id | |

@@ -13,18 +13,50 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TextIO
 
-from lore_vault.config import ConfigError, load_config, openai_api_key
+from lore_vault.config import Config, ConfigError, Secret, load_config, openai_api_key
 from lore_vault.storage import enrichment as store
 from lore_vault.storage.db import connect
 
 from .clients import OllamaEmbedder, OpenAISummarizer, Transport, urllib_transport
 from .worker import EnrichWorker, RateLimiter
+
+
+def build_worker(
+    conn: sqlite3.Connection,
+    config: Config,
+    api_key: Secret | None,
+    *,
+    transport: Transport = urllib_transport,
+    sleep: Callable[[float], None] = time.sleep,
+    should_stop: Callable[[], bool] | None = None,
+) -> EnrichWorker:
+    """依設定建立 worker（命令列與 HTTP 服務的背景執行緒共用）。
+
+    embedder 用 `embedding.timeout`（補算用的長逾時）；缺 OpenAI key 時略過摘要。
+    """
+    unavailable: dict[str, str] = {}
+    summarizer = None
+    if api_key is None:
+        unavailable["summary"] = "缺少 OPENAI_API_KEY，略過摘要"
+    else:
+        summarizer = OpenAISummarizer(config.summary, api_key, transport=transport)
+    return EnrichWorker(
+        conn,
+        config.worker,
+        embedder=OllamaEmbedder(config.embedding, transport=transport),
+        summarizer=summarizer,
+        embed_limiter=RateLimiter(config.embedding.rate_per_minute, sleep=sleep),
+        summary_limiter=RateLimiter(config.summary.rate_per_minute, sleep=sleep),
+        unavailable=unavailable,
+        should_stop=should_stop,
+    )
 
 
 def main(
@@ -72,21 +104,7 @@ def main(
             count = store.reset_failed(conn, kind)
             print(json.dumps({"reset": count}, ensure_ascii=False), file=out)
             return 0
-        unavailable: dict[str, str] = {}
-        summarizer = None
-        if api_key is None:
-            unavailable["summary"] = "缺少 OPENAI_API_KEY，略過摘要"
-        else:
-            summarizer = OpenAISummarizer(config.summary, api_key, transport=transport)
-        worker = EnrichWorker(
-            conn,
-            config.worker,
-            embedder=OllamaEmbedder(config.embedding, transport=transport),
-            summarizer=summarizer,
-            embed_limiter=RateLimiter(config.embedding.rate_per_minute, sleep=sleep),
-            summary_limiter=RateLimiter(config.summary.rate_per_minute, sleep=sleep),
-            unavailable=unavailable,
-        )
+        worker = build_worker(conn, config, api_key, transport=transport, sleep=sleep)
         while True:
             stats = worker.run_once(limit=args.limit)
             print(json.dumps(stats.to_dict(), ensure_ascii=False), file=out)
