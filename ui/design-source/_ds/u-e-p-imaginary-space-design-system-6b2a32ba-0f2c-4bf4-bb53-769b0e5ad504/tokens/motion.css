@@ -1,0 +1,21 @@
+/* Three easings carry the whole site. Portal is the ceremonial one. */
+:root{
+  --ease:cubic-bezier(.2,.7,.3,1); /* @kind other */
+  --ease-out:cubic-bezier(.16,1,.3,1); /* @kind other */
+  --ease-portal:cubic-bezier(.7,0,.3,1); /* @kind other */
+  --ease-land:cubic-bezier(.22,1,.36,1); /* @kind other */
+
+  --dur-hover:.2s; /* @kind other */
+  --dur-state:.25s; /* @kind other */
+  --dur-panel:.3s; /* @kind other */
+  --dur-reveal:.7s; /* @kind other */
+  --dur-transition:.8s; /* @kind other */
+  --dur-boot:1.8s; /* @kind other */
+  --dur-ceremony:4.2s; /* @kind other */
+}
+
+@keyframes uep-fadeIn{from{opacity:0}to{opacity:1}}
+@keyframes uep-slow-rotate{from{transform:rotate(0)}to{transform:rotate(360deg)}}
+@keyframes uep-drift{0%{transform:translate(0,0);opacity:0}10%{opacity:var(--drift-opacity,.55)}90%{opacity:var(--drift-opacity,.55)}100%{transform:translate(var(--drift-x,0),var(--drift-y,-20px));opacity:0}}
+@keyframes uep-pulse{0%,100%{opacity:.6;transform:scale(1)}50%{opacity:1;transform:scale(1.06)}}
+@keyframes uep-shimmer{from{background-position:200% 0}to{background-position:-100% 0}}

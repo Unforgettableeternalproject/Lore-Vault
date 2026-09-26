@@ -1,0 +1,59 @@
+/* Five zones. Each has main / soft / tint / stroke / atmo.
+   main+soft never change between themes; tint, stroke and atmo do. */
+:root{
+  --history-main:#6b3f2a;
+  --history-soft:#c8a46a;
+  --history-tint:#f3e6c8;
+  --echoes-main:#355c7d;
+  --echoes-soft:#6c5b7b;
+  --echoes-tint:#f8b195;
+  --visuals-main:#5e548e;
+  --visuals-soft:#9f86c0;
+  --visuals-tint:#e0b1cb;
+  --concepts-main:#2d6a4f;
+  --concepts-soft:#74c69d;
+  --concepts-tint:#d8f3dc;
+  --storage-main:#c4a00e;
+  --storage-soft:#d5b618;
+  --storage-tint:#f5f5f0;
+
+  --history-stroke:rgba(107,63,42,.85);
+  --echoes-stroke:rgba(53,92,125,.85);
+  --visuals-stroke:rgba(94,84,142,.85);
+  --concepts-stroke:rgba(45,106,79,.85);
+  --storage-stroke:rgba(196,160,14,.7);
+
+  /* atmosphere colours: saturation >=60%, for drifting glyphs & particles */
+  --history-atmo:#b85a24;
+  --echoes-atmo:#3876a8;
+  --visuals-atmo:#7840c8;
+  --concepts-atmo:#1da85e;
+  --storage-atmo:#d4a810;
+}
+
+[data-theme='dark']{
+  --history-tint:rgba(200,164,106,.25);
+  --echoes-tint:rgba(248,177,149,.25);
+  --visuals-tint:rgba(224,177,203,.25);
+  --concepts-tint:rgba(116,198,157,.25);
+  --storage-tint:rgba(213,182,24,.25);
+
+  --history-stroke:rgba(200,164,106,.75);
+  --echoes-stroke:rgba(108,91,123,.85);
+  --visuals-stroke:rgba(159,134,192,.8);
+  --concepts-stroke:rgba(116,198,157,.75);
+  --storage-stroke:rgba(213,182,24,.65);
+
+  --history-atmo:#d98a3a;
+  --echoes-atmo:#5a98cc;
+  --visuals-atmo:#9b6de0;
+  --concepts-atmo:#3dcc82;
+  --storage-atmo:#ecc020;
+}
+
+/* Zone scope: set data-zone on a container to bind --zone-* aliases. */
+[data-zone='history']{--zone-main:var(--history-main);--zone-soft:var(--history-soft);--zone-tint:var(--history-tint);--zone-stroke:var(--history-stroke);--zone-atmo:var(--history-atmo)}
+[data-zone='echoes']{--zone-main:var(--echoes-main);--zone-soft:var(--echoes-soft);--zone-tint:var(--echoes-tint);--zone-stroke:var(--echoes-stroke);--zone-atmo:var(--echoes-atmo)}
+[data-zone='visuals']{--zone-main:var(--visuals-main);--zone-soft:var(--visuals-soft);--zone-tint:var(--visuals-tint);--zone-stroke:var(--visuals-stroke);--zone-atmo:var(--visuals-atmo)}
+[data-zone='concepts']{--zone-main:var(--concepts-main);--zone-soft:var(--concepts-soft);--zone-tint:var(--concepts-tint);--zone-stroke:var(--concepts-stroke);--zone-atmo:var(--concepts-atmo)}
+[data-zone='storage']{--zone-main:var(--storage-main);--zone-soft:var(--storage-soft);--zone-tint:var(--storage-tint);--zone-stroke:var(--storage-stroke);--zone-atmo:var(--storage-atmo)}
