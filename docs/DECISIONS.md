@@ -24,6 +24,7 @@
 | A18 | 內容分群：space 先分 `dev`／`lore`／`personal`，現有 vault 全歸 `dev`。agent 預設讀 `dev`，**不以 token 限制**；以 MCP 工具切換「目前 space」，其餘工具只回傳目前 space 的內容。檔案存儲與檢索納入範圍（D10 提案方向），Podcast 不做 | 艾斯維爾 2026-09-26 |
 | A19 | 文件支援：md、txt、json、yaml、toml、pdf、docx、pptx 一次支援，其他純文字檔（含程式碼）一律當 txt；pdf 中文抽取先以 `E:\Documents` 的樣本做前置實測；文件 LLM 摘要第一版不做；單檔上限 25MB／1000 萬字元（2026-09-26 由 200 萬提高：文字密集的中文 pdf 20MB 可抽出約 940 萬字）；`upload_roots` 預設為殼 cwd、可設定額外白名單。space 的三個小項（程式白名單 + doctor、非 dev 不自動建 global、換 space 只走管理指令）照設計 | 艾斯維爾 2026-09-26，設計見 `docs/design/SPACES_AND_DOCUMENTS.md` |
 | A20 | `dev` 與非 dev（`lore`／`personal`）之間不互相轉換、不共用 vault；換 space 只允許 `lore`↔`personal`，並在單一交易內把 key 改成新前綴（舊 key 不留別名）。快照含全部 space、由殼端過濾；無 body 的 `POST /v1/status` 免帶 space | 艾斯維爾 2026-09-26 |
+| A21 | UI：Preact + Vite 建置成靜態檔，由服務在 `/ui` 提供（node 只在 docker 建置階段）；身分驗證改在服務本地端點執行（取代依賴 Cloudflare Access），Access 至多作外層、服務端不驗其 JWT；note 加入「作者」欄位，契約（agent 如何填）由艾斯維爾另訂；UI 需能經 `pm` 子網域連入，tunnel 切換提前處理 | 艾斯維爾 2026-09-26，見 docs/design/UI-IMPLEMENTATION-PLAN.md |
 
 ## 待裁決
 
