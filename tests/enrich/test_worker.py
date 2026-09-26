@@ -76,13 +76,15 @@ def test_success_writes_summary_and_embedding_without_bumping_version(
     stats = worker.run_once()
     assert (stats.summary.done, stats.embedding.done) == (1, 1)
 
-    stored = get_note(conn, VAULT, "n-1")
+    stored = get_note(conn, VAULT, "n-1", space="dev")
     assert stored.summary == "採用 SQLite WAL，查詢 3ms。"
     # 衍生資料寫回不推進樂觀鎖版本
     assert stored.updated == note.updated
     # FTS 同步更新：摘要裡才有的詞搜得到
-    assert [h.note_id for h in fts.search_notes(conn, VAULT, "查詢")] == ["n-1"]
-    assert vectors.get_embedding(conn, VAULT, "n-1") is not None
+    assert [h.note_id for h in fts.search_notes(conn, VAULT, "查詢", space="dev")] == [
+        "n-1"
+    ]
+    assert vectors.get_embedding(conn, VAULT, "n-1", space="dev") is not None
     assert enrichment_rows(conn) == []
     # 沒有候選了
     again = worker.run_once()
@@ -91,7 +93,7 @@ def test_success_writes_summary_and_embedding_without_bumping_version(
 
 def test_notes_with_summary_or_embedding_are_skipped(conn, add_note, clock, http):
     add_note("n-1", summary="已有摘要")
-    vectors.set_embedding(conn, VAULT, "n-1", VEC, dim=DIM)
+    vectors.set_embedding(conn, VAULT, "n-1", VEC, space="dev", dim=DIM)
     worker = make_worker(conn, clock, summary=http.Transport(), embed=http.Transport())
     stats = worker.run_once()  # 空 transport 被呼叫會 AssertionError
     assert (stats.summary.done, stats.embedding.done) == (0, 0)
@@ -122,7 +124,7 @@ def test_failures_are_recorded_and_summary_stays_null(
     worker = make_worker(conn, clock, summary=http.Transport(reply))
     stats = worker.run_once()
     assert stats.summary.retry == 1 and stats.summary.done == 0
-    assert get_note(conn, VAULT, "n-1").summary is None
+    assert get_note(conn, VAULT, "n-1", space="dev").summary is None
     [row] = enrichment_rows(conn)
     assert row["kind"] == "summary" and row["attempts"] == 1
     assert row["status"] == "pending"
@@ -207,7 +209,7 @@ def test_embedding_invalid_vector_is_failure(conn, add_note, clock, http):
     fake = http.Transport(http.embed([0.0, 0.0, 0.0, 0.0]))  # 零向量無法正規化
     stats = make_worker(conn, clock, embed=fake).run_once()
     assert stats.embedding.retry == 1
-    assert vectors.get_embedding(conn, VAULT, "n-1") is None
+    assert vectors.get_embedding(conn, VAULT, "n-1", space="dev") is None
 
 
 # ── race：補算期間 note 被更新 ──
@@ -226,9 +228,14 @@ class UpdatingSummarizer:
     def summarize(self, title: str, body: str) -> str:
         self.calls.append(body)
         if len(self.calls) == 1:
-            current = get_note(self.conn, VAULT, "n-1")
+            current = get_note(self.conn, VAULT, "n-1", space="dev")
             update_note_if(
-                self.conn, VAULT, "n-1", current.updated, {"body": "新版正文"}
+                self.conn,
+                VAULT,
+                "n-1",
+                current.updated,
+                {"body": "新版正文"},
+                space="dev",
             )
             if self.then_raise:
                 raise InvalidOutput("摘要為空字串")
@@ -243,12 +250,12 @@ def test_race_summary_result_for_old_version_is_discarded(conn, add_note, clock)
     stats = worker.run_once()
     assert stats.summary.stale == 1 and stats.summary.done == 0
     # 舊內容的摘要沒有蓋到新版本上
-    assert get_note(conn, VAULT, "n-1").summary is None
+    assert get_note(conn, VAULT, "n-1", space="dev").summary is None
 
     # 下一輪以新版本補算
     stats = worker.run_once()
     assert stats.summary.done == 1
-    assert get_note(conn, VAULT, "n-1").summary == "摘要：新版正文"
+    assert get_note(conn, VAULT, "n-1", space="dev").summary == "摘要：新版正文"
     assert summarizer.calls == ["舊版正文", "新版正文"]
 
 
@@ -271,8 +278,10 @@ class UpdatingEmbedder:
     def embed(self, text: str):
         self.calls += 1
         if self.calls == 1:
-            current = get_note(self.conn, VAULT, "n-1")
-            update_note_if(self.conn, VAULT, "n-1", current.updated, {"body": "新版"})
+            current = get_note(self.conn, VAULT, "n-1", space="dev")
+            update_note_if(
+                self.conn, VAULT, "n-1", current.updated, {"body": "新版"}, space="dev"
+            )
         return VEC
 
 
@@ -282,18 +291,18 @@ def test_race_embedding_for_old_version_is_discarded(conn, add_note, clock):
     worker = make_worker(conn, clock, embed=embedder)
     stats = worker.run_once()
     assert stats.embedding.stale == 1
-    assert vectors.get_embedding(conn, VAULT, "n-1") is None
+    assert vectors.get_embedding(conn, VAULT, "n-1", space="dev") is None
     assert worker.run_once().embedding.done == 1
-    assert vectors.get_embedding(conn, VAULT, "n-1") is not None
+    assert vectors.get_embedding(conn, VAULT, "n-1", space="dev") is not None
 
 
 def test_write_summary_if_current_refuses_stale_version(conn, add_note):
     """拿掉 `updated` 比對時這個測試會紅：舊版本的摘要不可寫入。"""
     note = add_note("n-1")
     seq = conn.execute("SELECT seq FROM notes WHERE id = 'n-1'").fetchone()[0]
-    update_note_if(conn, VAULT, "n-1", note.updated, {"body": "改過"})
+    update_note_if(conn, VAULT, "n-1", note.updated, {"body": "改過"}, space="dev")
     assert store.write_summary_if_current(conn, seq, note.updated, "舊摘要") is False
-    assert get_note(conn, VAULT, "n-1").summary is None
+    assert get_note(conn, VAULT, "n-1", space="dev").summary is None
 
 
 def test_new_version_resets_failed_state(conn, add_note, clock, http):
@@ -303,8 +312,8 @@ def test_new_version_resets_failed_state(conn, add_note, clock, http):
     assert worker.run_once().summary.gave_up == 1
     assert doctor(conn, now=clock())["enrich.failed"].status is Status.FAIL
 
-    current = get_note(conn, VAULT, "n-1")
-    update_note_if(conn, VAULT, "n-1", current.updated, {"body": "改寫後"})
+    current = get_note(conn, VAULT, "n-1", space="dev")
+    update_note_if(conn, VAULT, "n-1", current.updated, {"body": "改寫後"}, space="dev")
     # 失敗紀錄屬於舊版本，不再算失敗；新版本重新排入
     assert doctor(conn, now=clock())["enrich.failed"].status is Status.PASS
     assert worker.run_once().summary.done == 1
@@ -314,7 +323,7 @@ def test_summary_writeback_keeps_list_order(conn, add_note, clock, http):
     add_note("old", ts="2026-09-01T00:00:00.000Z")
     add_note("new", ts="2026-09-01T01:00:00.000Z", summary="已有")
     make_worker(conn, clock, summary=http.Transport(http.chat("補上"))).run_once()
-    page, _ = list_notes(conn, VAULT)
+    page, _ = list_notes(conn, VAULT, space="dev")
     assert [n.id for n in page] == ["new", "old"]
 
 
@@ -422,7 +431,7 @@ def test_enrichment_rows_cascade_on_note_delete(conn, add_note, clock, http):
     add_note("n-1")
     make_worker(conn, clock, summary=http.Transport(http.chat(""))).run_once()
     assert len(enrichment_rows(conn)) == 1
-    delete_note(conn, VAULT, "n-1")
+    delete_note(conn, VAULT, "n-1", space="dev")
     assert enrichment_rows(conn) == []
 
 
@@ -448,7 +457,7 @@ def test_cli_once_with_fake_transport(tmp_path, conn, add_note, http, monkeypatc
     assert KEY not in text
     stats = json.loads(text.splitlines()[-1])
     assert stats["summary"]["done"] == 1 and stats["embedding"]["done"] == 1
-    assert get_note(conn, VAULT, "n-1").summary == "CLI 摘要"
+    assert get_note(conn, VAULT, "n-1", space="dev").summary == "CLI 摘要"
 
 
 def test_cli_without_db_path_is_usage_error(monkeypatch, capsys):

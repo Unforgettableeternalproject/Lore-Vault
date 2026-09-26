@@ -11,6 +11,18 @@ class VaultRequired(StorageError, ValueError):
     """未傳 vault、傳空值，或在寫入時傳了 `"*"`。"""
 
 
+class SpaceRequired(StorageError, ValueError):
+    """未傳 space、傳空值或非字串（服務端不預設 dev，比照 vault 的 A5 態度）。"""
+
+
+class InvalidSpace(StorageError, ValueError):
+    """space 不在白名單（`schema.SPACES`）。"""
+
+
+class SpaceKeyPrefixRequired(StorageError, ValueError):
+    """非 dev space 的 vault key 必須以 `<space>/` 開頭；dev 的 key 不可佔用它們。"""
+
+
 class UnknownVault(StorageError, LookupError):
     """vault key（或別名）不存在；不自動建立，避免拼錯字產生幽靈範圍。"""
 

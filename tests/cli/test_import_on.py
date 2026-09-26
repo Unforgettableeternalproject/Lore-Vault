@@ -284,7 +284,7 @@ def test_import_creates_vaults_notes_and_keeps_timestamps(fake, tmp_path, conn):
     ]
     kinds = dict(conn.execute("SELECT key, kind FROM vaults").fetchall())
     assert kinds["global"] == "global"
-    note = get_note(conn, "github.com/u/alpha", "note:a1")
+    note = get_note(conn, "github.com/u/alpha", "note:a1", space="dev")
     assert note.created == note.updated == "2026-05-18T03:18:02.289Z"
     assert note.summary is None
     assert conn.execute("SELECT count(*) FROM note_embeddings").fetchone()[0] == 0
@@ -301,8 +301,8 @@ def test_link_to_title_with_brackets():
 def test_links_resolve_within_vault_and_report_the_rest(fake, tmp_path, conn):
     export, mapping = _prepare(fake, tmp_path)
     report = mod.run_import(conn, export, _reviewed(mapping))
-    a1 = get_note(conn, "github.com/u/alpha", "note:a1")
-    a2 = get_note(conn, "github.com/u/alpha", "note:a2")
+    a1 = get_note(conn, "github.com/u/alpha", "note:a1", space="dev")
+    a2 = get_note(conn, "github.com/u/alpha", "note:a2", space="dev")
     assert a1.links == ("note:a2",)
     assert a2.links == ("note:a1",)  # 大小寫與 |別名 都能解析
     assert "[[Beta 筆記]]" in a1.body  # 原文保留
@@ -328,7 +328,7 @@ def test_multi_membership_uses_assignment(fake, tmp_path, conn):
     mapping = _reviewed(mapping)
     mapping["note_assignments"]["note:a1"]["assigned"] = "notebook:b"
     report = mod.run_import(conn, export, mapping)
-    assert get_note(conn, "folder/beta", "note:a1").vault == "folder/beta"
+    assert get_note(conn, "folder/beta", "note:a1", space="dev").vault == "folder/beta"
     assert report["per_vault"]["folder/beta"] == 2
     assert len(report["multi_membership"]) == 1
     assert _reconcile(conn).status is Status.PASS
@@ -356,9 +356,14 @@ def test_rerun_is_idempotent(fake, tmp_path, conn):
 def test_rerun_does_not_overwrite_locally_modified_note(fake, tmp_path, conn):
     export, mapping = _prepare(fake, tmp_path)
     mod.run_import(conn, export, _reviewed(mapping))
-    current = get_note(conn, "folder/beta", "note:b1")
+    current = get_note(conn, "folder/beta", "note:b1", space="dev")
     update_note_if(
-        conn, "folder/beta", "note:b1", current.updated, {"body": "新系統改"}
+        conn,
+        "folder/beta",
+        "note:b1",
+        current.updated,
+        {"body": "新系統改"},
+        space="dev",
     )
     # 來源端也改了：仍不覆寫本地修改
     fake.notes["note:b1"]["content"] = "ON 端也改了"
@@ -366,7 +371,7 @@ def test_rerun_does_not_overwrite_locally_modified_note(fake, tmp_path, conn):
     export, _ = _prepare(fake, tmp_path)
     report = mod.run_import(conn, export, mapping)
     assert report["notes"]["modified_locally"] == ["note:b1"]
-    assert get_note(conn, "folder/beta", "note:b1").body == "新系統改"
+    assert get_note(conn, "folder/beta", "note:b1", space="dev").body == "新系統改"
     # 合法修改（updated 推進）只報告、不算竄改
     result = _reconcile(conn)
     assert result.status is Status.PASS
@@ -381,7 +386,7 @@ def test_rerun_applies_source_change_when_not_modified_locally(fake, tmp_path, c
     export, _ = _prepare(fake, tmp_path)
     report = mod.run_import(conn, export, mapping)
     assert report["notes"]["updated_from_source"] == 1
-    note = get_note(conn, "global", "note:g1")
+    note = get_note(conn, "global", "note:g1", space="dev")
     assert note.body == "ON 端更新" and note.updated == "2026-09-01T00:00:00.123Z"
     assert _reconcile(conn).status is Status.PASS
 
@@ -402,7 +407,7 @@ def test_timestamp_anomalies_are_reported(fake, tmp_path, conn):
         ("updated", "naive"),
         ("updated", "before_created"),
     }
-    note = get_note(conn, "global", "note:t1")
+    note = get_note(conn, "global", "note:t1", space="dev")
     assert note.created == note.updated == "2026-05-18T03:00:00.000Z"
 
 
@@ -424,6 +429,7 @@ def test_reconcile_passes_after_import_and_reports_extras(fake, tmp_path, conn):
         conn,
         "global",
         Note(id="new-1", vault="global", title="新增", body="", created=ts, updated=ts),
+        space="dev",
     )
     result = _reconcile(conn)
     assert result.status is Status.PASS
@@ -453,7 +459,7 @@ def test_reconcile_goes_red_when_one_note_is_missing(fake, tmp_path, conn):
 def test_admin_deleted_note_is_not_reimported(fake, tmp_path, conn):
     export, mapping = _prepare(fake, tmp_path)
     mod.run_import(conn, export, _reviewed(mapping))
-    admin.delete_note(conn, "folder/beta", "note:b1")
+    admin.delete_note(conn, "folder/beta", "note:b1", space="dev")
     result = _reconcile(conn)
     assert result.status is Status.PASS
     assert result.counts["deleted"] == 1
@@ -475,7 +481,7 @@ def test_without_tombstone_check_reimport_revives_deleted_note(
     """拿掉匯入端的墓碑檢查：刻意刪除的 note 會被匯回來。"""
     export, mapping = _prepare(fake, tmp_path)
     mod.run_import(conn, export, _reviewed(mapping))
-    admin.delete_note(conn, "folder/beta", "note:b1")
+    admin.delete_note(conn, "folder/beta", "note:b1", space="dev")
     monkeypatch.setattr(
         imports,
         "tombstones",
@@ -509,7 +515,7 @@ def test_deleted_vault_is_not_recreated_on_reimport(fake, tmp_path, conn):
 def test_undeleted_note_comes_back_on_reimport(fake, tmp_path, conn):
     export, mapping = _prepare(fake, tmp_path)
     mod.run_import(conn, export, _reviewed(mapping))
-    admin.delete_note(conn, "folder/beta", "note:b1")
+    admin.delete_note(conn, "folder/beta", "note:b1", space="dev")
     admin.undelete_note(conn, "note:b1")
     assert _reconcile(conn).status is Status.FAIL
     report = mod.run_import(conn, export, mapping)
@@ -640,7 +646,7 @@ def test_import_sanitizes_nul_and_reports(fake, tmp_path, conn):
     )
     export, mapping = _prepare(fake, tmp_path)
     report = mod.run_import(conn, export, _reviewed(mapping))
-    stored = get_note(conn, "github.com/u/alpha", "note:z")
+    stored = get_note(conn, "github.com/u/alpha", "note:z", space="dev")
     backslash = chr(92)
     assert stored.body == f"前{backslash}0後{backslash}0"
     assert stored.title == f"有{backslash}x01控制"
@@ -940,7 +946,7 @@ def test_export_and_import_orphans_with_supplement(fake, tmp_path, conn):
     assert report["orphans"]["unassigned"] == ["note:oe"]
     assert report["skipped"]["orphan_excluded"] == 1
     assert report["per_vault"]["folder/beta"] == 1 + 3  # b1 + ob、oc、od（別名解析）
-    oa = get_note(conn, "github.com/u/alpha", "note:oa")
+    oa = get_note(conn, "github.com/u/alpha", "note:oa", space="dev")
     assert oa.body == "前" + chr(92) + "0後"
     assert report["sanitized"]["notes"] == [{"id": "note:oa", "title": 0, "body": 1}]
     assert _reconcile(conn).status is Status.PASS

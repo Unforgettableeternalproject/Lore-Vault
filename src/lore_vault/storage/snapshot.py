@@ -106,7 +106,7 @@ def file_sha256(path: str | PathLike[str]) -> str:
 # 筆數不變，這類變動都必須讓快取失效。`PRAGMA data_version` 只在同一條連線內有意義，
 # 檔案標頭的 change counter 在 WAL 模式不更新，兩者都不可靠。
 _FINGERPRINT_QUERIES = (
-    "SELECT key, display, kind, created FROM {db}.vaults ORDER BY key",
+    "SELECT key, display, kind, created, space FROM {db}.vaults ORDER BY key",
     "SELECT alias, vault FROM {db}.vault_aliases ORDER BY alias",
     "SELECT seq, id, vault, title, summary, body, topics, links, supersedes, "
     "created, updated FROM {db}.notes ORDER BY seq",
@@ -165,8 +165,10 @@ def build_snapshot(
                 )
             conn.execute("BEGIN")
             conn.execute(
-                "INSERT INTO main.vaults (key, display, kind, created) "
-                "SELECT key, display, kind, created FROM src.vaults"
+                # space 必須一起複製：否則快照裡的 vault 全落回預設 dev，
+                # 降級時 lore／personal 的內容會在 dev 下被看見
+                "INSERT INTO main.vaults (key, display, kind, created, space) "
+                "SELECT key, display, kind, created, space FROM src.vaults"
             )
             conn.execute(
                 "INSERT INTO main.vault_aliases (alias, vault) "

@@ -67,8 +67,8 @@ def test_every_timestamp_written_by_storage_is_canonical(
     note = add_note(v, "n-1", "t", ts="2026-09-01T00:00:00+00:00")
     from lore_vault.storage.notes import update_note_if
 
-    update_note_if(conn, v, "n-1", note.updated, {"title": "x"})
-    vectors.set_embedding(conn, v, "n-1", [1, 0], dim=2)
+    update_note_if(conn, v, "n-1", note.updated, {"title": "x"}, space="dev")
+    vectors.set_embedding(conn, v, "n-1", [1, 0], space="dev", dim=2)
     records.insert_episode(
         conn, v, make_episode(started_at="2026-09-01T02:00:00+00:00")
     )

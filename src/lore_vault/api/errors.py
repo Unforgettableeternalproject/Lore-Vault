@@ -17,7 +17,10 @@ from lore_vault.recall import UnsupportedKind
 from lore_vault.schema import InvalidCharacters
 from lore_vault.storage.errors import (
     DuplicateRecord,
+    InvalidSpace,
     NotFound,
+    SpaceKeyPrefixRequired,
+    SpaceRequired,
     StorageError,
     UnknownVault,
     VaultConflict,
@@ -69,6 +72,9 @@ def install_error_handlers(app: FastAPI) -> None:
         app.add_exception_handler(exc_type, handler)
 
     simple(VaultRequired, 400, "vault_required")
+    simple(SpaceRequired, 400, "space_required")
+    simple(InvalidSpace, 400, "invalid_space")
+    simple(SpaceKeyPrefixRequired, 400, "space_key_prefix_required")
     simple(NotFound, 404, "not_found")
     simple(NoChanges, 400, "no_changes")
     simple(InvalidCursor, 400, "invalid_cursor")

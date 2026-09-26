@@ -20,16 +20,16 @@ BAD_VAULTS = [None, "", "   ", 123, " folder/a"]
 
 def _readers():
     return {
-        "get_notes": lambda c, v: notes.get_notes(c, v, ["a-1"]),
-        "list_notes": lambda c, v: notes.list_notes(c, v),
-        "count_notes": lambda c, v: notes.count_notes(c, v),
-        "search_notes": lambda c, v: fts.search_notes(c, v, "共同"),
+        "get_notes": lambda c, v: notes.get_notes(c, v, ["a-1"], space="dev"),
+        "list_notes": lambda c, v: notes.list_notes(c, v, space="dev"),
+        "count_notes": lambda c, v: notes.count_notes(c, v, space="dev"),
+        "search_notes": lambda c, v: fts.search_notes(c, v, "共同", space="dev"),
         "search_vectors": lambda c, v: vectors.search_vectors(
-            c, v, [1, 0, 0, 0], dim=DIM
+            c, v, [1, 0, 0, 0], space="dev", dim=DIM
         ),
-        "get_embedding": lambda c, v: vectors.get_embedding(c, v, "a-1"),
+        "get_embedding": lambda c, v: vectors.get_embedding(c, v, "a-1", space="dev"),
         "count_without_vector": lambda c, v: vectors.count_without_vector(
-            c, v, dim=DIM
+            c, v, space="dev", dim=DIM
         ),
         "list_episodes": lambda c, v: records.list_episodes(c, v),
         "count_episodes": lambda c, v: records.count_episodes(c, v),
@@ -49,11 +49,13 @@ def _writers():
         updated="2026-09-01T00:00:00Z",
     )
     return {
-        "insert_note": lambda c, v: notes.insert_note(c, v, note),
-        "update_note_if": lambda c, v: notes.update_note_if(c, v, "a-1", "x", {}),
-        "delete_note": lambda c, v: notes.delete_note(c, v, "a-1"),
+        "insert_note": lambda c, v: notes.insert_note(c, v, note, space="dev"),
+        "update_note_if": lambda c, v: notes.update_note_if(
+            c, v, "a-1", "x", {}, space="dev"
+        ),
+        "delete_note": lambda c, v: notes.delete_note(c, v, "a-1", space="dev"),
         "set_embedding": lambda c, v: vectors.set_embedding(
-            c, v, "a-1", [1, 0, 0, 0], dim=DIM
+            c, v, "a-1", [1, 0, 0, 0], space="dev", dim=DIM
         ),
         "upsert_concept": lambda c, v: records.upsert_concept(
             c, v, Concept(id="c-x", statement="s", kind=None)
@@ -70,8 +72,8 @@ def two_vaults(conn, add_vault, add_note, make_episode):
     add_vault("folder/b")
     add_note("folder/a", "a-1", "A 的筆記", "共同 關鍵字 alpha")
     add_note("folder/b", "b-1", "B 的筆記", "共同 關鍵字 beta")
-    vectors.set_embedding(conn, "folder/a", "a-1", [1, 0, 0, 0], dim=DIM)
-    vectors.set_embedding(conn, "folder/b", "b-1", [1, 0.1, 0, 0], dim=DIM)
+    vectors.set_embedding(conn, "folder/a", "a-1", [1, 0, 0, 0], space="dev", dim=DIM)
+    vectors.set_embedding(conn, "folder/b", "b-1", [1, 0.1, 0, 0], space="dev", dim=DIM)
     records.upsert_concept(
         conn, "folder/a", Concept(id="c-a", statement="a", kind=None)
     )
@@ -108,8 +110,11 @@ def test_unknown_vault_raises_not_empty(two_vaults, name):
 
 def test_key_is_case_insensitive_and_aliases_resolve(two_vaults, add_vault):
     add_vault("github.com/me/new", aliases=("github.com/me/old",))
-    assert notes.count_notes(two_vaults, "FOLDER/A") == 1
-    assert get_vault(two_vaults, "GitHub.com/Me/Old").key == "github.com/me/new"
+    assert notes.count_notes(two_vaults, "FOLDER/A", space="dev") == 1
+    assert (
+        get_vault(two_vaults, "GitHub.com/Me/Old", space="dev").key
+        == "github.com/me/new"
+    )
 
 
 def test_alias_conflicts_are_rejected(two_vaults, add_vault):
@@ -126,7 +131,7 @@ def test_alias_conflicts_are_rejected(two_vaults, add_vault):
         )
     with pytest.raises(VaultConflict):
         upsert_vault(two_vaults, Vault(key="folder/old", display="x"))
-    assert [v.key for v in list_vaults(two_vaults)] == [
+    assert [v.key for v in list_vaults(two_vaults, space=None)] == [
         "folder/a",
         "folder/b",
         "folder/d",
@@ -143,7 +148,7 @@ def test_note_vault_must_match_argument(two_vaults):
         updated="2026-09-01T00:00:00Z",
     )
     with pytest.raises(VaultRequired, match="不一致"):
-        notes.insert_note(two_vaults, "folder/a", note)
+        notes.insert_note(two_vaults, "folder/a", note, space="dev")
 
 
 def test_cross_vault_write_by_id_is_not_found(two_vaults):
@@ -151,12 +156,14 @@ def test_cross_vault_write_by_id_is_not_found(two_vaults):
 
     with pytest.raises(NotFound):
         notes.update_note_if(
-            two_vaults, "folder/a", "b-1", "2026-09-01T00:00:00.000Z", {}
+            two_vaults, "folder/a", "b-1", "2026-09-01T00:00:00.000Z", {}, space="dev"
         )
     with pytest.raises(NotFound):
-        vectors.set_embedding(two_vaults, "folder/a", "b-1", [1, 0, 0, 0], dim=DIM)
+        vectors.set_embedding(
+            two_vaults, "folder/a", "b-1", [1, 0, 0, 0], space="dev", dim=DIM
+        )
     with pytest.raises(NotFound):
-        notes.delete_note(two_vaults, "folder/a", "b-1")
+        notes.delete_note(two_vaults, "folder/a", "b-1", space="dev")
 
 
 # ── 洩漏測試 ────────────────────────────────────────────────────────
@@ -166,19 +173,26 @@ def _leaks(conn) -> list[str]:
     """以 vault A 的身分走每一條讀取 API，回傳看到 B 資料的 API 名稱。"""
     found = []
     if any(
-        n.vault != "folder/a" for n in notes.get_notes(conn, "folder/a", ["a-1", "b-1"])
+        n.vault != "folder/a"
+        for n in notes.get_notes(conn, "folder/a", ["a-1", "b-1"], space="dev")
     ):
         found.append("get_notes")
-    if any(n.vault != "folder/a" for n in notes.list_notes(conn, "folder/a")[0]):
+    if any(
+        n.vault != "folder/a"
+        for n in notes.list_notes(conn, "folder/a", space="dev")[0]
+    ):
         found.append("list_notes")
-    if notes.count_notes(conn, "folder/a") != 1:
+    if notes.count_notes(conn, "folder/a", space="dev") != 1:
         found.append("count_notes")
-    if any(h.vault != "folder/a" for h in fts.search_notes(conn, "folder/a", "共同")):
+    if any(
+        h.vault != "folder/a"
+        for h in fts.search_notes(conn, "folder/a", "共同", space="dev")
+    ):
         found.append("search_notes")
-    hits = vectors.search_vectors(conn, "folder/a", [1, 0, 0, 0], dim=DIM)
+    hits = vectors.search_vectors(conn, "folder/a", [1, 0, 0, 0], space="dev", dim=DIM)
     if any(h.vault != "folder/a" for h in hits):
         found.append("search_vectors")
-    if vectors.get_embedding(conn, "folder/a", "b-1") is not None:
+    if vectors.get_embedding(conn, "folder/a", "b-1", space="dev") is not None:
         found.append("get_embedding")
     if [c.id for c in records.list_concepts(conn, "folder/a")[0]] != ["c-a"]:
         found.append("list_concepts")
@@ -211,10 +225,12 @@ def test_normal_api_does_not_leak(two_vaults):
 
 
 def test_explicit_wildcard_reads_across_vaults(two_vaults):
-    assert notes.count_notes(two_vaults, ALL_VAULTS) == 2
-    hits = fts.search_notes(two_vaults, ALL_VAULTS, "共同")
+    assert notes.count_notes(two_vaults, ALL_VAULTS, space="dev") == 2
+    hits = fts.search_notes(two_vaults, ALL_VAULTS, "共同", space="dev")
     assert {h.vault for h in hits} == {"folder/a", "folder/b"}
-    hits = vectors.search_vectors(two_vaults, ALL_VAULTS, [1, 0, 0, 0], dim=DIM)
+    hits = vectors.search_vectors(
+        two_vaults, ALL_VAULTS, [1, 0, 0, 0], space="dev", dim=DIM
+    )
     assert {h.note_id for h in hits} == {"a-1", "b-1"}
 
 

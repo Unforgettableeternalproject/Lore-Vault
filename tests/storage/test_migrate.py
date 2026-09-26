@@ -138,7 +138,7 @@ def test_v6_adds_episode_prompt_turn_index_to_v5_db(db_path):
         index_sql = "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?"
         assert raw.execute(index_sql, ("episodes_prompt_turn",)).fetchone() is None
 
-        assert migrate(raw) == SCHEMA_VERSION == 6
+        assert migrate(raw, migrations=migrate_mod.MIGRATIONS[:6]) == 6
         assert raw.execute(index_sql, ("episodes_prompt_turn",)).fetchone()
         plan = " ".join(
             str(row[-1])
@@ -150,5 +150,29 @@ def test_v6_adds_episode_prompt_turn_index_to_v5_db(db_path):
         )
         assert "episodes_prompt_turn" in plan
         assert raw.execute("SELECT count(*) FROM episodes").fetchone()[0] == 1
+    finally:
+        raw.close()
+
+
+def test_v7_adds_space_and_existing_vaults_become_dev(db_path):
+    """v6 的庫（含 vault 與別名）升到 v7：`vaults.space` 出現，既有 vault 全為 dev
+    （A18），別名照舊可在 dev 解析。"""
+    from lore_vault.storage.vaults import resolve_write
+
+    raw = sqlite3.connect(db_path, isolation_level=None)
+    try:
+        assert migrate(raw, migrations=migrate_mod.MIGRATIONS[:6]) == 6
+        raw.execute(
+            "INSERT INTO vaults (key, display, kind, created) VALUES "
+            "('folder/m', 'm', 'repo', '2026-09-01T00:00:00.000Z'), "
+            "('global', 'g', 'global', '2026-09-01T00:00:00.000Z')"
+        )
+        raw.execute(
+            "INSERT INTO vault_aliases (alias, vault) VALUES ('old-m', 'folder/m')"
+        )
+        assert migrate(raw) == SCHEMA_VERSION == 7
+        rows = raw.execute("SELECT key, space FROM vaults ORDER BY key").fetchall()
+        assert rows == [("folder/m", "dev"), ("global", "dev")]
+        assert resolve_write(raw, "old-m", space="dev") == "folder/m"
     finally:
         raw.close()

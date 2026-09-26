@@ -129,11 +129,12 @@ def add_note(conn, embedder):
                 created=ts,
                 updated=ts,
             ),
+            space="dev",
         )
         if embed:
             text = f"{title}\n\n{body}" if body else title
             vectors.set_embedding(
-                conn, vault, note_id, FakeEmbedder().embed(text), dim=DIM
+                conn, vault, note_id, FakeEmbedder().embed(text), space="dev", dim=DIM
             )
         return note
 

@@ -52,7 +52,7 @@ def corpus(conn, add_vault, add_note):
 
 
 def _ids(conn, query, **kw):
-    return [h.note_id for h in fts.search_notes(conn, V, query, **kw)]
+    return [h.note_id for h in fts.search_notes(conn, V, query, space="dev", **kw)]
 
 
 @pytest.mark.parametrize(
@@ -109,27 +109,32 @@ def test_empty_or_syntax_only_query_returns_nothing(corpus):
 
 
 def test_limit_and_score_order(corpus):
-    hits = fts.search_notes(corpus, V, "記憶", limit=1)
+    hits = fts.search_notes(corpus, V, "記憶", space="dev", limit=1)
     assert len(hits) == 1
-    all_hits = fts.search_notes(corpus, V, "記憶")
+    all_hits = fts.search_notes(corpus, V, "記憶", space="dev")
     assert [h.score for h in all_hits] == sorted(
         (h.score for h in all_hits), reverse=True
     )
     with pytest.raises(ValueError):
-        fts.search_notes(corpus, V, "記憶", limit=0)
+        fts.search_notes(corpus, V, "記憶", space="dev", limit=0)
 
 
 # ── 與主表同步（同一交易）───────────────────────────────────────────
 
 
 def test_update_reindexes_and_delete_removes(corpus):
-    note = notes.get_note(corpus, V, "n-time")
+    note = notes.get_note(corpus, V, "n-time", space="dev")
     notes.update_note_if(
-        corpus, V, "n-time", note.updated, {"title": "時區規則", "body": "容器是 UTC"}
+        corpus,
+        V,
+        "n-time",
+        note.updated,
+        {"title": "時區規則", "body": "容器是 UTC"},
+        space="dev",
     )
     assert _ids(corpus, "時間戳") == []
     assert _ids(corpus, "時區規則") == ["n-time"]
-    notes.delete_note(corpus, V, "n-time")
+    notes.delete_note(corpus, V, "n-time", space="dev")
     assert _ids(corpus, "時區規則") == []
     assert corpus.execute("SELECT count(*) FROM note_fts").fetchone()[0] == 3
 
@@ -155,12 +160,14 @@ def test_fts_failure_rolls_back_note_insert(conn, add_vault, add_note, monkeypat
 
 
 def test_fts_failure_rolls_back_note_update(corpus, monkeypatch):
-    before = notes.get_note(corpus, V, "n-time")
+    before = notes.get_note(corpus, V, "n-time", space="dev")
 
     def boom(*args, **kwargs):
         raise RuntimeError("FTS 寫入失敗")
 
     monkeypatch.setattr(fts, "upsert_row", boom)
     with pytest.raises(RuntimeError):
-        notes.update_note_if(corpus, V, "n-time", before.updated, {"title": "新標題"})
-    assert notes.get_note(corpus, V, "n-time") == before
+        notes.update_note_if(
+            corpus, V, "n-time", before.updated, {"title": "新標題"}, space="dev"
+        )
+    assert notes.get_note(corpus, V, "n-time", space="dev") == before

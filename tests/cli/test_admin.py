@@ -57,8 +57,10 @@ def db(tmp_path):
             ("folder/a", "note:a3"),
             ("folder/b", "note:b1"),
         ):
-            insert_note(conn, vault, _note(vault, note_id, note_id))
-            set_embedding(conn, vault, note_id, [1.0, 0.0, 0.0, 0.0], dim=DIM)
+            insert_note(conn, vault, _note(vault, note_id, note_id), space="dev")
+            set_embedding(
+                conn, vault, note_id, [1.0, 0.0, 0.0, 0.0], space="dev", dim=DIM
+            )
         seq = conn.execute("SELECT seq FROM notes WHERE id = 'note:a1'").fetchone()[0]
         record_failure(
             conn,
@@ -137,7 +139,9 @@ def test_fixture_is_green(db):
 
 def test_delete_note_dry_run_changes_nothing(db):
     before = _table_counts(db)
-    code, result = _run(db, "delete-note", "--vault", "alias-a", "--id", "note:a1")
+    code, result = _run(
+        db, "delete-note", "--space", "dev", "--vault", "alias-a", "--id", "note:a1"
+    )
     assert code == 0
     assert result["mode"] == "dry_run"
     assert result["vault"] == "folder/a"
@@ -156,6 +160,8 @@ def test_delete_imported_note_writes_tombstone_and_stays_green(db):
     code, result = _run(
         db,
         "delete-note",
+        "--space",
+        "dev",
         "--vault",
         "folder/a",
         "--id",
@@ -192,7 +198,17 @@ def test_delete_imported_note_writes_tombstone_and_stays_green(db):
 
 
 def test_delete_native_note_tombstone_has_no_source(db):
-    code, _ = _run(db, "delete-note", "--vault", "folder/a", "--id", "note:a3", "--yes")
+    code, _ = _run(
+        db,
+        "delete-note",
+        "--space",
+        "dev",
+        "--vault",
+        "folder/a",
+        "--id",
+        "note:a3",
+        "--yes",
+    )
     assert code == 0
     conn = connect(db)
     try:
@@ -205,7 +221,17 @@ def test_delete_native_note_tombstone_has_no_source(db):
 
 
 def test_undelete_removes_tombstone_and_reconcile_reports_missing(db):
-    _run(db, "delete-note", "--vault", "folder/a", "--id", "note:a1", "--yes")
+    _run(
+        db,
+        "delete-note",
+        "--space",
+        "dev",
+        "--vault",
+        "folder/a",
+        "--id",
+        "note:a1",
+        "--yes",
+    )
     code, result = _run(db, "undelete-note", "--id", "note:a1")
     assert code == 0 and result["mode"] == "dry_run"
     assert _table_counts(db)["note_tombstones"] == 1
@@ -288,7 +314,7 @@ def test_delete_vault_rejects_alias_and_unknown(db):
         with pytest.raises(UnknownVault, match="別名"):
             admin.plan_vault_deletion(conn, "alias-a")
         with pytest.raises(NotFound):
-            admin.plan_note_deletion(conn, "folder/b", "note:a1")
+            admin.plan_note_deletion(conn, "folder/b", "note:a1", space="dev")
     finally:
         conn.close()
     assert _run(db, "delete-vault", "--key", "folder/nope")[0] == 1
@@ -354,7 +380,17 @@ def test_raw_delete_without_tombstone_turns_reconcile_red(db):
 
 def test_delete_with_tombstone_removed_turns_reconcile_red(db):
     """拿掉墓碑：admin 刪除後的狀態就等同漏匯。"""
-    _run(db, "delete-note", "--vault", "folder/a", "--id", "note:a1", "--yes")
+    _run(
+        db,
+        "delete-note",
+        "--space",
+        "dev",
+        "--vault",
+        "folder/a",
+        "--id",
+        "note:a1",
+        "--yes",
+    )
     conn = connect(db)
     try:
         conn.execute("DELETE FROM note_tombstones")
@@ -380,7 +416,61 @@ def test_cascade_guard_catches_orphans(db):
         conn.execute("PRAGMA foreign_keys = OFF")
         before = conn.execute("SELECT count(*) FROM notes").fetchone()[0]
         with pytest.raises(admin.PlanChanged, match="孤兒"):
-            admin.delete_note(conn, "folder/a", "note:a2")
+            admin.delete_note(conn, "folder/a", "note:a2", space="dev")
         assert conn.execute("SELECT count(*) FROM notes").fetchone()[0] == before
     finally:
         conn.close()
+
+
+# ── set-space（A19／D-space-3：只走管理指令）──
+
+
+def _space_of(db, key: str) -> str:
+    conn = connect(db)
+    try:
+        return conn.execute(
+            "SELECT space FROM vaults WHERE key = ?", (key,)
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+
+def test_delete_note_requires_space(db, capsys):
+    with pytest.raises(SystemExit) as info:
+        _run(db, "delete-note", "--vault", "folder/a", "--id", "note:a1")
+    assert info.value.code == 2
+    # 在錯的 space 找不到（不洩漏、不刪）
+    code, _ = _run(
+        db, "delete-note", "--space", "lore", "--vault", "folder/a", "--id", "note:a1"
+    )
+    assert code == 1
+
+
+def test_set_space_dry_run_then_apply(db):
+    conn = connect(db)
+    try:
+        upsert_vault(conn, Vault(key="lore/arc", display="arc", space="lore"))
+    finally:
+        conn.close()
+    code, result = _run(db, "set-space", "--key", "lore/arc", "--space", "dev")
+    assert code == 0
+    assert result["mode"] == "dry_run" and result["from"] == "lore"
+    assert _space_of(db, "lore/arc") == "lore"
+    code, result = _run(db, "set-space", "--key", "lore/arc", "--space", "dev", "--yes")
+    assert code == 0 and result == {
+        "mode": "changed",
+        "key": "lore/arc",
+        "from": "lore",
+        "to": "dev",
+    }
+    assert _space_of(db, "lore/arc") == "dev"
+
+
+def test_set_space_rejects_prefix_mismatch_and_aliases(db):
+    # dev 的 folder/a 不能直接搬到 lore（key 沒有 lore/ 前綴）；dry-run 就擋
+    for extra in ((), ("--yes",)):
+        code, _ = _run(db, "set-space", "--key", "folder/a", "--space", "lore", *extra)
+        assert code == 1
+    assert _space_of(db, "folder/a") == "dev"
+    code, _ = _run(db, "set-space", "--key", "alias-a", "--space", "dev")
+    assert code == 1

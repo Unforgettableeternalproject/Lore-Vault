@@ -33,7 +33,9 @@ def seeded(db_path):
     conn = connect(db_path)
     try:
         ids = [
-            notes_service.write(conn, VAULT, f"記憶 {i}", f"內容 {i}").note.id
+            notes_service.write(
+                conn, VAULT, f"記憶 {i}", f"內容 {i}", space="dev"
+            ).note.id
             for i in range(3)
         ]
     finally:
@@ -80,11 +82,13 @@ async def test_etag_and_304(app, seeded):
 
 def _mutations():
     def write(conn, ids):
-        notes_service.write(conn, VAULT, "新的", "新內容")
+        notes_service.write(conn, VAULT, "新的", "新內容", space="dev")
 
     def update_title(conn, ids):
-        note = notes_service.get(conn, VAULT, [ids[0]]).items[0]
-        notes_service.update(conn, VAULT, ids[0], note["updated"], title="改標題")
+        note = notes_service.get(conn, VAULT, [ids[0]], space="dev").items[0]
+        notes_service.update(
+            conn, VAULT, ids[0], note["updated"], space="dev", title="改標題"
+        )
 
     def summary_only(conn, ids):
         # 背景補摘要不推進 updated：「max(updated) + 筆數」會漏掉這種變動
@@ -97,8 +101,8 @@ def _mutations():
 
     def delete_then_write(conn, ids):
         # 筆數不變
-        delete_note(conn, VAULT, ids[2])
-        notes_service.write(conn, VAULT, "替代", "替代內容")
+        delete_note(conn, VAULT, ids[2], space="dev")
+        notes_service.write(conn, VAULT, "替代", "替代內容", space="dev")
 
     def add_alias(conn, ids):
         upsert_vault(
@@ -144,7 +148,7 @@ async def test_cache_ignores_data_outside_snapshot(app, db_path, seeded):
     await fetch(app)
     conn = connect(db_path)
     try:
-        vectors.set_embedding(conn, VAULT, seeded[0], [1.0] * DIM, dim=DIM)
+        vectors.set_embedding(conn, VAULT, seeded[0], [1.0] * DIM, space="dev", dim=DIM)
     finally:
         conn.close()
     await fetch(app)

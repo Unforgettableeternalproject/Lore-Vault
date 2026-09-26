@@ -59,7 +59,7 @@ def add_note(conn):
             created=ts,
             updated=ts,
         )
-        return insert_note(conn, vault, note)
+        return insert_note(conn, vault, note, space="dev")
 
     return add
 

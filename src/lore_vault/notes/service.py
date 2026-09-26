@@ -159,23 +159,26 @@ def find_duplicates(
     title: str,
     body: str,
     *,
+    space: str,
     embedder: Embedder | None = None,
     dim: int | None = None,
     vector_threshold: float = DEDUP_VECTOR_THRESHOLD,
     lexical_threshold: float = DEDUP_LEXICAL_THRESHOLD,
     exclude: Sequence[str] = (),
 ) -> tuple[list[DuplicateCandidate], str | None]:
-    """同一 vault 內與 (title, body) 相似的 note。
+    """同一 vault（與 space）內與 (title, body) 相似的 note。
 
     回傳 (疑似重複清單, 向量那一路的降級原因或 None)。
     """
-    key = resolve_write(conn, vault)
+    key = resolve_write(conn, vault, space=space)
     own_tokens = _token_set(f"{title} {body}")
     query_tokens = list(dict.fromkeys(fts.tokens(f"{title} {body}")))
     query = " ".join(query_tokens[:DEDUP_QUERY_TOKENS])
     candidate_ids: dict[str, None] = {}
     if query:
-        for hit in fts.search_notes(conn, key, query, limit=DEDUP_CANDIDATES):
+        for hit in fts.search_notes(
+            conn, key, query, space=space, limit=DEDUP_CANDIDATES
+        ):
             candidate_ids[hit.note_id] = None
 
     cosine: dict[str, float] = {}
@@ -186,7 +189,7 @@ def find_duplicates(
         qv = embed_text(embedder, embedding_text(title, body), dim=dim)
         if qv.ok:
             for hit in vectors.search_vectors(
-                conn, key, qv.vector, dim=dim, limit=DEDUP_CANDIDATES
+                conn, key, qv.vector, space=space, dim=dim, limit=DEDUP_CANDIDATES
             ):
                 cosine[hit.note_id] = hit.score
                 candidate_ids[hit.note_id] = None
@@ -196,7 +199,7 @@ def find_duplicates(
     excluded = set(exclude)
     own_title = _norm_title(title)
     found: list[DuplicateCandidate] = []
-    for note in get_notes(conn, key, list(candidate_ids)):
+    for note in get_notes(conn, key, list(candidate_ids), space=space):
         if note.id in excluded:
             continue
         lexical = _jaccard(own_tokens, _token_set(f"{note.title} {note.body}"))
@@ -224,6 +227,7 @@ def write(
     title: str,
     body: str,
     *,
+    space: str,
     topics: Sequence[str] = (),
     links: Sequence[str] = (),
     supersedes: str | None = None,
@@ -256,14 +260,15 @@ def write(
             "supersedes": supersedes,
         }
     )
-    key = resolve_write(conn, vault)
+    key = resolve_write(conn, vault, space=space)
     if supersedes is not None:
-        get_note(conn, key, supersedes)  # 不存在拋 NotFound
+        get_note(conn, key, supersedes, space=space)  # 不存在拋 NotFound
     duplicates, reason = find_duplicates(
         conn,
         key,
         title,
         body,
+        space=space,
         embedder=embedder,
         dim=dim,
         vector_threshold=vector_threshold,
@@ -283,7 +288,7 @@ def write(
         links=links,
         supersedes=supersedes,
     )
-    stored = insert_note(conn, key, note)
+    stored = insert_note(conn, key, note, space=space)
     return WriteResult(stored, duplicates, reason is not None, reason)
 
 
@@ -317,6 +322,7 @@ def update(
     note_id: str,
     expected_updated: str,
     *,
+    space: str,
     title: str | None = None,
     body: str | None = None,
     topics: Sequence[str] | None = None,
@@ -347,17 +353,21 @@ def update(
     check_fields(changes)
 
     with transaction(conn):
-        key = resolve_write(conn, vault)
-        current = get_note(conn, key, note_id)  # 不存在拋 NotFound
+        key = resolve_write(conn, vault, space=space)
+        current = get_note(conn, key, note_id, space=space)  # 不存在拋 NotFound
         if changes.get("supersedes") is not None:
-            get_note(conn, key, changes["supersedes"])
+            get_note(conn, key, changes["supersedes"], space=space)
         body_changed = "body" in changes and changes["body"] != current.body
         title_changed = "title" in changes and changes["title"] != current.title
         if body_changed:
             changes["summary"] = None
-        updated = update_note_if(conn, key, note_id, expected_updated, changes, now=now)
+        updated = update_note_if(
+            conn, key, note_id, expected_updated, changes, space=space, now=now
+        )
         if updated is None:
-            raise VersionConflict(get_note(conn, key, note_id), expected_updated)
+            raise VersionConflict(
+                get_note(conn, key, note_id, space=space), expected_updated
+            )
     return UpdateResult(updated, body_changed, body_changed or title_changed)
 
 
@@ -388,6 +398,7 @@ def get(
     vault: str,
     ids: Sequence[str],
     *,
+    space: str,
     budget: int = DEFAULT_GET_BUDGET,
 ) -> GetResult:
     """批次取全文。依傳入順序分配 body 字數預算；超過時該篇 body 截斷、之後各篇
@@ -401,7 +412,7 @@ def get(
         raise ValueError(f"一次最多取 {MAX_GET_IDS} 則，得到 {len(unique)}")
     if isinstance(budget, bool) or not isinstance(budget, int) or budget <= 0:
         raise ValueError(f"budget 必須是正整數，得到 {budget!r}")
-    found = {n.id: n for n in get_notes(conn, vault, unique)}
+    found = {n.id: n for n in get_notes(conn, vault, unique, space=space)}
     items: list[dict[str, Any]] = []
     remaining = budget
     any_truncated = False
@@ -478,6 +489,7 @@ def list_(
     conn: sqlite3.Connection,
     vault: str,
     *,
+    space: str,
     since: str | None = None,
     topics: Sequence[str] | None = None,
     cursor: str | None = None,
@@ -490,7 +502,13 @@ def list_(
         raise ValueError(f"limit 必須在 1–{MAX_LIST_LIMIT}，得到 {limit}")
     decoded = _decode_cursor(cursor) if cursor is not None else None
     notes, next_cursor = list_notes(
-        conn, vault, since=since, topics=topics, limit=limit, cursor=decoded
+        conn,
+        vault,
+        space=space,
+        since=since,
+        topics=topics,
+        limit=limit,
+        cursor=decoded,
     )
     items = [
         {

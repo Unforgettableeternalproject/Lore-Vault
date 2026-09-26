@@ -1,9 +1,14 @@
 """管理指令（不提供 MCP 工具）：`python -m lore_vault.cli.admin <子指令>`。
 
-- `delete-note --vault KEY --id NOTE_ID [--reason TEXT]`
+- `delete-note --space SPACE --vault KEY --id NOTE_ID [--reason TEXT]`：vault 在
+  該 space 內解析（space 必填，與服務端相同無預設）
 - `delete-vault --key KEY [--force] [--reason TEXT]`：vault 內有 note 或其他紀錄時
   必須 `--force`
 - `undelete-note --id NOTE_ID`：移除墓碑，下次重跑匯入時該 note 會匯回來
+- `set-space --key KEY --space SPACE`：把 vault 換到另一個 space（A19／D-space-3：
+  只走管理指令，不開 MCP 工具）。前綴規則與建立時相同：非 dev 的 key 與別名必須
+  以 `<space>/` 開頭，不合即拒（不改 key）。換完後 MCP 殼的降級快照要等下次
+  快照更新才反映
 
 刪除會為每則被刪的 note 寫墓碑（`note_tombstones`）：重跑匯入不會匯回，
 匯入對帳把它算成「刻意刪除」而非漏匯。
@@ -21,14 +26,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TextIO
 
+from lore_vault.schema import SPACES
 from lore_vault.storage import admin
+from lore_vault.storage import vaults as storage_vaults
 from lore_vault.storage.db import connect
-from lore_vault.storage.errors import StorageError
+from lore_vault.storage.errors import StorageError, UnknownVault
 from lore_vault.storage.migrate import SCHEMA_VERSION, current_version
 
 
@@ -39,6 +47,9 @@ def _parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_note = sub.add_parser("delete-note", help="刪除單則 note")
+    p_note.add_argument(
+        "--space", required=True, choices=sorted(SPACES), help="vault 所屬 space"
+    )
     p_note.add_argument("--vault", required=True, help="vault key 或別名")
     p_note.add_argument("--id", required=True, dest="note_id", help="note id")
     p_note.add_argument("--reason", default=admin.DEFAULT_NOTE_REASON, help="刪除原因")
@@ -53,6 +64,13 @@ def _parser() -> argparse.ArgumentParser:
         "--reason", default=admin.DEFAULT_VAULT_REASON, help="刪除原因"
     )
     p_vault.add_argument("--yes", action="store_true", help="真的刪除（預設 dry-run）")
+
+    p_space = sub.add_parser("set-space", help="把 vault 換到另一個 space")
+    p_space.add_argument("--key", required=True, help="vault 正式 key（不接受別名）")
+    p_space.add_argument(
+        "--space", required=True, choices=sorted(SPACES), help="目標 space"
+    )
+    p_space.add_argument("--yes", action="store_true", help="真的變更（預設 dry-run）")
 
     p_undel = sub.add_parser("undelete-note", help="移除墓碑，讓下次匯入可匯回")
     p_undel.add_argument("--id", required=True, dest="note_id", help="note id")
@@ -76,6 +94,31 @@ def _existing(path: str) -> str:
     if not Path(path).is_file():
         raise StorageError(f"資料庫檔案不存在：{path}")
     return path
+
+
+def _set_space(conn: sqlite3.Connection, args: argparse.Namespace) -> dict[str, object]:
+    row = conn.execute("SELECT space FROM vaults WHERE key = ?", (args.key,)).fetchone()
+    if row is None:
+        raise UnknownVault(f"vault 不存在：{args.key!r}（只接受正式 key）")
+    if args.yes:
+        before, after = storage_vaults.set_vault_space(conn, args.key, args.space)
+        return {"mode": "changed", "key": args.key, "from": before, "to": after}
+    # dry-run 也跑前綴檢查：不合的在這裡就報錯，不等 --yes
+    aliases = [
+        r[0]
+        for r in conn.execute(
+            "SELECT alias FROM vault_aliases WHERE vault = ?", (args.key,)
+        )
+    ]
+    for name in (args.key, *aliases):
+        storage_vaults.check_key_prefix(args.space, name)
+    return {
+        "mode": "dry_run",
+        "key": args.key,
+        "from": row[0],
+        "to": args.space,
+        "hint": "確認無誤後加 --yes 執行；MCP 殼的降級快照要等下次快照更新才反映",
+    }
 
 
 def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> int:
@@ -107,13 +150,23 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> 
                 result["hint"] = "確認無誤後加 --yes 執行"
             out.write(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
             return 0
+        if args.command == "set-space":
+            changed = _set_space(conn, args)
+            out.write(json.dumps(changed, ensure_ascii=False, indent=2) + "\n")
+            return 0
         if args.command == "delete-note":
             if args.yes:
                 plan = admin.delete_note(
-                    conn, args.vault, args.note_id, reason=args.reason
+                    conn,
+                    args.vault,
+                    args.note_id,
+                    space=args.space,
+                    reason=args.reason,
                 )
             else:
-                plan = admin.plan_note_deletion(conn, args.vault, args.note_id)
+                plan = admin.plan_note_deletion(
+                    conn, args.vault, args.note_id, space=args.space
+                )
         else:
             if args.yes:
                 plan = admin.delete_vault(

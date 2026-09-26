@@ -74,9 +74,9 @@ def _count(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...]) -> int:
 
 
 def plan_note_deletion(
-    conn: sqlite3.Connection, vault: str, note_id: str
+    conn: sqlite3.Connection, vault: str, note_id: str, *, space: str
 ) -> DeletePlan:
-    key = resolve_write(conn, vault)
+    key = resolve_write(conn, vault, space=space)
     row = conn.execute(
         "SELECT seq FROM notes WHERE id = ? AND vault = ?", (note_id, key)
     ).fetchone()
@@ -104,11 +104,12 @@ def delete_note(
     vault: str,
     note_id: str,
     *,
+    space: str,
     reason: str = DEFAULT_NOTE_REASON,
 ) -> DeletePlan:
     """刪一則 note 與其 FTS、向量、補算紀錄，並寫墓碑（單一交易）。"""
     with transaction(conn):
-        plan = plan_note_deletion(conn, vault, note_id)
+        plan = plan_note_deletion(conn, vault, note_id, space=space)
         seq = conn.execute(
             "SELECT seq FROM notes WHERE id = ? AND vault = ?", (note_id, plan.vault)
         ).fetchone()["seq"]

@@ -134,7 +134,7 @@ def test_insert_note_rejects_forbidden_characters(
 ):
     add_vault("folder/cc")
     with pytest.raises(InvalidCharacters) as info:
-        insert_note(conn, "folder/cc", _note(**overrides))
+        insert_note(conn, "folder/cc", _note(**overrides), space="dev")
     assert (info.value.field, info.value.index) == (field, index)
     # 訊息只有欄位、位置、碼位，不回顯內容
     assert "ab" not in str(info.value) and "正文" not in str(info.value)
@@ -143,8 +143,8 @@ def test_insert_note_rejects_forbidden_characters(
 
 def test_insert_note_allows_tab_newline_carriage_return(conn, add_vault):
     add_vault("folder/cc")
-    stored = insert_note(conn, "folder/cc", _note(body="a\tb\nc\r\nd"))
-    assert get_note(conn, "folder/cc", stored.id).body == "a\tb\nc\r\nd"
+    stored = insert_note(conn, "folder/cc", _note(body="a\tb\nc\r\nd"), space="dev")
+    assert get_note(conn, "folder/cc", stored.id, space="dev").body == "a\tb\nc\r\nd"
 
 
 @pytest.mark.parametrize(
@@ -159,20 +159,22 @@ def test_insert_note_allows_tab_newline_carriage_return(conn, add_vault):
 )
 def test_update_note_if_rejects_forbidden_characters(conn, add_vault, changes):
     add_vault("folder/cc")
-    stored = insert_note(conn, "folder/cc", _note())
+    stored = insert_note(conn, "folder/cc", _note(), space="dev")
     with pytest.raises(InvalidCharacters):
-        update_note_if(conn, "folder/cc", stored.id, stored.updated, changes)
-    after = get_note(conn, "folder/cc", stored.id)
+        update_note_if(
+            conn, "folder/cc", stored.id, stored.updated, changes, space="dev"
+        )
+    after = get_note(conn, "folder/cc", stored.id, space="dev")
     assert after == stored
 
 
 def test_llm_summary_is_sanitized_not_rejected(conn, add_vault):
     """摘要是衍生文字：清理而非拒收（拒收只會讓補算無限重試、doctor 永遠紅）。"""
     add_vault("folder/cc")
-    stored = insert_note(conn, "folder/cc", _note())
+    stored = insert_note(conn, "folder/cc", _note(), space="dev")
     seq = conn.execute("SELECT seq FROM notes WHERE id = ?", (stored.id,)).fetchone()[0]
     assert enrichment.write_summary_if_current(conn, seq, stored.updated, f"摘{NUL}要")
-    assert get_note(conn, "folder/cc", stored.id).summary == "摘\\0要"
+    assert get_note(conn, "folder/cc", stored.id, space="dev").summary == "摘\\0要"
     assert checks.control_chars(conn).status == "pass"
 
 

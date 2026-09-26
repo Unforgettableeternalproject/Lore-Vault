@@ -28,7 +28,7 @@ def healthy(conn, add_vault, add_note):
     v = add_vault("folder/chk")
     for i in range(3):
         add_note(v, f"n-{i}", f"標題 {i}", "正文", summary=f"摘要 {i}")
-        vectors.set_embedding(conn, v, f"n-{i}", [1, i, 0, 0], dim=DIM)
+        vectors.set_embedding(conn, v, f"n-{i}", [1, i, 0, 0], space="dev", dim=DIM)
     return conn
 
 
@@ -93,11 +93,13 @@ def test_missing_embeddings_goes_red_when_a_vector_is_deleted(healthy, add_note)
 
 
 def test_vector_dimension_goes_red_on_mismatch(healthy):
-    vectors.set_embedding(healthy, "folder/chk", "n-0", [1, 2, 3], dim=3)
+    vectors.set_embedding(healthy, "folder/chk", "n-0", [1, 2, 3], space="dev", dim=3)
     rec = checks.vector_dimension(healthy, dim=DIM)
     assert rec.status == "fail" and rec.counts["mismatched"] == 1
     # BLOB 被截斷（宣告維度對、長度不對）也要抓到
-    vectors.set_embedding(healthy, "folder/chk", "n-0", [1, 2, 3, 4], dim=DIM)
+    vectors.set_embedding(
+        healthy, "folder/chk", "n-0", [1, 2, 3, 4], space="dev", dim=DIM
+    )
     healthy.execute(
         "UPDATE note_embeddings SET vector = substr(vector, 1, 8) WHERE note_seq = "
         "(SELECT seq FROM notes WHERE id = 'n-1')"

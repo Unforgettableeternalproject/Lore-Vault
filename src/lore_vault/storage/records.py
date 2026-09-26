@@ -15,12 +15,15 @@ import json
 import sqlite3
 from typing import Any
 
-from lore_vault.schema import MISSING, Concept, Episode, Injection
+from lore_vault.schema import MISSING, SPACE_DEV, Concept, Episode, Injection
 
 from .db import transaction
 from .errors import DuplicateRecord, NotFound
 from .timeutil import normalize_opt_utc, normalize_utc, utc_now
 from .vaults import resolve_read, resolve_write, vault_clause
+
+# episode／concept／injection 只屬於 dev（A18／設計 2.5）：hook 與 spike 管線
+# 不感知 space，範圍固定 SPACE_DEV，客戶端不帶 space。
 
 
 def _dumps(data: dict[str, Any]) -> str:
@@ -48,7 +51,7 @@ def insert_episode(conn: sqlite3.Connection, vault: str, episode: Episode) -> bo
     )
     data = _dumps(stored.to_dict())
     with transaction(conn):
-        key = resolve_write(conn, vault)
+        key = resolve_write(conn, vault, space=SPACE_DEV)
         existing = conn.execute(
             """
             SELECT vault, data FROM episodes
@@ -120,7 +123,7 @@ def list_episode_rows(
     Episode schema 沒有 vault 欄；跨 vault（`"*"`）讀取的管線要靠這個把
     concept 寫回正確的 vault。
     """
-    scope = resolve_read(conn, vault)
+    scope = resolve_read(conn, vault, space=SPACE_DEV)
     _check_limit(limit)
     clause, params = vault_clause(scope, "vault")
     conditions = [clause]
@@ -152,7 +155,7 @@ def list_episode_rows(
 
 
 def count_episodes(conn: sqlite3.Connection, vault: str) -> int:
-    scope = resolve_read(conn, vault)
+    scope = resolve_read(conn, vault, space=SPACE_DEV)
     clause, params = vault_clause(scope, "vault")
     return int(
         conn.execute(
@@ -202,7 +205,7 @@ def upsert_concept(
     state, scope = _scope_columns(concept)
     data = _dumps(concept.to_dict())
     with transaction(conn):
-        key = resolve_write(conn, vault)
+        key = resolve_write(conn, vault, space=SPACE_DEV)
         existing = conn.execute(
             "SELECT vault, data FROM concepts WHERE id = ?", (concept.id,)
         ).fetchone()
@@ -244,7 +247,7 @@ def delete_concept(conn: sqlite3.Connection, vault: str, concept_id: str) -> boo
     id 屬於另一個 vault 時拋 `DuplicateRecord`：不可跨 vault 刪，也不假裝「不存在」。
     """
     with transaction(conn):
-        key = resolve_write(conn, vault)
+        key = resolve_write(conn, vault, space=SPACE_DEV)
         owner = concept_owner(conn, concept_id)
         if owner is None:
             return False
@@ -261,7 +264,7 @@ def export_concepts(conn: sqlite3.Connection, vault: str) -> tuple[list[Concept]
     concept 不匯出：spike scorer 以 `concept.get("scope")` 判斷，缺鍵會被當成
     None＝跨專案通用而放行到所有 repo（spike 的 scope 三態事故）。
     """
-    scope = resolve_read(conn, vault)
+    scope = resolve_read(conn, vault, space=SPACE_DEV)
     clause, params = vault_clause(scope, "vault")
     rows = conn.execute(
         f"""
@@ -281,7 +284,7 @@ def export_concepts(conn: sqlite3.Connection, vault: str) -> tuple[list[Concept]
 def get_concepts(
     conn: sqlite3.Connection, vault: str, ids: list[str] | tuple[str, ...]
 ) -> list[Concept]:
-    scope = resolve_read(conn, vault)
+    scope = resolve_read(conn, vault, space=SPACE_DEV)
     if isinstance(ids, str):
         raise TypeError("ids 必須是清單，不可傳單一字串")
     if not ids:
@@ -304,7 +307,7 @@ def list_concepts(
     cursor: str | None = None,
 ) -> tuple[list[Concept], str | None]:
     """依 id 排序分頁；回傳 (本頁, 下一頁 cursor（最後一筆的 id）或 None)。"""
-    scope = resolve_read(conn, vault)
+    scope = resolve_read(conn, vault, space=SPACE_DEV)
     _check_limit(limit)
     clause, params = vault_clause(scope, "vault")
     conditions = [clause]
@@ -345,7 +348,7 @@ def insert_injection(
     rec = normalize_utc(recorded) if recorded is not None else utc_now()
     data = _dumps(injection.to_dict())
     with transaction(conn):
-        key = resolve_write(conn, vault)
+        key = resolve_write(conn, vault, space=SPACE_DEV)
         existing = conn.execute(
             """
             SELECT 1 FROM injections
@@ -390,7 +393,7 @@ def list_injections(
     cursor: int | None = None,
 ) -> tuple[list[Injection], int | None]:
     """依寫入順序分頁；回傳 (本頁, 下一頁 cursor（最後一筆的 seq）或 None)。"""
-    scope = resolve_read(conn, vault)
+    scope = resolve_read(conn, vault, space=SPACE_DEV)
     _check_limit(limit)
     clause, params = vault_clause(scope, "vault")
     conditions = [clause]

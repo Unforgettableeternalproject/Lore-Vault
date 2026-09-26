@@ -1,6 +1,10 @@
 """HTTP 層測試共用：隔離的資料庫與設定、確定性假 embedder、帶 token 的 TestClient。
 
 不打網路、不讀 os.environ（設定一律以參數注入），不啟動長駐服務。
+
+`client`／`make_client` 對需要 space 的 `/v1/*` 端點自動補 `"space": "dev"`
+（模擬 MCP 殼的注入）；body 已帶 space 則不動。要測「漏帶 space」時傳
+`json={..., "space": OMIT}`，送出前會把該鍵拿掉。
 """
 
 from __future__ import annotations
@@ -19,6 +23,38 @@ from lore_vault.storage import fts, vectors
 from lore_vault.storage.db import connect
 
 DIM = 16
+SPACED_PATHS = frozenset(
+    {
+        "/v1/vault_resolve",
+        "/v1/vaults",
+        "/v1/recall",
+        "/v1/get",
+        "/v1/list",
+        "/v1/write",
+        "/v1/update",
+        "/v1/status",
+    }
+)
+OMIT = object()
+
+
+class SpaceClient(TestClient):
+    """模擬殼：對 space 必填的端點自動帶目前 space（預設 dev）。"""
+
+    space = "dev"
+
+    def post(self, url, *args, **kwargs):  # type: ignore[override]
+        body = kwargs.get("json")
+        if isinstance(body, dict) and str(url) in SPACED_PATHS:
+            body = dict(body)
+            if body.get("space") is OMIT:
+                del body["space"]
+            else:
+                body.setdefault("space", self.space)
+            kwargs["json"] = body
+        return super().post(url, *args, **kwargs)
+
+
 TOKEN = "test-token-0123456789abcdef"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
@@ -72,7 +108,7 @@ def db_path(tmp_path) -> Path:
 
 @pytest.fixture
 def client(db_path):
-    with TestClient(create_app(make_settings(db_path))) as c:
+    with SpaceClient(create_app(make_settings(db_path))) as c:
         c.headers.update(AUTH)
         yield c
 
@@ -83,7 +119,7 @@ def make_client(db_path):
     opened: list[TestClient] = []
 
     def make(**overrides) -> TestClient:
-        c = TestClient(create_app(make_settings(db_path, **overrides)))
+        c = SpaceClient(create_app(make_settings(db_path, **overrides)))
         c.__enter__()
         c.headers.update(AUTH)
         opened.append(c)
@@ -112,11 +148,19 @@ def embed_all(db_path: Path) -> None:
     """模擬背景補算：替所有 note 存入 title+body 的假向量。"""
     conn = connect(db_path)
     try:
-        rows = conn.execute("SELECT id, vault, title, body FROM notes").fetchall()
+        rows = conn.execute(
+            "SELECT n.id, n.vault, n.title, n.body, v.space FROM notes n "
+            "JOIN vaults v ON v.key = n.vault"
+        ).fetchall()
         for row in rows:
             text = f"{row['title']}\n\n{row['body']}" if row["body"] else row["title"]
             vectors.set_embedding(
-                conn, row["vault"], row["id"], fake_vector(text), dim=DIM
+                conn,
+                row["vault"],
+                row["id"],
+                fake_vector(text),
+                space=row["space"],
+                dim=DIM,
             )
     finally:
         conn.close()

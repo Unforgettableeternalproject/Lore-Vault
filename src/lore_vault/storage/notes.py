@@ -57,14 +57,18 @@ def _note_text_fields(note: Note) -> dict[str, object]:
     }
 
 
-def _check_vault_matches(conn: sqlite3.Connection, vault_key: str, note: Note) -> None:
-    if resolve_write(conn, note.vault) != vault_key:
+def _check_vault_matches(
+    conn: sqlite3.Connection, vault_key: str, note: Note, space: str
+) -> None:
+    if resolve_write(conn, note.vault, space=space) != vault_key:
         raise VaultRequired(
             f"note.vault {note.vault!r} 與指定的 vault {vault_key!r} 不一致"
         )
 
 
-def insert_note(conn: sqlite3.Connection, vault: str, note: Note) -> Note:
+def insert_note(
+    conn: sqlite3.Connection, vault: str, note: Note, *, space: str
+) -> Note:
     """新增 note；回傳實際存下的版本（vault 為現行 key、時間戳已正規化）。
 
     `vault` 參數必填且必須與 `note.vault` 指向同一個 vault（別名會解析成現行 key）。
@@ -73,8 +77,8 @@ def insert_note(conn: sqlite3.Connection, vault: str, note: Note) -> Note:
     """
     check_fields(_note_text_fields(note))
     with transaction(conn):
-        key = resolve_write(conn, vault)
-        _check_vault_matches(conn, key, note)
+        key = resolve_write(conn, vault, space=space)
+        _check_vault_matches(conn, key, note, space)
         stored = dataclasses.replace(
             note,
             vault=key,
@@ -112,9 +116,11 @@ def insert_note(conn: sqlite3.Connection, vault: str, note: Note) -> Note:
     return stored
 
 
-def get_notes(conn: sqlite3.Connection, vault: str, ids: Sequence[str]) -> list[Note]:
+def get_notes(
+    conn: sqlite3.Connection, vault: str, ids: Sequence[str], *, space: str
+) -> list[Note]:
     """依 id 取 note，保持傳入順序；不在範圍內的 id 不回傳（呼叫端可比對缺漏）。"""
-    scope = resolve_read(conn, vault)
+    scope = resolve_read(conn, vault, space=space)
     if isinstance(ids, str):
         raise TypeError("ids 必須是清單，不可傳單一字串")
     if not ids:
@@ -129,8 +135,8 @@ def get_notes(conn: sqlite3.Connection, vault: str, ids: Sequence[str]) -> list[
     return [by_id[i] for i in ids if i in by_id]
 
 
-def get_note(conn: sqlite3.Connection, vault: str, note_id: str) -> Note:
-    found = get_notes(conn, vault, [note_id])
+def get_note(conn: sqlite3.Connection, vault: str, note_id: str, *, space: str) -> Note:
+    found = get_notes(conn, vault, [note_id], space=space)
     if not found:
         raise NotFound(f"vault {vault!r} 內找不到 note {note_id!r}")
     return found[0]
@@ -140,6 +146,7 @@ def list_notes(
     conn: sqlite3.Connection,
     vault: str,
     *,
+    space: str,
     since: str | None = None,
     topics: Sequence[str] | None = None,
     limit: int = 50,
@@ -151,7 +158,7 @@ def list_notes(
     `topics`：只列至少含其中一個 topic 的 note（大小寫精確比對）；在 SQL 內、
     LIMIT 之前過濾，分頁不會因為事後過濾而少回。
     """
-    scope = resolve_read(conn, vault)
+    scope = resolve_read(conn, vault, space=space)
     if limit <= 0:
         raise ValueError(f"limit 必須大於 0，得到 {limit}")
     clause, params = vault_clause(scope, "vault")
@@ -186,8 +193,8 @@ def list_notes(
     return notes, next_cursor
 
 
-def count_notes(conn: sqlite3.Connection, vault: str) -> int:
-    scope = resolve_read(conn, vault)
+def count_notes(conn: sqlite3.Connection, vault: str, *, space: str) -> int:
+    scope = resolve_read(conn, vault, space=space)
     clause, params = vault_clause(scope, "vault")
     return int(
         conn.execute(f"SELECT count(*) FROM notes WHERE {clause}", params).fetchone()[0]
@@ -201,6 +208,7 @@ def update_note_if(
     expected_updated: str,
     changes: dict[str, Any],
     *,
+    space: str,
     now: str | None = None,
 ) -> Note | None:
     """條件更新原語（樂觀鎖）：只有資料庫中的 `updated` 字串與
@@ -217,7 +225,7 @@ def update_note_if(
         raise SchemaError(f"update_note_if 不可更新欄位 {unknown}")
     check_fields(changes)
     with transaction(conn):
-        key = resolve_write(conn, vault)
+        key = resolve_write(conn, vault, space=space)
         row = conn.execute(
             "SELECT * FROM notes WHERE id = ? AND vault = ?", (note_id, key)
         ).fetchone()
@@ -267,10 +275,12 @@ def update_note_if(
     return updated
 
 
-def delete_note(conn: sqlite3.Connection, vault: str, note_id: str) -> None:
+def delete_note(
+    conn: sqlite3.Connection, vault: str, note_id: str, *, space: str
+) -> None:
     """刪除 note 與其 FTS 列、embedding（同一交易）。"""
     with transaction(conn):
-        key = resolve_write(conn, vault)
+        key = resolve_write(conn, vault, space=space)
         row = conn.execute(
             "SELECT seq FROM notes WHERE id = ? AND vault = ?", (note_id, key)
         ).fetchone()

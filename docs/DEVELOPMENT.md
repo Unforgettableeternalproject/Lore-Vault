@@ -153,20 +153,26 @@ stdout 是 MCP 協定通道，log 一律寫 stderr（UTF-8）。設定錯誤時�
 
 ### 工具
 
-`vault_resolve(cwd?, create?, display?)`、`recall(query, vault, kinds?, limit?, budget?)`、
+`space(action, value?)`、`vault_resolve(cwd?, create?, display?, space?, key?)`、
+`recall(query, vault, kinds?, limit?, budget?)`、
 `get(vault, ids, budget?)`、`list(vault, since?, topics?, cursor?, limit?)`、
 `write(vault, title, body, topics?, links?, supersedes?)`、
 `update(vault, id, expected_updated, title?, body?, topics?, links?, supersedes?)`、`status(vault?)`。
 
-- 建 vault 併入 `vault_resolve(create=True)`，沒有獨立工具。`cwd` 省略時用殼的工作目錄
-  （Claude Code 啟動殼時的專案目錄）；key 由殼端 `lore_vault.binding` 從 git remote 算
+- **目前 space**（A18）：殼行程持有、只在記憶體，新行程一律 `dev`；`space(action="set", value=...)`
+  切換（不打服務）。其他工具沒有 space 參數，殼在每個 `/v1/*` 請求自動注入（`Shell._send`）；
+  服務端 space 必填、無預設，直接打 HTTP 的客戶端必須自己帶
+- 建 vault 併入 `vault_resolve(create=True)`，沒有獨立工具。dev：`cwd` 省略時用殼的工作目錄
+  （Claude Code 啟動殼時的專案目錄）；key 由殼端 `lore_vault.binding` 從 git remote 算。
+  lore／personal：沒有 repo，必須帶 `key`（`<space>/名稱`，前綴不符服務端回 `space_key_prefix_required`），
+  `cwd` 被忽略（回應 `cwd_ignored: true`）；不自動建 `<space>/global`
 - 成功回服務 JSON 原樣（緊湊、不縮排）；錯誤是工具錯誤，內容 `{"error": {...}, "hint", "http_status"}`。
   409 版本衝突附 `current`，以 `current.updated` 當 `expected_updated` 重試
 
 ### 快照與降級
 
-- 服務端 `GET /v1/snapshot`（需 bearer）：同一讀取交易內把 `vaults`、`vault_aliases`、`notes`、`note_fts`
-  複製到新檔（白名單；不含向量、episode、concept、injection），header 帶 schema 版本、產生時間、sha256、筆數
+- 服務端 `GET /v1/snapshot`（需 bearer）：同一讀取交易內把 `vaults`（含 `space`）、`vault_aliases`、`notes`、`note_fts`
+  複製到新檔（整庫、不分 space；殼降級查詢以目前 space 過濾）（白名單；不含向量、episode、concept、injection），header 帶 schema 版本、產生時間、sha256、筆數
 - 服務端快取最近一份快照：每次請求先算白名單資料表的內容指紋（vaults、別名、notes 全欄位的 sha256），
   未變就沿用、不重建。不用「max(updated) + 筆數」：背景補摘要不推進 `updated`；`PRAGMA data_version`
   只在同一連線內有效。快取目錄預設在系統暫存、服務關閉時刪除（`ApiSettings.snapshot_cache_dir` 可指定）
@@ -182,7 +188,7 @@ stdout 是 MCP 協定通道，log 一律寫 stderr（UTF-8）。設定錯誤時�
 | 連線失敗、逾時、協定錯誤、502／503／504 | 讀快照（只走 lexical），標 `degraded`、`degraded_reason: "service_unreachable"`、`snapshot.generated_at`／`checked_at` | 失敗，不排佇列 | 回殼端狀態、`ok: false` |
 | 3xx（Access 導向登入）、401、403、其他 4xx、500 等其餘 5xx | 直接報錯（設定、請求或服務端資料錯誤，不降級） | 同左 | 同左 |
 
-- 降級路徑沿用服務層函式對快照唯讀查詢，vault 硬範圍、別名、參數驗證與服務端一致
+- 降級路徑沿用服務層函式對快照唯讀查詢，vault／space 硬範圍、別名、參數驗證與服務端一致
 - doctor：`python -m lore_vault.doctor --category snapshot --snapshot-dir DIR [--snapshot-max-age-hours H]`。
   從未拉取、manifest 與快照檔 sha256 不一致、schema 版本（manifest 或檔案）與程式不符、超過年齡門檻皆為 fail。
   年齡以最近一次向服務確認的時間（`checked_at`，含 304）計，資料長期沒變不會誤紅
@@ -212,16 +218,17 @@ token 放在 repo 外的 env 檔，不寫進 `.claude.json`：
 或在 `mcp.toml` 設 `cf_access_env_file = "~/.cloudflared/pm-token.env"`）。
 `mcp.toml` 至少設 `[mcp] snapshot_dir`，遠端再設 `base_url`。
 
-## 管理用刪除（不提供 MCP 工具）
+## 管理指令：刪除與換 space（不提供 MCP 工具）
 
 `python -m lore_vault.cli.admin [--db PATH] [--config FILE] <子指令>`；`--db` 缺省走 `database.path`
 （容器內即 `/data/lore.db`）。不遷移資料庫，schema 版本不符或 DB 檔不存在直接失敗（不建空檔）。
 
 | 子指令 | 說明 |
 |---|---|
-| `delete-note --vault KEY --id NOTE_ID [--reason TEXT] [--yes]` | 刪單則 note（vault 可用別名） |
+| `delete-note --space SPACE --vault KEY --id NOTE_ID [--reason TEXT] [--yes]` | 刪單則 note（vault 在該 space 內解析，可用別名；`--space` 必填） |
 | `delete-vault --key KEY [--force] [--reason TEXT] [--yes]` | 刪整個 vault；只接受正式 key。vault 內有 note 或 episode／concept／injection 時必須 `--force` |
 | `undelete-note --id NOTE_ID [--yes]` | 移除墓碑；下次重跑匯入時該 note 會匯回 |
+| `set-space --key KEY --space SPACE [--yes]` | 把 vault 換到另一個 space（A19）；只接受正式 key。前綴規則與建立時相同：目標非 dev 時 key 與別名都必須以 `<space>/` 開頭，不合即拒（dry-run 就擋，不改 key）。換完後 MCP 殼的降級快照要等下次快照更新才反映 |
 
 - 預設 dry-run：stdout 印 JSON（`mode`、`vault`、`counts`、`note_ids`、`requires_force`），
   只有 id 與筆數、不含標題與內文。加 `--yes` 才刪；exit code 0 成功、1 找不到／需要 `--force`／schema 不符、2 參數錯誤
@@ -242,8 +249,12 @@ token 放在 repo 外的 env 檔，不寫進 `.claude.json`：
 ```bash
 docker exec lore-vault python -m lore_vault.cli.admin delete-vault --key folder/x            # dry-run
 docker exec lore-vault python -m lore_vault.cli.admin delete-vault --key folder/x --force --yes
-docker exec lore-vault python -m lore_vault.cli.admin delete-note --vault folder/x --id note:abc --yes
+docker exec lore-vault python -m lore_vault.cli.admin delete-note --space dev --vault folder/x --id note:abc --yes
 ```
+
+space 對帳（分類 `space`，schema v7；DB 沒有 CHECK，只能靠對帳）：`space.valid_values`
+（`vaults.space` 不在 `dev`／`lore`／`personal` 即 fail）、`space.key_prefix_agreement`（非 dev 的 key
+或別名未以 `<space>/` 開頭即 fail）。兩項都有「手動改 DB 後變紅」的測試（`tests/storage/test_space_filter.py`）。
 
 Git Bash 下帶容器內絕對路徑（如 `--db /data/lore.db`）會被 MSYS 轉成 Windows 路徑，前面加 `MSYS_NO_PATHCONV=1`。
 

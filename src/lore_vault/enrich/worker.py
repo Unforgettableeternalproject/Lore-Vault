@@ -175,6 +175,7 @@ class EnrichWorker:
                     item.vault,
                     item.note_id,
                     vector,
+                    space=item.space,
                     dim=self.embedder.dim,
                     model=self.embedder.model,
                 )

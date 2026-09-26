@@ -30,6 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from lore_vault.notes import InvalidCursor
 from lore_vault.schema import (
     MISSING,
+    SPACE_DEV,
     Concept,
     Episode,
     Injection,
@@ -438,7 +439,7 @@ class _VaultResolver:
         if self._names is None:
             self._names = [
                 (v.key, _vault_names(v))
-                for v in list_vaults(self._conn)
+                for v in list_vaults(self._conn, space=SPACE_DEV)
                 if v.kind != "global"
             ]
         wanted = str(concept.scope).strip().lower()
@@ -465,7 +466,7 @@ def _ensure_global(conn: sqlite3.Connection, created: list[str]) -> str:
             ensure_ascii=False,
         ),
     )
-    if get_vault(conn, key).kind != "global":
+    if get_vault(conn, key, space=SPACE_DEV).kind != "global":
         raise _Reject("conflict", f"vault {key!r} 的 kind 不是 global")
     if was_created:
         created.append(key)
@@ -490,7 +491,7 @@ def _concept_target(
     """
     requested = None
     if item_vault is not MISSING:
-        requested = resolve_write(conn, _require_vault(item_vault))
+        requested = resolve_write(conn, _require_vault(item_vault), space=SPACE_DEV)
     if batch_vault is not None and requested is not None and requested != batch_vault:
         raise _Reject("invalid", f"每筆 vault {requested!r} 與批次 vault 不同")
     requested = requested or batch_vault
@@ -547,7 +548,9 @@ def post_concepts(request: Request, req: ConceptBatch) -> Response:
         conn.execute("BEGIN IMMEDIATE")
         try:
             batch_vault = (
-                None if req.vault == ALL_VAULTS else resolve_write(conn, req.vault)
+                None
+                if req.vault == ALL_VAULTS
+                else resolve_write(conn, req.vault, space=SPACE_DEV)
             )
             resolver = _VaultResolver(
                 conn,

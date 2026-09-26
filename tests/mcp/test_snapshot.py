@@ -45,7 +45,9 @@ async def seeded(app, db_path):
         await s.ok("write", vault="github.com/o/private", title="其他", body="x")
     conn = connect(db_path)
     try:
-        vectors.set_embedding(conn, VAULT, note["id"], [1.0] * DIM, dim=DIM)
+        vectors.set_embedding(
+            conn, VAULT, note["id"], [1.0] * DIM, space="dev", dim=DIM
+        )
     finally:
         conn.close()
     return note
@@ -100,7 +102,7 @@ async def test_endpoint_requires_auth_and_returns_consistent_copy(
             "episodes": 0,
         }
         # 快照上 lexical 檢索可用（CJK 2 字詞）
-        result = recall(conn, "記憶", VAULT, mode="lexical")
+        result = recall(conn, "記憶", VAULT, space="dev", mode="lexical")
         assert [i.id for i in result.items] == [seeded["id"]]
     finally:
         conn.close()
@@ -178,7 +180,7 @@ async def test_failed_pull_keeps_old_snapshot(app, seeded, snapshot_dir, mode):
     assert storage_snapshot.read_manifest(snapshot_dir) == before_manifest
     conn, _ = storage_snapshot.open_snapshot(snapshot_dir)
     try:
-        assert recall(conn, "記憶", VAULT, mode="lexical").items
+        assert recall(conn, "記憶", VAULT, space="dev", mode="lexical").items
     finally:
         conn.close()
 

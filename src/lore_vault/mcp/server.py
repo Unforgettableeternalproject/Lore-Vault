@@ -1,8 +1,12 @@
-"""本地 stdio MCP 殼（A15）：七個工具轉發到服務 HTTP，服務不可達時讀本地快照降級。
+"""本地 stdio MCP 殼（A15）：八個工具轉發到服務 HTTP，服務不可達時讀本地快照降級。
 
-工具刻意只有 `vault_resolve`、`recall`、`get`、`list`、`write`、`update`、`status`；
-建 vault 併入 `vault_resolve(create=True)`，不另開工具。不暴露 chat／ask／model／
-settings／source。
+工具刻意只有 `space`、`vault_resolve`、`recall`、`get`、`list`、`write`、`update`、
+`status`；建 vault 併入 `vault_resolve(create=True)`，不另開工具。不暴露 chat／ask／
+model／settings／source。
+
+「目前 space」（A18）由殼持有：每個殼行程一份、不持久化，新行程一律 `dev`。
+`space` 工具查詢／切換（不打服務）；其他工具不帶 space 參數，由殼在每個服務請求
+自動注入（服務端 space 必填、無預設）。降級讀快照時同樣以目前 space 過濾。
 
 - 成功：回服務的 JSON 原樣（`vault_resolve` 另附 `binding`、`status` 另附 `shell`）
 - 服務明確拒絕（4xx、3xx、401／403、500）：工具錯誤，內容為 JSON
@@ -43,17 +47,20 @@ from lore_vault.recall import recall as recall_service
 from lore_vault.recall.service import DEFAULT_BUDGET as RECALL_DEFAULT_BUDGET
 from lore_vault.recall.service import DEFAULT_LIMIT as RECALL_DEFAULT_LIMIT
 from lore_vault.recall.service import MODE_LEXICAL
-from lore_vault.schema import canonical_key
+from lore_vault.schema import SPACE_DEV, SPACES, canonical_key
 from lore_vault.storage import snapshot as storage_snapshot
 from lore_vault.storage.errors import (
+    InvalidSpace,
     NotFound,
+    SpaceKeyPrefixRequired,
+    SpaceRequired,
     StorageError,
     UnknownVault,
     VaultRequired,
 )
 from lore_vault.storage.notes import count_notes
 from lore_vault.storage.timeutil import format_utc, parse_utc
-from lore_vault.storage.vaults import ALL_VAULTS, get_vault
+from lore_vault.storage.vaults import ALL_VAULTS, get_vault, validate_space
 
 from .client import ServiceClient, ServiceError, ServiceUnreachable
 from .settings import ShellSettings
@@ -61,13 +68,26 @@ from .snapshot import pull_concepts, pull_snapshot
 
 logger = logging.getLogger("lore_vault.mcp")
 
-TOOL_NAMES = ("vault_resolve", "recall", "get", "list", "write", "update", "status")
+TOOL_NAMES = (
+    "space",
+    "vault_resolve",
+    "recall",
+    "get",
+    "list",
+    "write",
+    "update",
+    "status",
+)
+SPACE_ACTIONS = ("get", "set")
 DEGRADED_REASON = "service_unreachable"
 
 INSTRUCTIONS = (
     "Lore Vault：專案記憶。流程：先 vault_resolve 取得本專案的 vault key → recall 查"
     "（只回標題與摘要）→ 需要全文再 get → 新結論用 write、修正既有 note 用 update"
-    "（不要另建更正篇）。每次讀寫都要帶 vault；跨 vault 查詢必須明示 vault='*'。"
+    "（不要另建更正篇）。每次讀寫都要帶 vault；跨 vault 查詢必須明示 vault='*'"
+    "（只涵蓋目前 space）。內容分 space：dev（開發記憶，預設）、lore（世界觀）、"
+    "personal（私人）；所有工具只看得到目前 space，要看別的 space 先用 "
+    "space(action='set') 切換，新 session 一律回到 dev。"
     "回傳 degraded=true 代表服務不可達、結果來自本地快照（可能過時、只有關鍵字檢索）。"
 )
 
@@ -81,6 +101,11 @@ _HINTS = {
         "用 vault_resolve(create=True) 建立"
     ),
     "vault_required": "傳入 vault_resolve 回傳的 key；跨 vault 查詢請明示 vault='*'",
+    "space_required": "殼應自動帶入目前 space；若直接打 HTTP，請帶 space",
+    "invalid_space": f"space 只能是 {sorted(SPACES)} 之一",
+    "space_key_prefix_required": (
+        "lore／personal 的 vault key 必須以 '<space>/' 開頭，例如 'lore/aeswir-arc'"
+    ),
     "invalid_cursor": "cursor 只能用上一頁 list 回傳的 next_cursor 原樣傳回",
     "no_changes": "update 至少要改一個欄位（title／body／topics／links／supersedes）",
     "duplicate": "已有相同 id 的 note；改用 update",
@@ -122,6 +147,12 @@ def _from_local_error(exc: Exception) -> ToolError:
     """降級路徑（快照上跑服務層函式）的例外 → 與服務端相同的錯誤碼。"""
     if isinstance(exc, VaultRequired):
         code = "vault_required"
+    elif isinstance(exc, SpaceRequired):
+        code = "space_required"
+    elif isinstance(exc, InvalidSpace):
+        code = "invalid_space"
+    elif isinstance(exc, SpaceKeyPrefixRequired):
+        code = "space_key_prefix_required"
     elif isinstance(exc, UnknownVault):
         return _tool_error(
             "unknown_vault",
@@ -153,17 +184,18 @@ def _describe(exc: BaseException) -> str:
     return text if len(text) <= 300 else text[:299] + "…"
 
 
-def _vault_payload(conn: sqlite3.Connection, key: str) -> dict[str, Any]:
-    """與 `/v1/vault_resolve` 相同形狀（降級時由快照產生）。"""
+def _vault_payload(conn: sqlite3.Connection, key: str, space: str) -> dict[str, Any]:
+    """與 `/v1/vault_resolve` 相同形狀（降級時由快照產生，同樣限定在 space 內）。"""
     if key == ALL_VAULTS:
         raise VaultRequired("此操作必須指定單一 vault，不可用 '*'")
-    vault = get_vault(conn, key)
+    vault = get_vault(conn, key, space=space)
     return {
         "key": vault.key,
         "display": vault.display,
         "kind": vault.kind,
+        "space": vault.space,
         "aliases": list(vault.aliases),
-        "note_count": count_notes(conn, vault.key),
+        "note_count": count_notes(conn, vault.key, space=vault.space),
         "requested": key,
         "via_alias": canonical_key(key) != vault.key,
     }
@@ -188,6 +220,8 @@ class Shell:
         self.last_pull_error: str | None = None
         self._concept_lock = anyio.Lock()
         self.last_concept_pull_error: str | None = None
+        # 目前 space：只在記憶體，不持久化（新殼行程一律 dev）
+        self.space: str = SPACE_DEV
 
     async def aclose(self) -> None:
         await self.client.aclose()
@@ -290,9 +324,15 @@ class Shell:
         result["snapshot"] = self._snapshot_meta(manifest)
         return result
 
+    async def _send(
+        self, path: str, body: dict[str, Any], *, space: str | None = None
+    ) -> dict[str, Any]:
+        """所有 `/v1/*` 請求的唯一出口：注入 space（預設為目前 space）。"""
+        return await self.client.post(path, {**body, "space": space or self.space})
+
     async def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         try:
-            return await self.client.post(path, body)
+            return await self._send(path, body)
         except ServiceError as exc:
             raise _from_service_error(exc) from None
 
@@ -308,22 +348,73 @@ class Shell:
 
     # ── 工具 ──
 
+    def space_tool(self, action: str, value: str | None = None) -> dict[str, Any]:
+        """查詢／切換目前 space（純殼端狀態，不打服務、不持久化）。"""
+        if action == "get":
+            return {"space": self.space, "spaces": sorted(SPACES)}
+        if action != "set":
+            raise _tool_error(
+                "invalid_request",
+                f"action 必須是 {list(SPACE_ACTIONS)}，得到 {action!r}",
+            )
+        try:
+            self.space = validate_space(value)
+        except (SpaceRequired, InvalidSpace) as exc:
+            code = (
+                "space_required" if isinstance(exc, SpaceRequired) else "invalid_space"
+            )
+            raise _tool_error(code, str(exc), hint=_HINTS["invalid_space"]) from None
+        return {"space": self.space, "spaces": sorted(SPACES)}
+
     async def vault_resolve(
-        self, cwd: str | None = None, create: bool = False, display: str | None = None
+        self,
+        cwd: str | None = None,
+        create: bool = False,
+        display: str | None = None,
+        space: str | None = None,
+        key: str | None = None,
     ) -> dict[str, Any]:
-        path = cwd or self._cwd()
+        """dev：key 省略時由 cwd 的 binding 算；lore／personal：必須帶 key、忽略 cwd。
+
+        `space` 省略用目前 space；顯式傳入只影響這一次（不切換目前 space）。
+        """
         try:
-            binding = resolve_binding(path)
-        except NotADirectoryError as exc:
-            raise _tool_error("invalid_cwd", str(exc)) from None
-        bind = {
-            "key": binding.key,
-            "display": binding.display,
-            "source": binding.source,
-            "cwd": str(Path(os.path.abspath(path))),
-        }
+            target = self.space if space is None else validate_space(space)
+        except (SpaceRequired, InvalidSpace) as exc:
+            raise _tool_error(
+                "invalid_space", str(exc), hint=_HINTS["invalid_space"]
+            ) from None
+        bind: dict[str, Any] | None = None
+        cwd_ignored = False
+        if key is not None:
+            resolved_key, default_display = key, key
+            cwd_ignored = cwd is not None
+        elif target != SPACE_DEV:
+            raise _tool_error(
+                "key_required",
+                f"space {target!r} 的 vault 沒有 repo 可推算，必須帶 key",
+                hint=(
+                    f"例如 vault_resolve(key='{target}/<名稱>', create=True, "
+                    "display=...)"
+                ),
+            )
+        else:
+            path = cwd or self._cwd()
+            try:
+                binding = resolve_binding(path)
+            except NotADirectoryError as exc:
+                raise _tool_error("invalid_cwd", str(exc)) from None
+            bind = {
+                "key": binding.key,
+                "display": binding.display,
+                "source": binding.source,
+                "cwd": str(Path(os.path.abspath(path))),
+            }
+            resolved_key, default_display = binding.key, binding.display
         try:
-            result = await self.client.post("/v1/vault_resolve", {"key": binding.key})
+            result = await self._send(
+                "/v1/vault_resolve", {"key": resolved_key}, space=target
+            )
             result["created"] = False
         except ServiceError as exc:
             if exc.code != "unknown_vault":
@@ -331,31 +422,39 @@ class Shell:
             if not create:
                 raise _tool_error(
                     "unknown_vault",
-                    f"此目錄對應的 vault {binding.key!r} 尚未建立",
+                    f"space {target!r} 內的 vault {resolved_key!r} 尚未建立",
                     hint=(
-                        "確認這是要記錄的專案後，以 vault_resolve(create=True, "
-                        "display=...) 建立；若 cwd 不是專案目錄，改傳正確的 cwd"
+                        "確認這是要記錄的範圍後，以 vault_resolve(create=True, "
+                        "display=...) 建立；若 cwd 不是專案目錄，改傳正確的 cwd；"
+                        "若 vault 在別的 space，先用 space(action='set') 切換"
                     ),
                     http_status=exc.status,
-                    binding=bind,
+                    **_compact(binding=bind),
                 ) from None
-            result = await self._create_vault(binding.key, display or binding.display)
+            result = await self._create_vault(
+                resolved_key, display or default_display, target
+            )
         except ServiceUnreachable as exc:
             # 已存在的 vault 可從快照解析；建立必須等服務恢復
             try:
-                result = self._degraded(exc, lambda c: _vault_payload(c, binding.key))
+                result = self._degraded(
+                    exc, lambda c: _vault_payload(c, resolved_key, target)
+                )
             except ToolError:
                 if create:
                     raise self._write_unreachable(exc) from None
                 raise
             result["created"] = False
-        result["binding"] = bind
+        if bind is not None:
+            result["binding"] = bind
+        if cwd_ignored:
+            result["cwd_ignored"] = True
         return result
 
-    async def _create_vault(self, key: str, display: str) -> dict[str, Any]:
+    async def _create_vault(self, key: str, display: str, space: str) -> dict[str, Any]:
         try:
-            result = await self.client.post(
-                "/v1/vaults", {"key": key, "display": display}
+            result = await self._send(
+                "/v1/vaults", {"key": key, "display": display}, space=space
             )
         except ServiceError as exc:
             if exc.code == "vault_exists" and exc.body:
@@ -389,6 +488,7 @@ class Shell:
                     conn,
                     query,
                     vault,
+                    space=self.space,
                     kinds=kinds,
                     limit=RECALL_DEFAULT_LIMIT if limit is None else limit,
                     budget=RECALL_DEFAULT_BUDGET if budget is None else budget,
@@ -410,6 +510,7 @@ class Shell:
                     conn,
                     vault,
                     ids,
+                    space=self.space,
                     budget=DEFAULT_GET_BUDGET if budget is None else budget,
                 ).to_dict(),
             )
@@ -433,6 +534,7 @@ class Shell:
                 lambda conn: notes_service.list_(
                     conn,
                     vault,
+                    space=self.space,
                     since=since,
                     topics=topics,
                     cursor=cursor,
@@ -503,6 +605,7 @@ class Shell:
         )
         return {
             "ok": report.ok,
+            "space": self.space,
             "base_url": self.settings.base_url,
             "snapshot_dir": (
                 str(self.settings.snapshot_dir) if self.settings.snapshot_dir else None
@@ -572,10 +675,24 @@ def build_server(shell: Shell) -> MCPServer:
         lifespan=lifespan,
     )
 
+    async def space(
+        action: Annotated[
+            str, Field(description="'get' 查詢目前 space；'set' 切換到 value")
+        ],
+        value: Annotated[
+            str | None,
+            Field(description="action='set' 時的目標：'dev'、'lore' 或 'personal'"),
+        ] = None,
+    ) -> str:
+        return _dump(shell.space_tool(action, value))
+
     async def vault_resolve(
         cwd: Annotated[
             str | None,
-            Field(description="專案目錄；省略時用殼啟動時的工作目錄（通常是專案根）"),
+            Field(
+                description="專案目錄（只用於 dev）；省略時用殼啟動時的工作目錄"
+                "（通常是專案根）"
+            ),
         ] = None,
         create: Annotated[
             bool,
@@ -583,10 +700,24 @@ def build_server(shell: Shell) -> MCPServer:
         ] = False,
         display: Annotated[
             str | None,
-            Field(description="建立時的顯示名稱；省略時用 repo 名"),
+            Field(description="建立時的顯示名稱；省略時用 repo 名（或 key）"),
+        ] = None,
+        space: Annotated[
+            str | None,
+            Field(
+                description="要在哪個 space 解析／建立；省略用目前 space。"
+                "顯式傳入只影響這一次，不切換目前 space"
+            ),
+        ] = None,
+        key: Annotated[
+            str | None,
+            Field(
+                description="直接指定 vault key（不經 cwd 推算）。lore／personal 必填，"
+                "且必須以 '<space>/' 開頭，如 'lore/aeswir-arc'"
+            ),
         ] = None,
     ) -> str:
-        return _dump(await shell.vault_resolve(cwd, create, display))
+        return _dump(await shell.vault_resolve(cwd, create, display, space, key))
 
     async def recall(
         query: Annotated[str, Field(description="查詢詞（中英文、識別字皆可）")],
@@ -679,10 +810,16 @@ def build_server(shell: Shell) -> MCPServer:
         return _dump(await shell.status(vault))
 
     descriptions = {
+        "space": (
+            "查詢或切換「目前 space」：dev（開發記憶，預設）、lore（世界觀）、"
+            "personal（私人）。其他工具只看得到目前 space 的內容（vault='*' 也只涵蓋"
+            "目前 space）。只在本殼行程的記憶體中，新 session 一律回到 dev。"
+        ),
         "vault_resolve": (
-            "取得目前專案的 vault key（由 cwd 的 git remote 算出，自動解析改名別名）。"
+            "取得 vault key。dev：由 cwd 的 git remote 算出（自動解析改名別名）；"
+            "lore／personal：沒有 repo，必須帶 key（'<space>/名稱'），cwd 會被忽略。"
             "每個 session 開始時先呼叫一次，之後所有工具都帶回傳的 key。"
-            "vault 不存在會回錯誤；確認要為此專案建記憶時才用 create=true 建立。"
+            "vault 不存在會回錯誤；確認要建記憶時才用 create=true 建立。"
         ),
         "recall": (
             "在 vault 內檢索記憶（關鍵字 + 語意）。只回 id、標題、1–2 句摘要、分數、"
@@ -711,6 +848,7 @@ def build_server(shell: Shell) -> MCPServer:
         ),
     }
     for name, fn in (
+        ("space", space),
         ("vault_resolve", vault_resolve),
         ("recall", recall),
         ("get", get),

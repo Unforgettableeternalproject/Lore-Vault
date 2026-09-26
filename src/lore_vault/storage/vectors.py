@@ -54,13 +54,14 @@ def set_embedding(
     note_id: str,
     vector: Sequence[float] | np.ndarray,
     *,
+    space: str,
     dim: int,
     model: str | None = None,
 ) -> None:
     """寫入／覆蓋一則 note 的 embedding（正規化後存）。"""
     normalized = normalize(vector, dim)
     with transaction(conn):
-        key = resolve_write(conn, vault)
+        key = resolve_write(conn, vault, space=space)
         seq = note_seqs(conn, key, [note_id]).get(note_id)
         if seq is None:
             raise NotFound(f"vault {key!r} 內找不到 note {note_id!r}")
@@ -77,9 +78,9 @@ def set_embedding(
 
 
 def get_embedding(
-    conn: sqlite3.Connection, vault: str, note_id: str
+    conn: sqlite3.Connection, vault: str, note_id: str, *, space: str
 ) -> np.ndarray | None:
-    scope = resolve_read(conn, vault)
+    scope = resolve_read(conn, vault, space=space)
     clause, params = vault_clause(scope, "n.vault")
     row = conn.execute(
         f"""
@@ -104,11 +105,12 @@ def search_vectors(
     vault: str,
     query: Sequence[float] | np.ndarray,
     *,
+    space: str,
     dim: int,
     limit: int = 20,
 ) -> list[VectorHit]:
-    """在 vault 範圍內對全部向量做點積，回傳前 `limit` 名。"""
-    scope = resolve_read(conn, vault)
+    """在 vault（與 space）範圍內對全部向量做點積，回傳前 `limit` 名。"""
+    scope = resolve_read(conn, vault, space=space)
     if limit <= 0:
         raise ValueError(f"limit 必須大於 0，得到 {limit}")
     q = normalize(query, dim)
@@ -134,13 +136,15 @@ def search_vectors(
     return [VectorHit(rows[i][0], rows[i][1], float(scores[i])) for i in order]
 
 
-def count_without_vector(conn: sqlite3.Connection, vault: str, *, dim: int) -> int:
+def count_without_vector(
+    conn: sqlite3.Connection, vault: str, *, space: str, dim: int
+) -> int:
     """範圍內沒有可用向量（缺向量，或維度與設定不符而不參與比對）的 note 數。
 
     recall 用來告知呼叫端：向量那一路只涵蓋部分 note。
     """
     _validate_dim(dim)
-    scope = resolve_read(conn, vault)
+    scope = resolve_read(conn, vault, space=space)
     clause, params = vault_clause(scope, "n.vault")
     return int(
         conn.execute(

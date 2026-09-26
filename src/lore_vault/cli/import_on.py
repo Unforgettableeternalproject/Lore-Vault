@@ -53,7 +53,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from lore_vault.binding import folder_key, lookup_key, resolve_binding
-from lore_vault.schema import Note, Vault, canonical_key
+from lore_vault.schema import SPACE_DEV, Note, Vault, canonical_key
 from lore_vault.schema.chars import sanitize_text
 from lore_vault.storage import imports
 from lore_vault.storage.db import connect, transaction
@@ -876,7 +876,9 @@ def run_import(
 
     # vault：不存在才建（既有 vault 的別名與顯示名稱不動）；
     # 來源 note 全部已刪除的 vault（delete-vault --force 過）不重建
-    existing = {v.key: v for v in list_vaults(conn)}
+    # 匯入固定進 dev（A18：現有 notebook 全是開發記憶）；key 已屬於別的 space
+    # 時明確失敗，不靜默當成既有 vault
+    existing = {v.key: v for v in list_vaults(conn, space=None)}
     wanted: dict[str, dict[str, Any]] = {}
     for entry in entries.values():
         if not entry.get("skip"):
@@ -887,6 +889,10 @@ def run_import(
             report["vaults"]["deleted_skipped"].append(key)
             continue
         kind = entry.get("kind", "repo")
+        if current is not None and current.space != SPACE_DEV:
+            raise OnImportError(
+                f"vault {key!r} 屬於 space {current.space!r}；匯入只寫入 dev"
+            )
         if current is not None:
             if current.kind != kind:
                 raise OnImportError(
@@ -974,6 +980,7 @@ def _import_one(
                 updated=p.updated,
                 links=link_ids,
             ),
+            space=SPACE_DEV,
         )
         imports.mark_imported(conn, SOURCE, p.source_id, stored.updated)
         was_imported = prior is not None and prior.imported_updated is not None
@@ -1016,6 +1023,7 @@ def _import_one(
             p.source_id,
             updated,
             {"title": p.title, "body": p.body, "links": link_ids, "summary": None},
+            space=SPACE_DEV,
             now=p.updated,
         )
         if stored is None:

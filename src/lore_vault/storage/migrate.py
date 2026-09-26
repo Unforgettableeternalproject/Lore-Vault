@@ -246,6 +246,20 @@ def _v6(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+# space 分群（A18，T-52）：vault 所屬的 space。既有 vault 全歸 dev（預設值即回填）。
+# 不加 CHECK：ALTER TABLE ADD COLUMN 無法對既有資料回填檢查；合法值由
+# `schema.SPACES` 白名單與 doctor `space.valid_values` 把關。
+_V7_STATEMENTS: tuple[str, ...] = (
+    "ALTER TABLE vaults ADD COLUMN space TEXT NOT NULL DEFAULT 'dev'",
+    "CREATE INDEX vaults_space ON vaults(space)",
+)
+
+
+def _v7(conn: sqlite3.Connection) -> None:
+    for statement in _V7_STATEMENTS:
+        conn.execute(statement)
+
+
 # 有序遷移：索引 i 的函式把版本從 i 升到 i+1。只能往後加，不可改動已發佈的項目。
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _v1,
@@ -254,6 +268,7 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _v4,
     _v5,
     _v6,
+    _v7,
 )
 
 SCHEMA_VERSION = len(MIGRATIONS)

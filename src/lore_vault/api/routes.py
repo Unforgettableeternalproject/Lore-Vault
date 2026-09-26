@@ -1,7 +1,12 @@
-"""`/v1` 端點：七個 MCP 工具一對一的 RPC 式 HTTP 契約，外加建 vault 與唯讀快照。
+"""`/v1` 端點：MCP 工具一對一的 RPC 式 HTTP 契約，外加建 vault 與唯讀快照。
 
-薄轉接：參數原樣交給服務層（驗證、vault 硬範圍、預算都在服務層），
+薄轉接：參數原樣交給服務層（驗證、vault／space 硬範圍、預算都在服務層），
 回應直接用服務層的 `to_dict()`。每個請求在同一執行緒內開、用、關自己的連線。
+
+`space`（A18）：每個讀寫請求必填、無預設，缺少回 400 `space_required`
+（服務端無狀態；「目前 space」由 MCP 殼持有並注入）。例外只有無 body 的
+`POST /v1/status`（純健康檢查）與 `GET /v1/snapshot`（整庫唯讀副本，由殼端依
+目前 space 過濾）。
 """
 
 from __future__ import annotations
@@ -29,7 +34,13 @@ from lore_vault.storage.errors import UnknownVault, VaultRequired
 from lore_vault.storage.migrate import SCHEMA_VERSION, current_version
 from lore_vault.storage.notes import count_notes, list_notes
 from lore_vault.storage.timeutil import format_utc
-from lore_vault.storage.vaults import ALL_VAULTS, get_vault, upsert_vault
+from lore_vault.storage.vaults import (
+    ALL_VAULTS,
+    check_key_prefix,
+    get_vault,
+    upsert_vault,
+    validate_space,
+)
 
 from .errors import VaultExists
 from .state import AppState
@@ -42,25 +53,30 @@ def _state(request: Request) -> AppState:
 
 
 # ── 請求模型：未知欄位一律拒絕（打錯參數名不能被默默忽略）──
-# vault 宣告成可省略：缺值交給服務層拋 VaultRequired（400），不讓它變成 422。
+# vault／space 宣告成可省略：缺值交給服務層拋 VaultRequired／SpaceRequired（400），
+# 不讓它變成 422。
 
 
 class _Req(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class ResolveRequest(_Req):
+class _ScopedReq(_Req):
+    space: str | None = None
+
+
+class ResolveRequest(_ScopedReq):
     key: str = Field(description="客戶端以 lore_vault.binding 算出的 binding key")
 
 
-class CreateVaultRequest(_Req):
+class CreateVaultRequest(_ScopedReq):
     key: str
     display: str
     kind: str = "repo"
     aliases: list[str] = Field(default_factory=list)
 
 
-class RecallRequest(_Req):
+class RecallRequest(_ScopedReq):
     query: str
     vault: str | None = None
     kinds: list[str] | None = None
@@ -69,13 +85,13 @@ class RecallRequest(_Req):
     mode: str = MODE_HYBRID
 
 
-class GetRequest(_Req):
+class GetRequest(_ScopedReq):
     vault: str | None = None
     ids: list[str]
     budget: int = DEFAULT_GET_BUDGET
 
 
-class ListRequest(_Req):
+class ListRequest(_ScopedReq):
     vault: str | None = None
     since: str | None = None
     topics: list[str] | None = None
@@ -83,7 +99,7 @@ class ListRequest(_Req):
     limit: int = DEFAULT_LIST_LIMIT
 
 
-class WriteRequest(_Req):
+class WriteRequest(_ScopedReq):
     vault: str | None = None
     title: str
     body: str
@@ -92,7 +108,7 @@ class WriteRequest(_Req):
     supersedes: str | None = None
 
 
-class UpdateRequest(_Req):
+class UpdateRequest(_ScopedReq):
     vault: str | None = None
     id: str
     expected_updated: str
@@ -104,7 +120,7 @@ class UpdateRequest(_Req):
     supersedes: str | None = None
 
 
-class StatusRequest(_Req):
+class StatusRequest(_ScopedReq):
     vault: str | None = None
 
 
@@ -116,22 +132,25 @@ def _vault_dict(conn: sqlite3.Connection, vault: Vault) -> dict[str, Any]:
         "key": vault.key,
         "display": vault.display,
         "kind": vault.kind,
+        "space": vault.space,
         "aliases": list(vault.aliases),
-        "note_count": count_notes(conn, vault.key),
+        "note_count": count_notes(conn, vault.key, space=vault.space),
     }
 
 
-def _single_vault(conn: sqlite3.Connection, key: str | None) -> Vault:
+def _single_vault(conn: sqlite3.Connection, key: str | None, space: object) -> Vault:
     if key == ALL_VAULTS:
         raise VaultRequired("此操作必須指定單一 vault，不可用 '*'")
-    return get_vault(conn, key)  # type: ignore[arg-type]  # None → VaultRequired
+    # None → VaultRequired／SpaceRequired
+    return get_vault(conn, key, space=space)  # type: ignore[arg-type]
 
 
 @router.post("/vault_resolve")
 def vault_resolve(request: Request, req: ResolveRequest) -> dict[str, Any]:
-    """binding key（或別名）→ 現行 vault。服務端讀不到客戶端 cwd，key 由客戶端算。"""
+    """binding key（或別名）→ 該 space 內的現行 vault。服務端讀不到客戶端 cwd，
+    key 由客戶端算；key 屬於別的 space 時與不存在相同（404 unknown_vault）。"""
     with _state(request).connection() as conn:
-        vault = _single_vault(conn, req.key)
+        vault = _single_vault(conn, req.key, req.space)
         result = _vault_dict(conn, vault)
     result["requested"] = req.key
     result["via_alias"] = canonical_key(req.key) != vault.key
@@ -140,17 +159,29 @@ def vault_resolve(request: Request, req: ResolveRequest) -> dict[str, Any]:
 
 @router.post("/vaults", status_code=status.HTTP_201_CREATED)
 def create_vault(request: Request, req: CreateVaultRequest) -> dict[str, Any]:
-    """明確建立 vault（只新增：key 或別名已存在回 409，不覆寫既有別名）。"""
+    """明確建立 vault（只新增：key 或別名已存在回 409，不覆寫既有別名）。
+
+    非 dev space 的 key／別名必須以 `<space>/` 開頭（400 `space_key_prefix_required`）；
+    lore／personal 不自動建 global，要時以 `<space>/global` 明確建立。
+    """
+    space = validate_space(req.space)
     if req.key.strip() == ALL_VAULTS or ALL_VAULTS in req.aliases:
         raise VaultRequired("'*' 保留給跨 vault 查詢，不可當 vault key 或別名")
+    for name in (req.key, *req.aliases):
+        if name.strip():
+            check_key_prefix(space, name.strip())
     vault = Vault(
-        key=req.key, display=req.display, kind=req.kind, aliases=tuple(req.aliases)
+        key=req.key,
+        display=req.display,
+        kind=req.kind,
+        aliases=tuple(req.aliases),
+        space=space,
     )
     with _state(request).connection() as conn:
         with transaction(conn):
             for candidate in (vault.key, *vault.aliases):
                 try:
-                    existing = get_vault(conn, candidate)
+                    existing = get_vault(conn, candidate, space=space)
                 except UnknownVault:
                     continue
                 raise VaultExists(
@@ -158,7 +189,7 @@ def create_vault(request: Request, req: CreateVaultRequest) -> dict[str, Any]:
                     _vault_dict(conn, existing),
                 )
             upsert_vault(conn, vault)
-        return _vault_dict(conn, get_vault(conn, vault.key))
+        return _vault_dict(conn, get_vault(conn, vault.key, space=space))
 
 
 # ── 七個工具 ──
@@ -172,6 +203,7 @@ def recall(request: Request, req: RecallRequest) -> dict[str, Any]:
             conn,
             req.query,
             req.vault,  # type: ignore[arg-type]
+            space=req.space,  # type: ignore[arg-type]  # None → SpaceRequired
             embedder=state.query_embedder,
             dim=state.dim,
             kinds=req.kinds,
@@ -185,7 +217,13 @@ def recall(request: Request, req: RecallRequest) -> dict[str, Any]:
 @router.post("/get")
 def get(request: Request, req: GetRequest) -> dict[str, Any]:
     with _state(request).connection() as conn:
-        result = notes_service.get(conn, req.vault, req.ids, budget=req.budget)  # type: ignore[arg-type]
+        result = notes_service.get(
+            conn,
+            req.vault,  # type: ignore[arg-type]
+            req.ids,
+            space=req.space,  # type: ignore[arg-type]
+            budget=req.budget,
+        )
     return result.to_dict()
 
 
@@ -195,6 +233,7 @@ def list_(request: Request, req: ListRequest) -> dict[str, Any]:
         result = notes_service.list_(
             conn,
             req.vault,  # type: ignore[arg-type]
+            space=req.space,  # type: ignore[arg-type]
             since=req.since,
             topics=req.topics,
             cursor=req.cursor,
@@ -212,6 +251,7 @@ def write(request: Request, req: WriteRequest) -> dict[str, Any]:
             req.vault,  # type: ignore[arg-type]
             req.title,
             req.body,
+            space=req.space,  # type: ignore[arg-type]
             topics=req.topics,
             links=req.links,
             supersedes=req.supersedes,
@@ -234,6 +274,7 @@ def update(request: Request, req: UpdateRequest) -> dict[str, Any]:
             req.vault,  # type: ignore[arg-type]
             req.id,
             req.expected_updated,
+            space=req.space,  # type: ignore[arg-type]
             title=req.title,
             body=req.body,
             topics=req.topics,
@@ -251,17 +292,19 @@ def status_(
 ) -> dict[str, Any]:
     """doctor 全部檢查項 + 補算積壓與 worker 狀態 + schema 版本（T-25）。
 
-    doctor 是全域對帳（不分 vault）；指定 vault 時另附該 vault 的筆數與最近更新。
+    doctor 是全域對帳（不分 vault／space）；指定 vault 時另附該 vault 的筆數與
+    最近更新。無 body 是純健康檢查；有 body 就必須帶 space（400 `space_required`）。
     """
     state = _state(request)
     vault_key = req.vault if req is not None else None
+    space = validate_space(req.space) if req is not None else None
     now = datetime.now(UTC)
     with state.connection() as conn:
         vault_info = None
         if vault_key is not None:
-            vault = _single_vault(conn, vault_key)
+            vault = _single_vault(conn, vault_key, space)
             vault_info = _vault_dict(conn, vault)
-            latest, _ = list_notes(conn, vault.key, limit=1)
+            latest, _ = list_notes(conn, vault.key, space=vault.space, limit=1)
             vault_info["last_updated"] = latest[0].updated if latest else None
         report = default_registry().run(
             DoctorContext(
@@ -286,6 +329,7 @@ def status_(
         "ok": report.ok and not worker.get("fatal_error"),
         "checked_at": format_utc(now),
         "schema": schema,
+        "space": space,
         "vault": vault_info,
         # 暖機失敗不算不健康：只代表剛啟動時 recall／查重可能降級
         "embedding": {"warmup": state.warmup.status()},

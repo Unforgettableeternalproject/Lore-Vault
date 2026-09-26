@@ -14,10 +14,19 @@ from .conftest import TOKEN
 
 pytestmark = pytest.mark.anyio
 
-EXPECTED = {"vault_resolve", "recall", "get", "list", "write", "update", "status"}
+EXPECTED = {
+    "space",
+    "vault_resolve",
+    "recall",
+    "get",
+    "list",
+    "write",
+    "update",
+    "status",
+}
 
 
-async def test_stdio_lists_exactly_the_seven_tools(tmp_path):
+async def test_stdio_lists_exactly_the_eight_tools(tmp_path):
     home = tmp_path / "home"
     home.mkdir()
     params = StdioServerParameters(

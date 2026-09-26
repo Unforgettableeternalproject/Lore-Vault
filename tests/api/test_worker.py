@@ -20,7 +20,15 @@ from lore_vault.storage.db import connect
 from lore_vault.storage.notes import insert_note
 from lore_vault.storage.vaults import upsert_vault
 
-from .conftest import AUTH, DIM, create_vault, fake_vector, make_settings, write_note
+from .conftest import (
+    AUTH,
+    DIM,
+    SpaceClient,
+    create_vault,
+    fake_vector,
+    make_settings,
+    write_note,
+)
 
 TS = "2026-09-01T00:00:00.000Z"
 
@@ -88,7 +96,7 @@ def test_worker_runs_in_process_and_write_wakes_it(db_path):
         worker_factory=_factory(summarizer),
     )
     app = create_app(settings)
-    with TestClient(app) as c:
+    with SpaceClient(app) as c:
         c.headers.update(AUTH)
         enricher = app.state.lore.enricher
         assert enricher.running
@@ -185,6 +193,7 @@ def test_should_stop_aborts_mid_batch(tmp_path):
                     created=TS,
                     updated=TS,
                 ),
+                space="dev",
             )
         stop = threading.Event()
 

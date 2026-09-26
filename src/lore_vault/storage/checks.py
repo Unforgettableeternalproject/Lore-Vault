@@ -10,6 +10,7 @@ import json
 import sqlite3
 from dataclasses import dataclass, field
 
+from lore_vault.schema import SPACE_DEV, SPACES
 from lore_vault.schema.chars import FORBIDDEN_CONTROL, has_invalid
 
 from .migrate import SCHEMA_VERSION, current_version
@@ -270,4 +271,65 @@ def control_chars(conn: sqlite3.Connection) -> Reconciliation:
         f"concept {per_table['concepts']}、episode {per_table['episodes']}）",
         counts,
         tuple(found[:MAX_DETAILS]),
+    )
+
+
+# ── space（A18）──────────────────────────────────────────────────────
+# 資料庫沒有 CHECK 約束：非法值（手動改 DB、之後新增 space 忘記同步白名單）
+# 與前綴不一致（手動改 DB、管理操作漏改）都只能靠對帳抓。
+
+
+def space_valid_values(conn: sqlite3.Connection) -> Reconciliation:
+    """`vaults.space` 都在白名單 `schema.SPACES` 內。"""
+    placeholders = ",".join("?" * len(SPACES))
+    bad = conn.execute(
+        f"""
+        SELECT key, space FROM vaults WHERE space NOT IN ({placeholders})
+        ORDER BY key
+        """,
+        tuple(sorted(SPACES)),
+    ).fetchall()
+    per_space = {
+        r[0]: int(r[1])
+        for r in conn.execute("SELECT space, count(*) FROM vaults GROUP BY space")
+    }
+    counts = {**{f"space:{k}": v for k, v in per_space.items()}, "invalid": len(bad)}
+    if not bad:
+        return Reconciliation("pass", "所有 vault 的 space 皆為合法值", counts)
+    return Reconciliation(
+        "fail",
+        f"{len(bad)} 個 vault 的 space 不在白名單 {sorted(SPACES)}",
+        counts,
+        tuple(f"vault {r[0]}：space={r[1]!r}" for r in bad[:MAX_DETAILS]),
+    )
+
+
+def space_key_prefix_agreement(conn: sqlite3.Connection) -> Reconciliation:
+    """非 dev 的 vault，key 與別名都以 `<space>/` 開頭。"""
+    rows = conn.execute(
+        """
+        SELECT v.key AS name, v.key AS vault, v.space FROM vaults v
+        WHERE v.space != ?
+        UNION ALL
+        SELECT a.alias, a.vault, v.space FROM vault_aliases a
+        JOIN vaults v ON v.key = a.vault
+        WHERE v.space != ?
+        ORDER BY 2, 1
+        """,
+        (SPACE_DEV, SPACE_DEV),
+    ).fetchall()
+    bad = [r for r in rows if not str(r[0]).startswith(f"{r[2]}/")]
+    counts = {"checked": len(rows), "mismatched": len(bad)}
+    if not bad:
+        return Reconciliation(
+            "pass", f"{len(rows)} 個非 dev 的 key／別名皆符合 space 前綴", counts
+        )
+    return Reconciliation(
+        "fail",
+        f"{len(bad)} 個非 dev 的 key／別名與所屬 space 前綴不一致",
+        counts,
+        tuple(
+            f"vault {r[1]}（space={r[2]}）：{r[0]!r} 未以 '{r[2]}/' 開頭"
+            for r in bad[:MAX_DETAILS]
+        ),
     )

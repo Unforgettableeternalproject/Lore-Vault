@@ -173,6 +173,7 @@ def recall(
     query: str,
     vault: str,
     *,
+    space: str,
     embedder: Embedder | None = None,
     dim: int | None = None,
     kinds: Iterable[str] | None = None,
@@ -181,7 +182,7 @@ def recall(
     mode: str = MODE_HYBRID,
     rrf_k: int = RRF_K,
 ) -> RecallResult:
-    """在 `vault`（或明示的 `"*"`）內檢索 note。
+    """在 `space` 內的 `vault`（或明示的 `"*"`＝該 space 全部 vault）檢索 note。
 
     `embedder` 與 `dim` 用於查詢向量；`mode="lexical"` 時不需要。
     `kinds` 預設只有 note；含 concept 時結果仍回 note，並在 `unsupported_kinds`
@@ -198,8 +199,8 @@ def recall(
     if mode not in MODES:
         raise ValueError(f"mode 必須是 {list(MODES)}，得到 {mode!r}")
     unsupported = _check_kinds(kinds)
-    # 先驗證 vault，範圍錯誤不應該先去打 embedder
-    resolve_read(conn, vault)
+    # 先驗證 vault 與 space，範圍錯誤不應該先去打 embedder
+    resolve_read(conn, vault, space=space)
 
     depth = max(MIN_CANDIDATES, limit * CANDIDATE_FACTOR)
     rankings: dict[str, list[str]] = {}
@@ -213,17 +214,23 @@ def recall(
             qv = embed_text(embedder, query, dim=dim)
         if qv.ok:
             assert dim is not None
-            hits = vectors.search_vectors(conn, vault, qv.vector, dim=dim, limit=depth)
+            hits = vectors.search_vectors(
+                conn, vault, qv.vector, space=space, dim=dim, limit=depth
+            )
             rankings[LEG_VECTOR] = [h.note_id for h in hits]
-            missing_embeddings = vectors.count_without_vector(conn, vault, dim=dim)
+            missing_embeddings = vectors.count_without_vector(
+                conn, vault, space=space, dim=dim
+            )
         else:
             degraded = qv
     if mode in (MODE_HYBRID, MODE_LEXICAL) or degraded is not None:
-        hits = fts.search_notes(conn, vault, query, limit=depth)
+        hits = fts.search_notes(conn, vault, query, space=space, limit=depth)
         rankings[LEG_LEXICAL] = [h.note_id for h in hits]
 
     fused = rrf_fuse(rankings, k=rrf_k)[:limit]
-    notes = {n.id: n for n in get_notes(conn, vault, [f.id for f in fused])}
+    notes = {
+        n.id: n for n in get_notes(conn, vault, [f.id for f in fused], space=space)
+    }
     items: list[RecallItem] = []
     for f in fused:
         note = notes.get(f.id)

@@ -5,6 +5,8 @@ from .chars import InvalidCharacters
 from .models import (
     CONCEPT_KINDS,
     EPISODE_ORIGINS,
+    SPACE_DEV,
+    SPACES,
     VAULT_KINDS,
     Concept,
     Episode,
@@ -20,6 +22,8 @@ __all__ = [
     "CONCEPT_KINDS",
     "EPISODE_ORIGINS",
     "MISSING",
+    "SPACES",
+    "SPACE_DEV",
     "VAULT_KINDS",
     "Concept",
     "Episode",

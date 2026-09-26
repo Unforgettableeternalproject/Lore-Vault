@@ -447,18 +447,20 @@ note 融合結果與 chunk 融合結果之間的相對權重，是新的、缺�
 ```python
 @dataclass(frozen=True)
 class RecallItem:
-    id: str            # note id 或 chunk 的 document_id（見下）
-    kind: str          # "note" | "chunk"
+    id: str  # note id 或 chunk 的 document_id（見下）
+    kind: str  # "note" | "chunk"
     vault: str
-    title: str          # note 用 Note.title；chunk 用 documents.filename
-    summary: str | None  # note 用既有摘要；chunk 用該段文字的前 N 字（比照 summary_source="lead"）
+    title: str  # note 用 Note.title；chunk 用 documents.filename
+    summary: (
+        str | None
+    )  # note 用既有摘要；chunk 用該段文字的前 N 字（比照 summary_source="lead"）
     summary_source: str
     score: float
     updated: str
     # 以下僅 kind="chunk" 有值
     document_id: str | None = None
-    chunk_id: str | None = None      # document_chunks.seq 轉成外部可用的穩定字串 id
-    locator: dict | None = None      # 4.2 的 locator 結構
+    chunk_id: str | None = None  # document_chunks.seq 轉成外部可用的穩定字串 id
+    locator: dict | None = None  # 4.2 的 locator 結構
 ```
 
 `id` 欄位對 chunk 而言用 `chunk_id`（而非 `document_id`），因為 `get` 要能精確取到「這一段」

@@ -38,7 +38,7 @@ def add_note(conn):
             updated=ts,
             **kw,
         )
-        return insert_note(conn, VAULT, note)
+        return insert_note(conn, VAULT, note, space="dev")
 
     return add
 

@@ -131,14 +131,14 @@ class FtsHit:
 
 
 def search_notes(
-    conn: sqlite3.Connection, vault: str, query: str, *, limit: int = 20
+    conn: sqlite3.Connection, vault: str, query: str, *, space: str, limit: int = 20
 ) -> list[FtsHit]:
     """在指定 vault（或明示 `"*"`）內做 BM25 全文檢索。
 
     vault 條件與 MATCH 在同一個 SQL 內、LIMIT 之前套用，不會有
     「先取前 N 名再過濾」導致的少回結果。
     """
-    scope = resolve_read(conn, vault)
+    scope = resolve_read(conn, vault, space=space)
     if limit <= 0:
         raise ValueError(f"limit 必須大於 0，得到 {limit}")
     match = build_match_query(query)

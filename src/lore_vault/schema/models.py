@@ -34,6 +34,14 @@ from ._base import (
 
 VAULT_KINDS = frozenset({"repo", "global"})
 
+# 內容分群（A18）：space 是 vault 的屬性，與 vault 為 AND 疊加的硬範圍。
+# 資料庫不加 CHECK（ALTER TABLE ADD COLUMN 的限制），由這裡的白名單與
+# doctor `space.valid_values` 把關。
+SPACE_DEV = "dev"
+SPACE_LORE = "lore"
+SPACE_PERSONAL = "personal"
+SPACES = frozenset({SPACE_DEV, SPACE_LORE, SPACE_PERSONAL})
+
 # 與 agent_memory_spike/transcript.py 的 ORIGIN_* 一致
 EPISODE_ORIGINS = frozenset({"human", "task-notification", "system", "meta", "unknown"})
 
@@ -69,6 +77,8 @@ class Vault(Record):
     kind: str = "repo"
     # 改名前的舊 key／舊 repo 名（取代 spike 的 REPO_ALIASES）
     aliases: tuple[str, ...] = ()
+    # 所屬 space（A18）；非 dev 的 key 前綴規則由儲存層寫入路徑驗證
+    space: str = SPACE_DEV
 
     REQUIRED: ClassVar[frozenset[str]] = frozenset({"key", "display"})
 
@@ -89,6 +99,9 @@ class Vault(Record):
         if len(set(aliases)) != len(aliases):
             raise fail("Vault", "aliases", "有重複項")
         set_field(self, "aliases", aliases)
+        if self.space not in SPACES:
+            allowed = sorted(SPACES)
+            raise fail("Vault", "space", f"必須是 {allowed}，得到 {self.space!r}")
 
 
 # ── Note ─────────────────────────────────────────────────────────────

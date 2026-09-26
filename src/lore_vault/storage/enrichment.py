@@ -39,6 +39,8 @@ class Candidate:
     updated: str
     # 針對目前版本已失敗幾次
     attempts: int
+    # note 所屬 vault 的 space（寫回 embedding 時的範圍參數）
+    space: str
 
 
 def _check_kind(kind: str) -> None:
@@ -64,8 +66,10 @@ def candidates(
         f"""
         SELECT n.seq, n.id, n.vault, n.title, n.body, n.updated,
                CASE WHEN e.for_updated = n.updated THEN e.attempts ELSE 0 END
-                   AS attempts
+                   AS attempts,
+               vt.space
         FROM notes n
+        JOIN vaults vt ON vt.key = n.vault
         LEFT JOIN note_enrichment e ON e.note_seq = n.seq AND e.kind = ?
         WHERE {_missing_clause(kind)}
           AND (e.note_seq IS NULL OR e.for_updated != n.updated
@@ -75,7 +79,9 @@ def candidates(
         """,
         (kind, now, limit),
     ).fetchall()
-    return [Candidate(r[0], r[1], r[2], r[3], r[4], r[5], int(r[6])) for r in rows]
+    return [
+        Candidate(r[0], r[1], r[2], r[3], r[4], r[5], int(r[6]), r[7]) for r in rows
+    ]
 
 
 def _current_row(conn: sqlite3.Connection, seq: int) -> sqlite3.Row | None:

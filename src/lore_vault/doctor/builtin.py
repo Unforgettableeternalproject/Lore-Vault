@@ -166,6 +166,14 @@ def vaults_auto_created(ctx: DoctorContext) -> CheckResult:
     )
 
 
+def space_valid_values(ctx: DoctorContext) -> CheckResult:
+    return _to_result(storage_checks.space_valid_values(ctx.require("db")))
+
+
+def space_key_prefix_agreement(ctx: DoctorContext) -> CheckResult:
+    return _to_result(storage_checks.space_key_prefix_agreement(ctx.require("db")))
+
+
 def default_registry() -> Registry:
     registry = Registry()
     registry.add(
@@ -205,6 +213,19 @@ def default_registry() -> Registry:
         ),
     ):
         registry.add(Check(name, "storage", func, description))
+    for name, func, description in (
+        (
+            "space.valid_values",
+            space_valid_values,
+            "vault 的 space 都在白名單（dev／lore／personal）內",
+        ),
+        (
+            "space.key_prefix_agreement",
+            space_key_prefix_agreement,
+            "非 dev 的 vault key／別名以 '<space>/' 開頭",
+        ),
+    ):
+        registry.add(Check(name, "space", func, description))
     for name, func, description in (
         (
             "enrich.failed",
