@@ -171,7 +171,7 @@ def test_refuses_dev_and_same_space(lore):
         ("folder/dev", "lore"),
         ("folder/dev", "personal"),
     ):
-        with pytest.raises(admin.SpaceChangeRefused, match="A20"):
+        with pytest.raises(admin.SpaceChangeRefused, match="不互相轉換"):
             admin.plan_space_change(lore, key, space)
     with pytest.raises(admin.SpaceChangeRefused):
         admin.plan_space_change(lore, OLD, "lore")

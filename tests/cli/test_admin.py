@@ -516,7 +516,7 @@ def test_set_space_refuses_dev_both_ways(db, capsys):
         for extra in ((), ("--yes",)):
             code, out = _run(db, "set-space", "--key", key, "--space", space, *extra)
             assert code == 1 and out is None
-            assert "A20" in capsys.readouterr().err
+            assert "不互相轉換" in capsys.readouterr().err
     assert _space_of(db, "folder/a") == "dev"
     assert _space_of(db, "lore/arc") == "lore"
     assert _table_counts(db) == before
