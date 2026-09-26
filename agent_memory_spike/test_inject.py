@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import hook_pretooluse  # noqa: E402
 from hook_pretooluse import load_pool, run, select  # noqa: E402
+from lore_vault.hooks.client_env import CLIENT_ENV_VAR, KNOWN_KEYS  # noqa: E402
 
 
 def _concept(cid, anchors, surprisal=1.0, scope="proj"):
@@ -44,6 +45,11 @@ def _isolate(tmp_path, monkeypatch, concepts):
     # TOUCH_LOG 一度沒隔離：跑 dry_run=False 的測試往真實的 touches.jsonl
     # 寫了 21 筆 session_id=s1 的假觀察。測試沒隔離的全域狀態等於沒測
     monkeypatch.setattr(hook_pretooluse, "TOUCH_LOG", tmp_path / "touches.jsonl")
+    # client.env 也是全域狀態：切換後真實檔設了 LORE_VAULT_CONCEPT_SNAPSHOT，
+    # 沒隔離時 hook 改讀真實快照而不是上面的 concepts.json，6 個測試因此失敗
+    monkeypatch.setattr(hook_pretooluse, "CLIENT_ENV_PATH", tmp_path / "client.env")
+    for key in (*KNOWN_KEYS, CLIENT_ENV_VAR):
+        monkeypatch.delenv(key, raising=False)
     return concept_path
 
 
