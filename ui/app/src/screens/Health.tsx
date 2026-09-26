@@ -12,8 +12,11 @@ import {
   formatAge,
   groupChecks,
   healthBadge,
+  CLIENT_DOCTOR_COMMAND,
   hoursSince,
   parseBackupDetail,
+  splitClientChecks,
+  statusRank,
 } from '../lib/health';
 import type { BacklogStatus, CheckStatus, DoctorCheck, EpisodeSummary, StatusResult, WorkerStatus } from '../lib/types';
 
@@ -116,13 +119,16 @@ export function Health() {
 
 function StatusView({ status }: { status: StatusResult }) {
   const doctor = status.doctor;
+  const { server, client } = splitClientChecks(doctor.checks);
+  // 客戶端檢查在服務端必然略過：不算進「SKIP」，免得看起來像設定缺漏
+  const clientSkipped = client.filter((c) => c.status === 'skipped').length;
   const counts: Record<CheckStatus, number> = {
     fail: doctor.summary.fail ?? 0,
     warn: doctor.summary.warn ?? 0,
-    skipped: doctor.summary.skipped ?? 0,
+    skipped: Math.max(0, (doctor.summary.skipped ?? 0) - clientSkipped),
     pass: doctor.summary.pass ?? 0,
   };
-  const groups = groupChecks(doctor.checks);
+  const groups = groupChecks(server);
   const backup = doctor.checks.find((c) => c.name === 'backup.recent') ?? null;
   const fatal = [
     ['摘要／向量 worker', status.enrich.worker],
@@ -163,6 +169,7 @@ function StatusView({ status }: { status: StatusResult }) {
               ))}
             </section>
           ))}
+          {client.length > 0 && <ClientChecks checks={client} />}
         </div>
 
         <aside class="lv-health-side">
@@ -198,16 +205,42 @@ function StatusView({ status }: { status: StatusResult }) {
   );
 }
 
-function CheckRow({ check }: { check: DoctorCheck }) {
+/** 客戶端檢查：預設收合的一組，說明要到 agent 機器上執行；有非略過的結果時照常標示狀態。 */
+function ClientChecks({ checks }: { checks: DoctorCheck[] }) {
+  const ran = checks.filter((c) => c.status !== 'skipped');
+  const worst = ran.map((c) => c.status).sort((a, b) => statusRank(a) - statusRank(b))[0] ?? 'client';
+  return (
+    <details class={`lv-check-group lv-check-group--client lv-check-group--${worst}`} data-testid="client-checks" open={worst === 'fail'}>
+      <summary class="lv-check-group__title lv-check-group__summary">
+        客戶端檢查 · {checks.length} 項
+        <span class="lv-check-group__note">{ran.length === 0 ? '在 agent 機器上執行' : `${ran.length} 項有結果`}</span>
+      </summary>
+      <div class="lv-client-note">
+        <p>
+          這些檢查看的是 agent 機器上的快照、spool 與 client.env，服務端沒有這些目錄，所以在這裡不會執行——不是設定缺漏。
+          請在 agent 機器上以 doctor 執行：
+        </p>
+        <pre class="lv-md__pre lv-client-note__cmd">{CLIENT_DOCTOR_COMMAND}</pre>
+      </div>
+      {checks.map((c) => (
+        <CheckRow key={c.name} check={c} client />
+      ))}
+    </details>
+  );
+}
+
+function CheckRow({ check, client = false }: { check: DoctorCheck; client?: boolean }) {
   const hasMore = check.details.length > 0 || Object.keys(check.counts).length > 0;
-  const tone = check.status in STATUS_LABEL ? check.status : 'unknown';
-  const label = STATUS_LABEL[check.status as CheckStatus] ?? check.status.toUpperCase();
+  // 客戶端檢查在服務端略過是預期的：標成「AGENT」並顯示檢查用途，不顯示「缺少設定」
+  const clientSkip = client && check.status === 'skipped';
+  const tone = clientSkip ? 'skipped' : check.status in STATUS_LABEL ? check.status : 'unknown';
+  const label = clientSkip ? 'AGENT' : (STATUS_LABEL[check.status as CheckStatus] ?? check.status.toUpperCase());
   const head = (
     <>
       <span class={`lv-check__status lv-check__status--${tone}`}>{label}</span>
       <span class="lv-check__main">
         <span class="lv-check__name lv-mono">{check.name}</span>
-        <span class="lv-check__desc">{check.summary || check.description}</span>
+        <span class="lv-check__desc">{clientSkip ? check.description || check.summary : check.summary || check.description}</span>
       </span>
     </>
   );

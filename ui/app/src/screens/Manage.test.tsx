@@ -299,6 +299,32 @@ describe('系統健康', () => {
     };
   }
 
+  it('客戶端檢查（snapshot／spool／concept_snapshot）歸成預設收合的一組，不算進 SKIP、不顯示缺少設定', async () => {
+    const { api } = makeApi({
+      '/v1/status': () =>
+        json(
+          status([
+            check({ name: 'storage.ok', category: 'storage' }),
+            check({ name: 'snapshot.age', category: 'snapshot', status: 'skipped', summary: '缺少設定：snapshot_dir', description: '快照新鮮度' }),
+            check({ name: 'spool.pending', category: 'spool', status: 'skipped', summary: '缺少設定：spool_dir', description: 'spool 待推送' }),
+            check({ name: 'concept_snapshot.age', category: 'concept_snapshot', status: 'skipped', summary: '缺少設定：concept_snapshot' }),
+          ]),
+        ),
+      '/v1/episode_summary': () => json({ space: 'dev', vault: '*', total: 0, last_recorded: null, by_machine: [], by_vault: [] }),
+    });
+    renderWithApp(<Health />, api);
+    const group = (await screen.findByTestId('client-checks')) as HTMLDetailsElement;
+    expect(group.open).toBe(false);
+    expect(group.textContent).toContain('客戶端檢查 · 3 項');
+    expect(group.textContent).toContain('python -m lore_vault.doctor');
+    expect(group.textContent).not.toContain('缺少設定');
+    expect(screen.getByTestId('check-snapshot.age').textContent).toContain('AGENT');
+    expect(screen.getByTestId('count-skipped').textContent).toContain('0');
+    // 服務端分組裡沒有客戶端分類
+    const categories = Array.from(document.querySelectorAll('[data-category]')).map((g) => g.getAttribute('data-category'));
+    expect(categories).toEqual(['storage']);
+  });
+
   it('fail 醒目、排最前且展開明細；計數與頂列徽章同步；收料過久標紅', async () => {
     const recent = new Date(Date.now() - 3_600_000).toISOString();
     const { api, callsTo } = makeApi({

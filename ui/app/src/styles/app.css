@@ -828,6 +828,13 @@ button.lv-wikilink { background: none; border: none; border-bottom: 1px dashed v
 .lv-check-group--fail { border-color: color-mix(in srgb, var(--status-error) 60%, transparent); }
 .lv-check-group--warn { border-color: color-mix(in srgb, var(--uep-gold) 50%, transparent); }
 .lv-check-group__title { margin: 0; padding: 8px 14px; font-family: var(--font-mono); font-size: var(--lv-fs-meta); letter-spacing: .14em; color: var(--ink-mute); border-bottom: 1px solid var(--line); text-transform: uppercase; }
+.lv-check-group--client { border-style: dashed; }
+.lv-check-group__summary { cursor: pointer; display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+details.lv-check-group:not([open]) > .lv-check-group__summary { border-bottom: none; }
+.lv-check-group__note { text-transform: none; letter-spacing: .04em; color: var(--ink-mute); }
+.lv-client-note { padding: 12px 14px; border-bottom: 1px solid var(--line); font-size: var(--lv-fs-body); color: var(--ink-soft); }
+.lv-client-note p { margin: 0 0 10px; line-height: 1.7; }
+.lv-client-note__cmd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--lv-fs-meta); }
 .lv-check { border-bottom: 1px solid var(--line); }
 .lv-check:last-child { border-bottom: none; }
 .lv-check[data-status="fail"] { background: color-mix(in srgb, var(--status-error) 7%, transparent); }
