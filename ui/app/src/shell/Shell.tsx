@@ -181,11 +181,17 @@ export function Shell({ api, principal, author, limits, theme, onToggleTheme, de
     [api, principal, author, limits, space, vaults, vault, toast, health, degraded],
   );
 
-  // 目前選的 vault 捲進可視範圍（限高清單，選到下面的項目時不必自己捲）
+  // 目前選的 vault 捲進可視範圍（限高清單，選到下面的項目時不必自己捲）。
+  // 只調整清單自己的 scrollTop：scrollIntoView 會把瀏覽器的鍵盤起點移到該項目，頁面載入後第一個 Tab 就不是「跳到主內容」
   useEffect(() => {
-    if (vaultsCollapsed) return;
-    const active = vaultList.current?.querySelector<HTMLElement>('.lv-vaults__item.is-active');
-    if (active && typeof active.scrollIntoView === 'function') active.scrollIntoView({ block: 'nearest' });
+    const list = vaultList.current;
+    if (vaultsCollapsed || !list) return;
+    const active = list.querySelector<HTMLElement>('.lv-vaults__item.is-active');
+    if (!active) return;
+    const top = active.offsetTop - list.offsetTop;
+    const bottom = top + active.offsetHeight;
+    if (top < list.scrollTop) list.scrollTop = top;
+    else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight;
   }, [vault, vaultsCollapsed, vaults.items.length]);
 
   const degradedBadge = degraded ? recallDegradedBadge(degradedReason(degraded)) : null;

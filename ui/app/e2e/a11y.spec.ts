@@ -149,8 +149,13 @@ test('快捷鍵：/ 聚焦檢索、g n／g d 跳畫面、? 說明、輸入框內
   await expect(page.getByRole('heading', { name: '文件', level: 1 })).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(dialog).toBeHidden();
+  // 從頁面空白處（body）以快捷鍵開啟：關閉後焦點交給主內容，不會掉到已移除的對話框位置
+  await expect(page.locator('#lv-main')).toBeFocused();
 
-  // 跳到主內容連結：鍵盤第一個焦點
+  // 跳到主內容連結：頁面載入後鍵盤第一個焦點
+  await page.reload();
+  await settle(page);
+  await page.waitForLoadState('networkidle');
   await page.keyboard.press('Tab');
   const skip = page.getByRole('link', { name: '跳到主內容' });
   await expect(skip).toBeFocused();
