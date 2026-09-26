@@ -18,6 +18,7 @@ EXPECTED = {
     "space",
     "vault_resolve",
     "recall",
+    "ask",
     "get",
     "list",
     "write",
@@ -52,6 +53,6 @@ async def test_stdio_lists_exactly_the_nine_tools(tmp_path):
     for tool in result.tools:
         assert tool.description, tool.name
     # 刻意排除的能力沒有被暴露
-    assert not names & {"chat", "ask", "create_vault", "settings", "source", "model"}
+    assert not names & {"chat", "create_vault", "settings", "source", "model"}
     log = (tmp_path / "stderr.log").read_text(encoding="utf-8")
     assert TOKEN not in log
