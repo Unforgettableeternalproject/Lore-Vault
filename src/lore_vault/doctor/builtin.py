@@ -17,6 +17,7 @@ from lore_vault.storage import manage as storage_manage
 from lore_vault.storage import ui_login as storage_ui_login
 
 from .backup_check import backup_recent
+from .concept_push_check import concept_push_lag
 from .concept_snapshot_check import (
     concept_snapshot_age,
     concept_snapshot_path_agreement,
@@ -472,6 +473,14 @@ def default_registry() -> Registry:
             "concept_snapshot",
             concept_snapshot_path_agreement,
             "client.env 的 LORE_VAULT_CONCEPT_SNAPSHOT 與 MCP 快照路徑指向同一檔",
+        )
+    )
+    registry.add(
+        Check(
+            "concept_push.lag",
+            "concept_push",
+            concept_push_lag,
+            "主機 concepts.json 的 id 都已推送到服務、上次推送沒有失敗",
         )
     )
     return registry

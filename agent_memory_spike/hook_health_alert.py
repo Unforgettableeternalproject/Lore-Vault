@@ -49,6 +49,9 @@ STALE_PIPELINE_DAYS = 2    # 排程每日 03:30，兩天沒 log 就是真的沒�
 STALE_EPISODE_DAYS = 3     # 收料停掉代表 Stop hook 掛了，最根本的故障
 SILENT_INJECT_DAYS = 7     # 注入本來就稀疏（約 18%/編輯輪），要放寬
 
+# 與 pipeline.CONCEPT_PUSH_KEY 相同；不 import pipeline（它會拖進 transcript）
+CONCEPT_PUSH_KEY = "concept_push"
+
 
 def _age_days(path: Path) -> float | None:
     """檔案／目錄有多久沒被動過。取不到就回 None（當作無法判斷，不報）。"""
@@ -74,6 +77,7 @@ def collect_alerts() -> list[str]:
     alerts: list[str] = []
 
     # 1. 管線上次執行卡在哪個階段。health 是硬閘門，卡住就代表蒸餾與校準全部沒跑
+    state: Any = None
     try:
         state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
         for result in (state.get("last_run") or {}).get("results") or []:
@@ -85,6 +89,15 @@ def collect_alerts() -> list[str]:
                 break
     except (OSError, json.JSONDecodeError, AttributeError):
         pass
+
+    # 1b. concept 推送（排程在 --run 成功後跑 --push-concepts）。失敗時服務端 concept
+    #     停在上次成功推送，PreToolUse 讀的服務端快照照樣「新鮮」——只有這裡看得到
+    push = state.get(CONCEPT_PUSH_KEY) if isinstance(state, dict) else None
+    if isinstance(push, dict) and push.get("ok") is False:
+        summary = str(push.get("summary") or "").strip()
+        alerts.append(
+            f"concept 推送到服務失敗（{push.get('at')}）：{summary[:120]}"
+            "（服務端記憶停在上次成功推送）")
 
     # 2. 排程本身有沒有在跑。管線失敗至少還留得下 log，排程掛了連 log 都不會有——
     #    後者更難察覺，因為所有既有紀錄看起來都還是好的

@@ -24,7 +24,7 @@
 3. **記憶協定**：改寫 `~/.claude/skills/pm/SKILL.md`、全域 CLAUDE.md 的記憶段落、各專案 CLAUDE.md 的 `[PM] <repo>` 綁定敘述（Chatroom、Echo-Stream、Eternity、Lore-Vault、TestSeperateMemorySystem、U.E.P-s-Core）、claude-codex-pipeline plugin 寫死的 `mcp__open-notebook__*`（repo 與 `~/.claude/plugins/cache/uep-pipeline/` 兩處）、`~/.claude/pm-kit` 去留。
 4. **hook**：`~/.claude/settings.json` 的 `SessionStart`（health alert）、`Stop`、`PreToolUse` 一次整批換成本 repo 路徑，舊路徑完全移除（並存會雙倍注入）；建立 `client.env`（服務 URL、token、快照路徑，且 `LORE_VAULT_CONCEPT_SNAPSHOT` 與 MCP 的 `concept_snapshot_path` 指向同一檔——doctor 有檢查）。
 5. **concept 重新編號**：`agent_memory_spike/renumber_concepts.py` 對現行 `concepts.json`／`injections.jsonl` 產生新檔（乾跑已驗證：265 筆改號、75 筆注入標 `ambiguous_ids`），再以 `pipeline.py --push-concepts` 寫入服務。
-6. **排程**：`AgentMemoryPipeline` 改指向本 repo 的 `run_pipeline.ps1`；**該腳本仍寫死 U.E.P env 的直譯器，要先改成本 repo 的 `.venv`**（UTF-8 BOM、`cmd /c` 重導向兩個坑見 MIGRATION.md A.4）。
+6. **排程**：`AgentMemoryPipeline` 改指向本 repo 的 `run_pipeline.ps1`（腳本已改用本 repo `.venv`，`--run` 成功後接 `--push-concepts`；裁決者 allowlist 在 `.claude/settings.local.json`，須先於排程改指向存在）。
 7. **`pm-api` 切到 5056**：改 `C:\ProgramData\cloudflared\config.yml`（不是 `~/.cloudflared`）後 `Restart-Service cloudflared`。與第 2、8 步同時做。
 8. **其他機器**：裝 MCP 殼（帶 bearer 與 CF Access service token，`pm-proxy.py` 退役）。
 9. **觀察 1–2 天**後：舊 PM 容器轉唯讀備援、之後停用；TestSeperateMemorySystem 另開 PR 移除 spike。

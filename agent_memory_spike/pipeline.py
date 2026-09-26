@@ -38,6 +38,10 @@ A13：三個階段都要 `claude -p`，整條管線留在主機排程，改經�
     python pipeline.py --push-concepts [--dry-run]               # POST /v1/concepts（upsert + 刪除）
 
 服務位址與 token 讀 `client.env`（同 Stop hook，見 `paths.CLIENT_ENV_PATH`）。
+
+`--push-concepts` 不在 STAGES 內，由排程腳本 `run_pipeline.ps1` 在 `--run` 成功後另跑一次。
+每次實推（非 dry-run）都把結果寫進 `pipeline_state.json` 的 `concept_push`（成功或失敗），
+SessionStart 健康告警讀它；doctor `concept_push.lag` 比對本地 id 與已推送 id。
 """
 
 from __future__ import annotations
@@ -50,6 +54,7 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -134,7 +139,9 @@ def save_state(state: dict[str, Any]) -> None:
 # 實測：換成 sys.executable 的絕對路徑，裁決者的 Bash 呼叫一律被權限層擋下
 # （"This command requires approval"），而非互動模式沒有人能核准。
 # allowlist 認的是字面，不是解析後的路徑。這也是 README 寫的執行契約。
-TOOL_PYTHON = "../U.E.P-s-Core/env/Scripts/python.exe"
+# 相對 cwd（repo 根，見 adjudicate 的 cwd）：本 repo 的 .venv，不依賴 U.E.P env。
+# allowlist 要放在本 repo 的 .claude/settings.local.json，字面與此一致
+TOOL_PYTHON = ".venv/Scripts/python.exe"
 
 # 壓制角色與 CLAUDE.md 的對話傾向。**這段是實測逼出來的**：
 # headless 的 `claude -p` 一樣吃全域 CLAUDE.md 與 SessionStart 注入，
@@ -541,6 +548,10 @@ SERVICE_TIMEOUT = 60.0
 EPISODE_PAGE_SIZE = 500
 CONCEPT_BATCH_SIZE = 500  # 服務端上限 1000（concepts + delete 合計）
 PUSHED_IDS_KEY = "service_pushed_concept_ids"
+# 最近一次實推的結果：{"ok", "at", "summary", "upserted", "deleted"}。
+# 健康告警與 doctor（lore_vault.doctor.concept_push_check）讀同一個鍵，改名要一起改
+CONCEPT_PUSH_KEY = "concept_push"
+CONCEPT_PUSH_SUMMARY_LIMIT = 300
 
 
 def service_settings():  # noqa: ANN201 — lore_vault.hooks.client_env.ClientSettings
@@ -658,31 +669,66 @@ def format_rejected_results(body: Any, concepts: list[dict[str, Any]]) -> list[s
 
 def push_concepts_command(*, dry_run: bool, concept_path: Path = CONCEPT_PATH) -> int:
     """送 `vault="*"`、每筆不帶 vault：repo-scope 新 concept 的歸屬由服務端依 A17 決定
-    （source_turns → scope 比對）。無法決定或歧義時整批被拒，逐筆原因印到 stderr、回 1。"""
+    （source_turns → scope 比對）。無法決定或歧義時整批被拒，逐筆原因印到 stderr、回 1。
+
+    實推（非 dry-run）不論成敗都寫 `concept_push` 紀錄：排程失敗只會留在 log 裡，
+    沒有這筆紀錄健康告警就看不到（注入內容會靜默停在上次成功推送）。
+    被拒回 1；其他例外記錄後照舊拋出（traceback 進 log）。失敗時不更新已推送 id。"""
     from lore_vault.hooks.service import ServiceRejected
 
-    concepts = json.loads(concept_path.read_text(encoding="utf-8"))
     state = load_state()
-    delete = diff_concept_ids(list(state.get(PUSHED_IDS_KEY) or []), concepts)
-    print(f"[pipeline] 推送 concept：upsert {len(concepts)}、刪除 {len(delete)}", file=sys.stderr)
-    if dry_run:
-        return 0
+    upserted = deleted = 0
     try:
-        responses = push_concept_changes(service_settings(), concepts, delete)
-    except ServiceRejected as exc:
-        lines = format_rejected_results(exc.body, concepts)
-        if lines is None:
-            raise
-        for line in lines:
-            print(f"[pipeline] {line}", file=sys.stderr)
-        print("[pipeline] 推送中止；拆批時先前批次可能已套用，修正後重跑即可（upsert 冪等）",
-              file=sys.stderr)
-        return 1
+        concepts = json.loads(concept_path.read_text(encoding="utf-8"))
+        delete = diff_concept_ids(list(state.get(PUSHED_IDS_KEY) or []), concepts)
+        upserted, deleted = len(concepts), len(delete)
+        print(f"[pipeline] 推送 concept：upsert {upserted}、刪除 {deleted}", file=sys.stderr)
+        if dry_run:
+            return 0
+        try:
+            responses = push_concept_changes(service_settings(), concepts, delete)
+        except ServiceRejected as exc:
+            lines = format_rejected_results(exc.body, concepts)
+            if lines is None:
+                raise
+            for line in lines:
+                print(f"[pipeline] {line}", file=sys.stderr)
+            print("[pipeline] 推送中止；拆批時先前批次可能已套用，修正後重跑即可（upsert 冪等）",
+                  file=sys.stderr)
+            record_concept_push(state, ok=False,
+                                summary=f"{lines[0]}（{len(lines) - 1} 筆被拒）",
+                                upserted=upserted, deleted=deleted)
+            return 1
+    except Exception as exc:
+        if not dry_run:
+            record_concept_push(state, ok=False, summary=f"{type(exc).__name__}: {exc}",
+                                upserted=upserted, deleted=deleted)
+        raise
     state[PUSHED_IDS_KEY] = sorted(c["id"] for c in concepts if c.get("id"))
-    save_state(state)
     applied = sum(1 for r in responses if isinstance(r, dict) and r.get("applied"))
+    record_concept_push(state, ok=True,
+                        summary=f"upsert {upserted}、刪除 {deleted}，套用 {applied}/{len(responses)} 批",
+                        upserted=upserted, deleted=deleted)
     print(f"[pipeline] 服務端套用 {applied}/{len(responses)} 批", file=sys.stderr)
     return 0
+
+
+def record_concept_push(state: dict[str, Any], *, ok: bool, summary: str,
+                        upserted: int, deleted: int) -> None:
+    """把本次推送結果寫進 state 並落地（連同呼叫端已改好的其他鍵）。
+
+    summary 只放例外型別／訊息與計數；hooks.service 的例外訊息只有 HTTP 狀態與
+    設定提示，不含回應內文與密鑰。"""
+    if len(summary) > CONCEPT_PUSH_SUMMARY_LIMIT:
+        summary = summary[:CONCEPT_PUSH_SUMMARY_LIMIT] + "…"
+    state[CONCEPT_PUSH_KEY] = {
+        "ok": ok,
+        "at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "summary": summary,
+        "upserted": upserted,
+        "deleted": deleted,
+    }
+    save_state(state)
 
 
 def main() -> int:

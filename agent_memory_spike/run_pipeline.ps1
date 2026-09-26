@@ -18,7 +18,8 @@ $ErrorActionPreference = "Continue"
 $env:PYTHONIOENCODING = "utf-8"
 
 $repo = Split-Path -Parent $PSScriptRoot
-$python = Join-Path (Split-Path -Parent $repo) "U.E.P-s-Core\env\Scripts\python.exe"
+# 直譯器用本 repo 的 .venv（不依賴 U.E.P env）；由本檔位置推導，不寫死機器路徑
+$python = Join-Path $repo ".venv\Scripts\python.exe"
 $script = Join-Path $PSScriptRoot "pipeline.py"
 $logDir = Join-Path $env:USERPROFILE ".claude\agent-memory-spike\logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
@@ -32,4 +33,18 @@ $log = Join-Path $logDir ("pipeline-{0}.log" -f (Get-Date -Format "yyyyMMdd"))
 & cmd /c "`"$python`" `"$script`" --run --max-groups 24 >> `"$log`" 2>&1"
 $code = $LASTEXITCODE
 "=== pipeline exit $code $(Get-Date -Format o) ===" | Out-File -FilePath $log -Append -Encoding utf8
+
+# --run 成功才推 concept 到服務（PreToolUse 讀的服務端快照靠這一步更新）。
+# --run 失敗（含階段失敗、鎖被占用）不推：池子可能只收斂了一半。
+# 推送結果（成敗）由 pipeline.py 寫進 pipeline_state.json 的 concept_push，健康告警讀它；
+# 這裡的 log 與 exit code 讓排程器本身也看得到失敗
+if ($code -eq 0) {
+    "=== push-concepts start $(Get-Date -Format o) ===" | Out-File -FilePath $log -Append -Encoding utf8
+    & cmd /c "`"$python`" `"$script`" --push-concepts >> `"$log`" 2>&1"
+    $pushCode = $LASTEXITCODE
+    "=== push-concepts exit $pushCode $(Get-Date -Format o) ===" | Out-File -FilePath $log -Append -Encoding utf8
+    if ($pushCode -ne 0) { $code = $pushCode }
+} else {
+    "=== push-concepts skipped (pipeline exit $code) ===" | Out-File -FilePath $log -Append -Encoding utf8
+}
 exit $code

@@ -196,6 +196,38 @@ def test_thinking_content_is_counted_not_stored():
     assert "internal" not in json.dumps(ep, ensure_ascii=False)
 
 
+def test_out_of_order_timestamps_yield_ordered_span():
+    """迴歸測試：meta 回合的記錄不照時間順序寫入，首尾取值讓 ended_at 早於 started_at，
+    服務端以 invalid 拒收（實測差 3ms）。要取最早／最晚，且輸出維持原字串。"""
+    meta = _user("p1", is_meta=True)
+    meta["timestamp"] = "2026-09-26T12:23:37.676Z"
+    earlier = _user("p1", is_meta=True, text="第二筆")
+    earlier["timestamp"] = "2026-09-26T12:23:37.673Z"
+    ep = build_episode("p1", [meta, earlier])
+    assert ep["started_at"] == "2026-09-26T12:23:37.673Z"
+    assert ep["ended_at"] == "2026-09-26T12:23:37.676Z"
+
+
+def test_timestamp_span_compares_instants_not_strings():
+    """格式不一致時字典序會排錯：'…00.100Z' < '…00Z'（'.' < 'Z'），但後者其實較早。
+    必須解析後比較。記錄照時間順序排，確保首尾取值也對、只有字典序會錯。"""
+    first = _user("p1", origin={"kind": "human"})
+    first["timestamp"] = "2026-09-26T12:00:00Z"
+    second = _assistant(text="ok")
+    second["timestamp"] = "2026-09-26T12:00:00.100Z"
+    ep = build_episode("p1", [first, second])
+    assert ep["started_at"] == "2026-09-26T12:00:00Z"
+    assert ep["ended_at"] == "2026-09-26T12:00:00.100Z"
+
+
+def test_unparseable_timestamp_falls_back_to_record_order():
+    first = _user("p1", origin={"kind": "human"})
+    first["timestamp"] = "not-a-time"
+    ep = build_episode("p1", [first, _assistant(text="ok")])
+    assert ep["started_at"] == "not-a-time"
+    assert ep["ended_at"] == "2026-07-25T00:00:01.000Z"
+
+
 def test_files_edited_from_file_history_delta():
     records = [
         _user("p1", origin={"kind": "human"}),
