@@ -23,6 +23,7 @@ from typing import Any
 
 from lore_vault.recall.embedder import REASON_UNAVAILABLE, Embedder, embed_text
 from lore_vault.schema import Note
+from lore_vault.schema.chars import check_fields
 from lore_vault.storage import fts, vectors
 from lore_vault.storage.db import transaction
 from lore_vault.storage.notes import (
@@ -239,9 +240,23 @@ def write(
     - summary 與 embedding 不在這裡算，由背景補（A14）；查重會呼叫一次 embedder，
       失敗或未設定時只做 lexical 查重並標 `dedup_degraded`，不阻擋寫入
     - `supersedes` 必須是同一 vault 內存在的 note；它本身不列入疑似重複
+    - 任一欄位含控制字元（tab、LF、CR 以外的 C0）或孤立 surrogate：拋
+      `InvalidCharacters`，不寫入
     """
-    key = resolve_write(conn, vault)
     topics = _str_list("topics", topics)
+    links = _str_list("links", links)
+    # 查重會把 title／body 組成 FTS 查詢，禁用字元要在那之前擋下
+    # （storage.insert_note 也會再擋一次，繞過服務層直接寫也進不去）
+    check_fields(
+        {
+            "title": title,
+            "body": body,
+            "topics": topics,
+            "links": links,
+            "supersedes": supersedes,
+        }
+    )
+    key = resolve_write(conn, vault)
     if supersedes is not None:
         get_note(conn, key, supersedes)  # 不存在拋 NotFound
     duplicates, reason = find_duplicates(
@@ -265,7 +280,7 @@ def write(
         updated=stamp,
         summary=None,
         topics=topics,
-        links=_str_list("links", links),
+        links=links,
         supersedes=supersedes,
     )
     stored = insert_note(conn, key, note)
@@ -329,6 +344,7 @@ def update(
         changes["supersedes"] = supersedes
     if not changes:
         raise NoChanges("沒有指定要更新的欄位")
+    check_fields(changes)
 
     with transaction(conn):
         key = resolve_write(conn, vault)

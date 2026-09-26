@@ -232,6 +232,20 @@ def _v5(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+# concept 寫回依 source_turns 查來源 episode 的 vault（A17，
+# `api.spike._prefetch_turn_vaults` 以 `prompt_id IN (...)` 分塊查）。唯一鍵
+# (session_id, prompt_id, turn_index) 以 session_id 開頭用不上，沒有這個索引
+# 每一塊都掃全表。
+_V6_STATEMENTS: tuple[str, ...] = (
+    "CREATE INDEX episodes_prompt_turn ON episodes(prompt_id, turn_index)",
+)
+
+
+def _v6(conn: sqlite3.Connection) -> None:
+    for statement in _V6_STATEMENTS:
+        conn.execute(statement)
+
+
 # 有序遷移：索引 i 的函式把版本從 i 升到 i+1。只能往後加，不可改動已發佈的項目。
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _v1,
@@ -239,6 +253,7 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _v3,
     _v4,
     _v5,
+    _v6,
 )
 
 SCHEMA_VERSION = len(MIGRATIONS)

@@ -10,7 +10,8 @@
 `<id>` 由 (session_id, prompt_id, turn_index) 雜湊而來：同一輪重寫會覆蓋同一檔，
 重播到服務端是冪等的（服務回 duplicate 視同成功）。
 
-每筆內容 `{"format": 1, "spooled_at": ..., "episode": {...}}`；`episode` 就是送給
+每筆內容 `{"format": 1, "spooled_at": ..., "episode": {...}}`（有清理控制字元時另有
+`"sanitized": <替換數>`）；`episode` 就是送給
 `POST /v1/episodes` 的物件，已含寫入當下凍結的 `machine` 與 `vault`——推送、
 重播都原樣送出，不依推送當下的機器或 binding 重算（A7）。
 
@@ -28,6 +29,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from lore_vault.schema.chars import sanitize_value
 
 from .client_env import ClientSettings
 
@@ -132,11 +135,16 @@ def wire_episode(
 def write_pending(
     spool_dir: Path, wire: dict[str, Any], *, now: datetime | None = None
 ) -> Path:
-    record = {
+    """寫一筆待推送。NUL 等禁用控制字元先換成可見形式（`\\0`、`\\xNN`），
+    替換數記在 `sanitized`（只在非零時出現）；推送只讀 `episode`，這欄不影響協定。"""
+    wire, replaced = sanitize_value(wire)
+    record: dict[str, Any] = {
         "format": FORMAT_VERSION,
         "spooled_at": _iso(now or _utc_now()),
         "episode": wire,
     }
+    if replaced:
+        record["sanitized"] = replaced
     path = spool_dir / PENDING / f"{spool_id(wire)}.json"
     _atomic_write_json(path, record)
     return path

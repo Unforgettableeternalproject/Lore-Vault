@@ -15,6 +15,8 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+from lore_vault.schema.chars import sanitize_text
+
 from . import fts
 from .checks import MAX_DETAILS, Reconciliation
 from .db import transaction
@@ -87,9 +89,13 @@ def write_summary_if_current(
     conn: sqlite3.Connection, seq: int, expected_updated: str, summary: str
 ) -> bool:
     """note 版本仍是 `expected_updated` 且仍缺 summary 時寫入（同交易更新 FTS、
-    清掉嘗試紀錄）；否則不動並回傳 False。不推進 `updated`。"""
+    清掉嘗試紀錄）；否則不動並回傳 False。不推進 `updated`。
+
+    摘要是 LLM 產物（衍生文字）：夾帶的控制字元清理成可見形式而不是拒收——
+    拒收只會讓補算無限重試，doctor `storage.control_chars` 也永遠紅。"""
     if not isinstance(summary, str) or not summary.strip():
         raise ValueError("summary 不可為空")
+    summary, _ = sanitize_text(summary)
     with transaction(conn):
         cursor = conn.execute(
             """

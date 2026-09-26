@@ -87,6 +87,10 @@ def storage_missing_summaries(ctx: DoctorContext) -> CheckResult:
     return _to_result(storage_checks.missing_summaries(ctx.require("db")))
 
 
+def storage_control_chars(ctx: DoctorContext) -> CheckResult:
+    return _to_result(storage_checks.control_chars(ctx.require("db")))
+
+
 def storage_vector_dimension(ctx: DoctorContext) -> CheckResult:
     db = ctx.require("db")
     return _to_result(storage_checks.vector_dimension(db, dim=_embedding_dim(ctx)))
@@ -193,6 +197,11 @@ def default_registry() -> Registry:
             "storage.vector_dimension",
             storage_vector_dimension,
             "向量維度與設定 embedding_dim 一致",
+        ),
+        (
+            "storage.control_chars",
+            storage_control_chars,
+            "notes／concepts／episodes 沒有禁用的控制字元（NUL 等）或孤立 surrogate",
         ),
     ):
         registry.add(Check(name, "storage", func, description))

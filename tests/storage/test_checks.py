@@ -19,6 +19,7 @@ STORAGE_CHECKS = {
     "storage.missing_embeddings",
     "storage.missing_summaries",
     "storage.vector_dimension",
+    "storage.control_chars",
 }
 
 

@@ -13,6 +13,7 @@ from collections.abc import Iterable, Sequence
 from typing import Any
 
 from lore_vault.schema import Note, SchemaError
+from lore_vault.schema.chars import check_fields
 
 from . import fts
 from .db import transaction
@@ -44,6 +45,18 @@ def _row_to_note(row: sqlite3.Row) -> Note:
     )
 
 
+def _note_text_fields(note: Note) -> dict[str, object]:
+    return {
+        "id": note.id,
+        "title": note.title,
+        "body": note.body,
+        "summary": note.summary,
+        "topics": note.topics,
+        "links": note.links,
+        "supersedes": note.supersedes,
+    }
+
+
 def _check_vault_matches(conn: sqlite3.Connection, vault_key: str, note: Note) -> None:
     if resolve_write(conn, note.vault) != vault_key:
         raise VaultRequired(
@@ -55,7 +68,10 @@ def insert_note(conn: sqlite3.Connection, vault: str, note: Note) -> Note:
     """新增 note；回傳實際存下的版本（vault 為現行 key、時間戳已正規化）。
 
     `vault` 參數必填且必須與 `note.vault` 指向同一個 vault（別名會解析成現行 key）。
+    含控制字元或孤立 surrogate 的欄位拋 `InvalidCharacters`（所有寫入路徑的最底層防線；
+    匯入工具要先清理）。
     """
+    check_fields(_note_text_fields(note))
     with transaction(conn):
         key = resolve_write(conn, vault)
         _check_vault_matches(conn, key, note)
@@ -193,11 +209,13 @@ def update_note_if(
     - 成功：回傳新版本 note（`updated` 嚴格晚於舊版本）
     - 版本不符：回傳 None，不寫入任何東西（衝突錯誤由上層 T-21 決定怎麼回）
     - note 不在該 vault：拋 `NotFound`
+    - 變動欄位含控制字元或孤立 surrogate：拋 `InvalidCharacters`，不寫入
     title／body 變動時同一交易內刪除舊 embedding。
     """
     unknown = sorted(set(changes) - UPDATABLE_FIELDS)
     if unknown:
         raise SchemaError(f"update_note_if 不可更新欄位 {unknown}")
+    check_fields(changes)
     with transaction(conn):
         key = resolve_write(conn, vault)
         row = conn.execute(

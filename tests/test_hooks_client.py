@@ -152,6 +152,25 @@ def test_spool_is_one_atomic_file_per_turn_and_idempotent(tmp_path):
     assert (stats.pending, stats.rejected) == (3, 0)
 
 
+def test_spool_sanitizes_control_characters_before_writing(tmp_path):
+    """NUL 等控制字元在寫 spool 前就換成可見形式並計數；推送送出的是清理後的內容。"""
+    dirty = _episode(0, user_text="問" + chr(0) + "題", files_read=["a" + chr(1)])
+    path = spool.write_pending(
+        tmp_path, spool.wire_episode(dirty, machine="desk-a", vault="folder/demo")
+    )
+    raw = path.read_bytes()
+    assert b"u0000" not in raw and b"u0001" not in raw  # 沒有 JSON 跳脫的控制字元
+    record = json.loads(raw)
+    assert record["sanitized"] == 2
+    assert record["episode"]["user_text"] == "問" + chr(92) + "0題"
+    assert record["episode"]["files_read"] == ["a" + chr(92) + "x01"]
+    assert dirty["user_text"] == "問" + chr(0) + "題"  # 原物件不動
+    clean = spool.write_pending(
+        tmp_path, spool.wire_episode(_episode(1), machine="desk-a", vault="folder/demo")
+    )
+    assert "sanitized" not in json.loads(clean.read_text("utf-8"))
+
+
 def test_derive_vault_falls_back_to_folder(tmp_path):
     cache: dict[str, str] = {}
     gone = str(tmp_path / "Deleted-Repo")

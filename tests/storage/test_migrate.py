@@ -119,3 +119,36 @@ def test_import_has_no_side_effects(tmp_path):
         check=True,
     )
     assert list(tmp_path.iterdir()) == []
+
+
+def test_v6_adds_episode_prompt_turn_index_to_v5_db(db_path):
+    """v5 的庫（含資料）升到 v6：建 episodes(prompt_id, turn_index) 索引，
+    A17 的 source_turns 查詢改走索引而非全表掃描。"""
+    raw = sqlite3.connect(db_path, isolation_level=None)
+    try:
+        assert migrate(raw, migrations=migrate_mod.MIGRATIONS[:5]) == 5
+        raw.execute(
+            "INSERT INTO vaults (key, display, kind, created) "
+            "VALUES ('folder/m', 'm', 'repo', '2026-09-01T00:00:00.000Z')"
+        )
+        raw.execute(
+            "INSERT INTO episodes (vault, session_id, prompt_id, turn_index, machine, "
+            "data, recorded) VALUES ('folder/m', 's', 'p', 0, 'm', '{}', 'x')"
+        )
+        index_sql = "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?"
+        assert raw.execute(index_sql, ("episodes_prompt_turn",)).fetchone() is None
+
+        assert migrate(raw) == SCHEMA_VERSION == 6
+        assert raw.execute(index_sql, ("episodes_prompt_turn",)).fetchone()
+        plan = " ".join(
+            str(row[-1])
+            for row in raw.execute(
+                "EXPLAIN QUERY PLAN SELECT prompt_id, turn_index, vault FROM episodes "
+                "WHERE prompt_id IN (?, ?)",
+                ("p", "q"),
+            )
+        )
+        assert "episodes_prompt_turn" in plan
+        assert raw.execute("SELECT count(*) FROM episodes").fetchone()[0] == 1
+    finally:
+        raw.close()

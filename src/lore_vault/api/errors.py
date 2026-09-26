@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 
 from lore_vault.notes import InvalidCursor, NoChanges, VersionConflict
 from lore_vault.recall import UnsupportedKind
+from lore_vault.schema import InvalidCharacters
 from lore_vault.storage.errors import (
     DuplicateRecord,
     NotFound,
@@ -97,6 +98,20 @@ def install_error_handlers(app: FastAPI) -> None:
         assert isinstance(exc, VaultExists)
         return _json(409, "vault_exists", exc, existing=exc.existing)
 
+    async def invalid_characters(request: Request, exc: Exception) -> JSONResponse:
+        # 只回欄位、字元索引與碼位，不回顯內容
+        assert isinstance(exc, InvalidCharacters)
+        return _json(
+            400,
+            "invalid_characters",
+            exc,
+            field=exc.field,
+            index=exc.index,
+            codepoint=f"U+{exc.codepoint:04X}",
+            kind=exc.kind,
+        )
+
+    app.add_exception_handler(InvalidCharacters, invalid_characters)
     app.add_exception_handler(UnknownVault, unknown_vault)
     app.add_exception_handler(VersionConflict, version_conflict)
     app.add_exception_handler(VaultExists, vault_exists)

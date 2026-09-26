@@ -272,6 +272,63 @@ doctor `import.on_reconcile`（分類 `import`）：清單有但 note 不在、�
 (title, body) 雜湊不符 → fail；各 vault 來源筆數 ≠ 清單 ≠ 實際 → fail；匯入後正常修改與新系統新增
 只計數。尚未匯入為 skipped。
 
+### 孤兒 note（不屬任何 notebook）
+
+ON 有 note 沒掛在任何 notebook 上；全量 `GET /api/notes` 因含 NUL 的那則回 500，孤兒無法經 REST
+列舉，清單（id／標題／created）要另外從 SurrealDB 唯讀查詢取得。
+
+1. `orphans-map --orphans FILE --mapping mapping.json --out orphans-map.json [--projects-dir DIR ...]
+   [--exclude ID ...]`：孤兒清單可為 JSON／JSONL（id、title、created）或 TSV（第 1 欄 id、第 2 欄
+   created、最後一欄 title）。掃 Claude Code transcript（預設 `~/.claude/projects`）與 Codex rollout
+   （預設 `~/.codex/sessions`）裡的 `create_note` 呼叫（正規化標題比對；同標題指向多個 vault 時只採信與
+   ON created 相差 15 分鐘內的那幾筆），取該訊息的 `cwd` → `lore_vault.binding` 算 key → 對 mapping 的
+   vault key 與 `aliases` 得最終 vault；另以 `update_note` 的 `note_id` 精確比對當輔助證據。
+   **只讀工具呼叫 input 的 title／note_id／notebook_id 與訊息的 cwd／timestamp**，不讀 tool_result。
+   找不到、歧義、或 key 不在 mapping 的標 `needs_review`，人工填 `vault` 後設 false；`--exclude` 的
+   id 標 `skip`（測試／佔位）。Claude Code 只保留約 30 天的 transcript，更早建立的 note 多半找不到
+2. `export-orphans --orphans-map FILE --export DIR [--supplement FILE]`：未略過的孤兒逐筆
+   `GET /api/notes/{id}`，寫 `<export>/orphans.jsonl` 與 `orphans-manifest.json`（雜湊、來源筆數、
+   `unavailable`）。REST 取不到的（含 NUL 的那則逐筆端點也 500）用 `--supplement` 補，見下
+3. `import ... --orphans-map FILE`：孤兒依 mapping 的 vault（可寫別名）匯入，同樣進對帳清單與
+   vault 來源筆數。還有 `needs_review` 項時拒絕（`--allow-unreviewed` 下未指定 vault 的跳過並列
+   `orphans.unassigned`）；指定了 vault 卻沒有內容紀錄、或 vault 不在 mapping → 直接失敗。
+   **匯入過孤兒後每次重跑都要帶同一份 `--orphans-map`**：對帳清單以「這次來源」整批替換，
+   沒帶的話孤兒會從清單移除（note 仍在，對帳改算「新系統新增」）
+
+**含 NUL 的孤兒（手動步驟，不經現行 PM 容器）**：REST 取不到，改從 SurrealDB 的**唯讀副本**匯出。
+不直接查現行容器（避免對執行中的 PM 做任何事）；複製 `surreal_data/` 到另一個目錄、另起一個
+SurrealDB 指向副本（不同埠、不掛現行 compose），在資料庫端把 NUL 換成兩字元 `\0` 再取出：
+
+```sql
+SELECT meta::id(id) AS rid, title, string::replace(content, "\u{0}", "\\0") AS content,
+       note_type, created, updated
+FROM note WHERE id = note:7ha92hoelu2a4ajoxvmb;
+```
+
+（未在副本上實測：SurrealQL 的 NUL 跳脫寫法、以及 v2 取 record id 的函式名（`meta::id`／`record::id`）
+執行前先確認；可用 `string::len` 比對替換前後長度。）
+把結果整理成 JSONL（每行 `id`＝`note:<rid>`、`title`、`content`、`created`、`updated`）當 `--supplement`。
+supplement 內仍有 NUL 也沒關係：匯入時一樣會清理並記在報告 `sanitized`。
+
+## 控制字元防護（NUL 等）
+
+舊 PM 有一則 note 內文夾了真正的 NUL 位元組，整則永久讀不出來、全量列表 500。定義集中在
+`lore_vault.schema.chars`（純標準庫，hook 也 import）：禁用 C0 控制字元（tab、LF、CR 除外，共 29 個）
+與孤立 surrogate。
+
+| 路徑 | 行為 |
+|---|---|
+| notes 寫入（HTTP／MCP 的 write、update；title、body、topics、links、supersedes） | 拒收：400 `invalid_characters`，附 `field`（清單欄位帶索引，如 `topics[1]`）、`index`（字元索引，0 起算）、`codepoint`、`kind`；不回顯內容。最底層在 `storage.notes.insert_note`／`update_note_if`，繞過服務層直接呼叫也擋得住 |
+| ON 匯入 | 不拒收：NUL → 兩字元 `\0`、其他 C0 → `\xNN`、孤立 surrogate → `\uXXXX`；報告 `sanitized` 逐則列替換數。清理在算內容雜湊之前，重跑冪等 |
+| episode 收料 | 客戶端寫 spool 前清理（spool 檔 `sanitized` 記替換數）；服務端 `POST /v1/episodes` 收到仍含控制字元（舊客戶端）也清理，逐筆結果標 `sanitized: true`、`sanitized_chars`。清理冪等，新舊客戶端送同一輪會是 duplicate |
+| LLM 摘要（背景補算） | 清理後寫入（衍生文字，拒收只會無限重試） |
+
+doctor `storage.control_chars`（分類 `storage`）：掃 notes（title／body／summary／topics）、concepts、
+episodes 的 data，有即 fail 並列 id（不列內容）。SQLite 對含 NUL 的 TEXT：Python sqlite3 能完整讀回、
+FTS5 照樣索引，但 `length()`／`LIKE`／`substr()` 在 NUL 處截斷、JSON1 判為不合法（實測見
+`tests/storage/test_control_chars.py`），所以掃描一律 `CAST(col AS BLOB)` 找位元組；JSON 欄另以
+`\u00`／`\b`／`\f`／`\ud` 粗篩後在 Python 解析確認。
+
 ## spike 接入：hook 端 spool、推送與 concept 快照（T-38～T-40）
 
 hook 進入點（`agent_memory_spike/hook_stop.py`、`hook_pretooluse.py`）依自身位置把 repo 的 `src/`

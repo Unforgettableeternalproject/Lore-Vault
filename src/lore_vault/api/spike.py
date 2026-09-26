@@ -37,6 +37,7 @@ from lore_vault.schema import (
     Vault,
     canonical_key,
 )
+from lore_vault.schema.chars import sanitize_value
 from lore_vault.storage import records
 from lore_vault.storage import snapshot as storage_snapshot
 from lore_vault.storage.db import transaction
@@ -150,7 +151,11 @@ def _auto_vault_detail(episode: Episode) -> str:
 @router.post("/episodes")
 def post_episodes(request: Request, req: EpisodeBatch) -> dict[str, Any]:
     """逐筆結果：accepted／duplicate（同鍵同內容，視為成功）／conflict（同鍵不同內容，
-    客戶端應保留在 spool 並回報）／invalid（schema 或 vault 不合法）。"""
+    客戶端應保留在 spool 並回報）／invalid（schema 或 vault 不合法）。
+
+    收料不可拒收：含 NUL 等禁用控制字元（舊客戶端沒有先清理）時換成可見形式再寫入，
+    該筆結果標 `sanitized: true` 與替換數 `sanitized_chars`。清理是冪等的，新客戶端
+    送來已清理的同一輪會得到 duplicate。"""
     _check_batch("episodes", req.episodes, EPISODE_BATCH_MAX)
     results: list[dict[str, Any]] = []
     created_vaults: list[str] = []
@@ -159,9 +164,12 @@ def post_episodes(request: Request, req: EpisodeBatch) -> dict[str, Any]:
         for index, item in enumerate(req.episodes):
             result: dict[str, Any] = {"index": index, "key": _episode_key(item)}
             try:
-                data, raw_vault = _split_vault(item)
+                cleaned, replaced = sanitize_value(item)
+                data, raw_vault = _split_vault(cleaned)
                 vault = _require_vault(raw_vault)
                 episode = Episode.from_dict(data)
+                if replaced:
+                    result.update(sanitized=True, sanitized_chars=replaced)
                 with _savepoint(conn):
                     key, created = ensure_vault(
                         conn,
@@ -352,8 +360,8 @@ def _prefetch_turn_vaults(
 ) -> dict[tuple[str, int], set[str]]:
     """整批一次查出「未帶 vault、scope 為字串」各筆 source_turns 所屬的 episode vault。
 
-    episodes 沒有 (prompt_id, turn_index) 索引，逐筆查會每筆掃一次全表；
-    這裡整批收集後以 `prompt_id IN (...)` 分塊查。同一 (prompt_id, turn_index)
+    整批收集後以 `prompt_id IN (...)` 分塊查（走 schema v6 的
+    `episodes_prompt_turn` 索引），不逐筆查。同一 (prompt_id, turn_index)
     理論上只屬一個 session，保險起見仍以集合收 vault。
     """
     wanted: set[tuple[str, int]] = set()

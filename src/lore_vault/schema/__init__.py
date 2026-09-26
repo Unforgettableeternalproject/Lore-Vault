@@ -1,6 +1,7 @@
 """核心層：Vault／Note／Episode／Concept／Injection 型別（純標準庫）。"""
 
 from ._base import MISSING, SchemaError
+from .chars import InvalidCharacters
 from .models import (
     CONCEPT_KINDS,
     EPISODE_ORIGINS,
@@ -23,6 +24,7 @@ __all__ = [
     "Concept",
     "Episode",
     "Injection",
+    "InvalidCharacters",
     "Note",
     "SchemaError",
     "SourceTurn",

@@ -6,6 +6,13 @@
     python -m lore_vault.cli.import_on import --export DIR --mapping FILE --db PATH
                                               [--report FILE] [--allow-unreviewed]
     python -m lore_vault.cli.import_on estimate --db PATH [--config PATH]
+    python -m lore_vault.cli.import_on orphans-map --orphans FILE --mapping FILE
+                                                   --out FILE [--projects-dir DIR ...]
+                                                   [--exclude ID ...]
+    python -m lore_vault.cli.import_on export-orphans --orphans-map FILE
+                                                      --export DIR [--base-url URL]
+                                                      [--supplement FILE]
+    （import 另加 --orphans-map FILE 匯入孤兒）
 
 資料流（ON 1.14.0 REST API，只用 GET）：
 1. `GET /api/notebooks`：每本的 `note_count`（SurrealDB `count(<-artifact.in)`）即 ON 端
@@ -45,13 +52,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TextIO
 
-from lore_vault.binding import folder_key, resolve_binding
+from lore_vault.binding import folder_key, lookup_key, resolve_binding
 from lore_vault.schema import Note, Vault, canonical_key
+from lore_vault.schema.chars import sanitize_text
 from lore_vault.storage import imports
 from lore_vault.storage.db import connect, transaction
 from lore_vault.storage.notes import insert_note, update_note_if
 from lore_vault.storage.timeutil import format_utc
 from lore_vault.storage.vaults import list_vaults, upsert_vault
+
+from . import on_orphans
 
 SOURCE = "open-notebook"
 EXPORT_FORMAT = 1
@@ -637,19 +647,95 @@ def _validate_mapping(
     return entries
 
 
+def _planned_note(
+    note: Mapping[str, Any], vault: str, report: dict[str, Any]
+) -> PlannedNote:
+    """ON 紀錄 → 待匯入 note：時間戳正規化、空標題補位，並清理禁用控制字元。
+
+    ON 端資料不可拒收（會丟資料）：NUL 換成可見的 `\\0`、其他 C0 換成 `\\xNN`，
+    逐則記在報告 `sanitized`。清理在算內容雜湊之前，重跑匯入結果一致。
+    """
+    anomalies: list[dict[str, Any]] = report["timestamp_anomalies"]
+    created, created_anomaly = to_utc_ms(note["created"])
+    updated, updated_anomaly = to_utc_ms(note["updated"])
+    for field, kind, raw in (
+        ("created", created_anomaly, note["created"]),
+        ("updated", updated_anomaly, note["updated"]),
+    ):
+        if kind:
+            anomalies.append(
+                {"id": note["id"], "field": field, "kind": kind, "raw": raw}
+            )
+    if updated < created:
+        anomalies.append(
+            {
+                "id": note["id"],
+                "field": "updated",
+                "kind": "before_created",
+                "raw": note["updated"],
+            }
+        )
+        updated = created
+    title = note.get("title")
+    if not isinstance(title, str) or not title.strip():
+        anomalies.append({"id": note["id"], "field": "title", "kind": "empty"})
+        title = f"(無標題 {note['id']})"
+    body = note.get("content")
+    if not isinstance(body, str):
+        anomalies.append({"id": note["id"], "field": "content", "kind": "null"})
+        body = ""
+    title, title_fixed = sanitize_text(title)
+    body, body_fixed = sanitize_text(body)
+    if title_fixed or body_fixed:
+        sanitized = report["sanitized"]
+        sanitized["notes"].append(
+            {"id": note["id"], "title": title_fixed, "body": body_fixed}
+        )
+        sanitized["chars"] += title_fixed + body_fixed
+    return PlannedNote(
+        source_id=note["id"],
+        vault=vault,
+        title=title,
+        body=body,
+        created=created,
+        updated=updated,
+        content_sha256=imports.content_sha256(title, body),
+    )
+
+
+@dataclass(frozen=True)
+class OrphanPlan:
+    """孤兒 mapping（`orphans-map` 產生、人工確認過）與取回的內容紀錄。"""
+
+    entries: list[dict[str, Any]]
+    records: list[dict[str, Any]]
+
+
+def orphan_review_items(orphans: OrphanPlan | None) -> list[str]:
+    if orphans is None:
+        return []
+    return [
+        f"孤兒 note {e['id']}：{e.get('review_reason') or '待確認'}"
+        for e in orphans.entries
+        if not e.get("skip") and e.get("needs_review")
+    ]
+
+
 def _plan(
     export: ExportData,
     mapping: Mapping[str, Any],
     entries: Mapping[str, Mapping[str, Any]],
     report: dict[str, Any],
+    orphans: OrphanPlan | None = None,
 ) -> list[PlannedNote]:
     assignments = mapping.get("note_assignments", {})
-    anomalies: list[dict[str, Any]] = report["timestamp_anomalies"]
     planned: list[PlannedNote] = []
+    # 不屬任何 notebook 的 note：全量端點可用時在 notes.jsonl，否則來自 orphans.jsonl
+    orphan_records: dict[str, Mapping[str, Any]] = {}
     for note in export.notes:
         nbs = note["notebooks"]
         if not nbs:
-            report["skipped"]["orphan"] += 1
+            orphan_records.setdefault(note["id"], note)
             continue
         if len(nbs) == 1:
             chosen = nbs[0]
@@ -664,45 +750,53 @@ def _plan(
         if entry.get("skip"):
             report["skipped"]["notebook_skipped"] += 1
             continue
-        created, created_anomaly = to_utc_ms(note["created"])
-        updated, updated_anomaly = to_utc_ms(note["updated"])
-        for field, kind, raw in (
-            ("created", created_anomaly, note["created"]),
-            ("updated", updated_anomaly, note["updated"]),
-        ):
-            if kind:
-                anomalies.append(
-                    {"id": note["id"], "field": field, "kind": kind, "raw": raw}
-                )
-        if updated < created:
-            anomalies.append(
-                {
-                    "id": note["id"],
-                    "field": "updated",
-                    "kind": "before_created",
-                    "raw": note["updated"],
-                }
-            )
-            updated = created
-        title = note.get("title")
-        if not isinstance(title, str) or not title.strip():
-            anomalies.append({"id": note["id"], "field": "title", "kind": "empty"})
-            title = f"(無標題 {note['id']})"
-        body = note.get("content")
-        if not isinstance(body, str):
-            anomalies.append({"id": note["id"], "field": "content", "kind": "null"})
-            body = ""
-        planned.append(
-            PlannedNote(
-                source_id=note["id"],
-                vault=entry["key"],
-                title=title,
-                body=body,
-                created=created,
-                updated=updated,
-                content_sha256=imports.content_sha256(title, body),
-            )
+        planned.append(_planned_note(note, entry["key"], report))
+
+    in_notebooks = {n["id"] for n in export.notes if n["notebooks"]}
+    for record in orphans.records if orphans is not None else ():
+        if record.get("id") in in_notebooks:
+            raise OnImportError(f"孤兒紀錄 {record.get('id')} 其實屬於 notebook")
+        orphan_records[record["id"]] = record
+    orphan_report = report["orphans"]
+    by_id = {e["id"]: e for e in orphans.entries} if orphans is not None else {}
+    index = on_orphans.vault_index(mapping) if orphans is not None else {}
+    targets: dict[str, str] = {}
+    bad_vaults: list[str] = []
+    for entry in by_id.values():
+        note_id = entry["id"]
+        if entry.get("skip"):
+            report["skipped"]["orphan_excluded"] += 1
+            orphan_report["excluded"].append(note_id)
+            continue
+        vault_name = entry.get("vault")
+        if not isinstance(vault_name, str) or not vault_name.strip():
+            # 只有 --allow-unreviewed 才會走到這裡（否則驗證時已擋下）
+            report["skipped"]["orphan_unassigned"] += 1
+            orphan_report["unassigned"].append(note_id)
+            continue
+        vault = index.get(lookup_key(vault_name))
+        if vault is None:
+            bad_vaults.append(f"{note_id} → {vault_name!r}")
+            continue
+        targets[note_id] = vault
+    if bad_vaults:
+        raise OnImportError(
+            "孤兒 note 的 vault 不是 mapping 中的 vault 或別名："
+            + "、".join(bad_vaults)
         )
+    no_record = [i for i in targets if i not in orphan_records]
+    if no_record:
+        raise OnImportError(
+            f"孤兒 note 沒有內容紀錄（先跑 export-orphans，REST 取不到的用 "
+            f"--supplement 補）：{no_record}"
+        )
+    for note_id, vault in targets.items():
+        planned.append(_planned_note(orphan_records[note_id], vault, report))
+        orphan_report["planned"].append(note_id)
+    for note_id in orphan_records:
+        if note_id not in by_id:
+            report["skipped"]["orphan"] += 1
+            orphan_report["unmapped"].append(note_id)
     return planned
 
 
@@ -722,7 +816,19 @@ def _new_report() -> dict[str, Any]:
             "conflicts": [],
         },
         # deleted：管理指令刪除過（有墓碑），不匯回
-        "skipped": {"orphan": 0, "notebook_skipped": 0, "deleted": 0},
+        # orphan：孤兒 mapping 沒列的孤兒；
+        # orphan_excluded：孤兒 mapping 標 skip（測試／佔位）；
+        # orphan_unassigned：--allow-unreviewed 下仍未指定 vault
+        "skipped": {
+            "orphan": 0,
+            "orphan_excluded": 0,
+            "orphan_unassigned": 0,
+            "notebook_skipped": 0,
+            "deleted": 0,
+        },
+        "orphans": {"planned": [], "excluded": [], "unassigned": [], "unmapped": []},
+        # 清理掉控制字元的 note：{"id", "title": 替換數, "body": 替換數}
+        "sanitized": {"notes": [], "chars": 0},
         "deleted_skipped": [],
         "per_vault": {},
         "review": [],
@@ -739,16 +845,27 @@ def run_import(
     mapping: Mapping[str, Any],
     *,
     allow_unreviewed: bool = False,
+    orphans: OrphanPlan | None = None,
 ) -> dict[str, Any]:
-    """依 mapping 建 vault 與 note；回傳報告（含標題的明細只寫進報告檔）。"""
+    """依 mapping 建 vault 與 note；回傳報告（含標題的明細只寫進報告檔）。
+
+    `orphans`：孤兒 note 的歸屬與內容。一旦匯入過孤兒，之後每次重跑都要帶同一份，
+    否則對帳清單會把它們移除（note 仍在，對帳改算「新系統新增」）。
+    """
     entries = _validate_mapping(export, mapping, allow_unreviewed=allow_unreviewed)
+    orphan_review = orphan_review_items(orphans)
+    if orphan_review and not allow_unreviewed:
+        raise OnImportError(
+            f"孤兒 mapping 有 {len(orphan_review)} 項待人工確認（填 vault 後把 "
+            "needs_review 設 false，或加 --allow-unreviewed）"
+        )
     report = _new_report()
-    report["review"] = review_items(mapping)
+    report["review"] = review_items(mapping) + orphan_review
     report["multi_membership"] = [
         {"id": note_id, **a}
         for note_id, a in mapping.get("note_assignments", {}).items()
     ]
-    planned = _plan(export, mapping, entries, report)
+    planned = _plan(export, mapping, entries, report, orphans)
     report["notes"]["planned"] = len(planned)
     # 墓碑：管理指令刪掉的 note 不匯回。仍留在對帳清單與來源筆數裡，
     # 對帳才分得出「刻意刪除」與「漏匯」
@@ -920,6 +1037,11 @@ def report_summary(report: Mapping[str, Any]) -> dict[str, Any]:
         "per_vault": report["per_vault"],
         "notes": {k: (len(v) if isinstance(v, list) else v) for k, v in notes.items()},
         "skipped": report["skipped"],
+        "orphans": {k: len(v) for k, v in report["orphans"].items()},
+        "sanitized": {
+            "notes": [n["id"] for n in report["sanitized"]["notes"]],
+            "chars": report["sanitized"]["chars"],
+        },
         "review_items": len(report["review"]),
         "multi_membership": len(report["multi_membership"]),
         "timestamp_anomalies": len(report["timestamp_anomalies"]),
@@ -1066,6 +1188,46 @@ def main(
         action="store_true",
         help="mapping 仍有待確認項也照目前內容匯入（乾跑用）",
     )
+    p_import.add_argument(
+        "--orphans-map",
+        help="孤兒 mapping（內容讀 <export>/orphans.jsonl）；"
+        "匯入過孤兒後每次重跑都要帶",
+    )
+
+    p_omap = sub.add_parser(
+        "orphans-map", help="依 transcript 推孤兒 note 的 vault（只讀 tool_use input）"
+    )
+    p_omap.add_argument(
+        "--orphans",
+        required=True,
+        help="孤兒清單（JSON／JSONL／TSV：id、created、title）",
+    )
+    p_omap.add_argument(
+        "--mapping", required=True, help="notebook mapping（map 的輸出）"
+    )
+    p_omap.add_argument("--out", required=True, help="孤兒 mapping 輸出檔（repo 外）")
+    p_omap.add_argument(
+        "--projects-dir",
+        action="append",
+        default=[],
+        help="transcript 目錄，Claude Code 或 Codex 格式皆可（可重複；預設 "
+        "~/.claude/projects 與 ~/.codex/sessions）",
+    )
+    p_omap.add_argument(
+        "--exclude", action="append", default=[], help="不匯入的孤兒 id（可重複）"
+    )
+
+    p_oexp = sub.add_parser(
+        "export-orphans", help="依孤兒 mapping 逐筆 GET /api/notes/{id} 取內容"
+    )
+    p_oexp.add_argument("--orphans-map", required=True)
+    p_oexp.add_argument("--export", required=True, help="匯出目錄（寫 orphans.jsonl）")
+    p_oexp.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    p_oexp.add_argument("--timeout", type=float, default=30.0)
+    p_oexp.add_argument(
+        "--supplement",
+        help="REST 取不到的孤兒（如含 NUL 者）從 SurrealDB 唯讀副本手動匯出的 JSONL",
+    )
 
     p_est = sub.add_parser("estimate", help="估算待補摘要／向量（不呼叫任何 API）")
     p_est.add_argument("--db", required=True)
@@ -1133,10 +1295,23 @@ def main(
                 Path(args.report) if args.report else export_dir / DEFAULT_REPORT_FILE,
                 "報告檔",
             )
+            orphans = None
+            if args.orphans_map:
+                orphan_map = json.loads(
+                    Path(args.orphans_map).read_text(encoding="utf-8")
+                )
+                orphans = OrphanPlan(
+                    entries=on_orphans.validate_orphan_map(orphan_map),
+                    records=on_orphans.load_orphan_records(export_dir, _sha256_file),
+                )
             conn = connect(db_path)
             try:
                 report = run_import(
-                    conn, export, mapping, allow_unreviewed=args.allow_unreviewed
+                    conn,
+                    export,
+                    mapping,
+                    allow_unreviewed=args.allow_unreviewed,
+                    orphans=orphans,
                 )
             finally:
                 conn.close()
@@ -1144,6 +1319,57 @@ def main(
             summary = report_summary(report)
             summary["report"] = str(report_path)
             _print(out, summary)
+            return 0
+        if args.command == "orphans-map":
+            target = _check_outside_repo(Path(args.out), "孤兒 mapping")
+            mapping = json.loads(Path(args.mapping).read_text(encoding="utf-8"))
+            roots = [
+                Path(p) for p in args.projects_dir
+            ] or on_orphans.default_transcript_dirs()
+            orphan_map = on_orphans.build_orphan_map(
+                on_orphans.load_orphan_list(Path(args.orphans)),
+                mapping,
+                roots,
+                exclude=args.exclude,
+            )
+            _write_json(target, orphan_map)
+            stats = on_orphans.orphan_map_stats(orphan_map)
+            stats["orphans_map"] = str(target)
+            _print(out, stats)
+            return 0
+        if args.command == "export-orphans":
+            out_dir = _check_outside_repo(Path(args.export), "匯出目錄")
+            orphan_map = json.loads(Path(args.orphans_map).read_text(encoding="utf-8"))
+            ids = {e["id"] for e in on_orphans.validate_orphan_map(orphan_map)}
+            supplement = (
+                on_orphans.load_supplement(Path(args.supplement), ids)
+                if args.supplement
+                else None
+            )
+            client = OnClient(
+                base_url=args.base_url,
+                getter=getter,
+                password=env.get(PASSWORD_ENV) or None,
+                timeout=args.timeout,
+            )
+            manifest = on_orphans.export_orphans(
+                client.get,
+                orphan_map,
+                out_dir,
+                quote=_quote_id,
+                supplement=supplement,
+                write_jsonl=_write_jsonl,
+                write_json=_write_json,
+                sha256_file=_sha256_file,
+            )
+            _print(
+                out,
+                {
+                    "export_dir": str(out_dir),
+                    "counts": manifest["counts"],
+                    "unavailable": manifest["unavailable"],
+                },
+            )
             return 0
         # estimate
         from lore_vault.config import load_config
@@ -1164,7 +1390,7 @@ def main(
             conn.close()
         _print(out, result)
         return 0
-    except OnImportError as exc:
+    except (OnImportError, on_orphans.OrphanError) as exc:
         print(f"錯誤：{exc}", file=sys.stderr)
         return 1
 
