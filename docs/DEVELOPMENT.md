@@ -231,7 +231,7 @@ token 放在 repo 外的 env 檔，不寫進 `.claude.json`：
 或在 `mcp.toml` 設 `cf_access_env_file = "~/.cloudflared/pm-token.env"`）。
 `mcp.toml` 至少設 `[mcp] snapshot_dir`，遠端再設 `base_url`。
 
-## 管理指令：刪除與換 space（不提供 MCP 工具）
+## 管理指令：刪除、換 space 與 blob 清理（不提供 MCP 工具）
 
 `python -m lore_vault.cli.admin [--db PATH] [--config FILE] <子指令>`；`--db` 缺省走 `database.path`
 （容器內即 `/data/lore.db`）。不遷移資料庫，schema 版本不符或 DB 檔不存在直接失敗（不建空檔）。
@@ -242,6 +242,7 @@ token 放在 repo 外的 env 檔，不寫進 `.claude.json`：
 | `delete-vault --key KEY [--force] [--reason TEXT] [--yes]` | 刪整個 vault；只接受正式 key。vault 內有 note、文件或 episode／concept／injection 時必須 `--force`；文件一併刪並各寫文件墓碑 |
 | `delete-document --space SPACE --vault KEY --id DOC_ID [--reason TEXT] [--yes]` | 刪單份文件：chunk、chunk_fts、向量（CASCADE）、抽取／補算紀錄（CASCADE），寫 `document_tombstones`。blob 不刪（其他 vault／版本可能共用），沒人引用時 doctor `documents.orphan_blobs` 回報。指向它的新版本改指向它的前一版；刪的是現行版本時前一版同交易回到索引（向量由 worker 補）。不提供 undelete：要恢復就重新上傳 |
 | `undelete-note --id NOTE_ID [--yes]` | 移除墓碑；下次重跑匯入時該 note 會匯回 |
+| `gc-blobs [--blob-dir DIR] [--min-age-hours N] [--yes]` | 清理孤兒 blob 與中斷遺留的暫存檔，見下方「blob 清理」 |
 | `set-space --key KEY --space SPACE [--yes]` | 把 vault 換到另一個 space（A19）；只接受正式 key。前綴規則與建立時相同：目標非 dev 時 key 與別名都必須以 `<space>/` 開頭，不合即拒（dry-run 就擋，不改 key）。換完後 MCP 殼的降級快照要等下次快照更新才反映 |
 
 - 預設 dry-run：stdout 印 JSON（`mode`、`vault`、`counts`、`note_ids`、`requires_force`），
@@ -269,6 +270,30 @@ docker exec lore-vault python -m lore_vault.cli.admin delete-note --space dev --
 space 對帳（分類 `space`，schema v7；DB 沒有 CHECK，只能靠對帳）：`space.valid_values`
 （`vaults.space` 不在 `dev`／`lore`／`personal` 即 fail）、`space.key_prefix_agreement`（非 dev 的 key
 或別名未以 `<space>/` 開頭即 fail）。兩項都有「手動改 DB 後變紅」的測試（`tests/storage/test_space_filter.py`）。
+
+### blob 清理（`gc-blobs`）
+
+`--blob-dir` 缺省走設定 `documents.blob_dir`（容器內 `/data/blobs`），兩者皆無或目錄不存在 → exit 1。
+實作在 `storage/blobs.py`（`plan_gc`／`execute_gc`）。
+
+- 孤兒判定與 doctor `documents.orphan_blobs` 共用 `scan_orphans`：沒有任何 `documents` 列引用
+  （不分狀態，被取代、failed 都算引用；墓碑不算）。暫存檔只收符合 `<2 碼>/.<sha256>.<32 碼 hex>.tmp` 的
+- 年齡門檻：只刪 mtime 超過 `--min-age-hours`（預設 1）的孤兒，避免刪到剛寫入、DB 交易還沒提交的 blob；
+  暫存檔門檻取 `max(門檻, 1 小時)`，設 0 也不刪可能正在寫入的暫存檔。`BlobStore.put` 去重命中時刷新 mtime，
+  舊孤兒被重新上傳時門檻才擋得住
+- dry-run（預設）：印 JSON `counts`（孤兒筆數／位元組、未達門檻保留數、遺留暫存檔筆數／位元組、不明檔案數）、
+  `orphans`（只列 sha256 前 12 碼，不讀內容）、`unexpected`（不符佈局檔案的相對路徑）。不開寫交易、不動檔
+- `--yes`：重新規劃後持 DB 寫鎖（`BEGIN IMMEDIATE`），鎖內逐檔以 `path_for(sha)` 重算路徑、同一連線再確認仍無引用、
+  重新 stat（mtime／大小變動或年齡不足就不刪）後才刪；持鎖期間其他寫者無法提交新的 documents 列。
+  不符佈局的檔案一律不碰只報告。刪完移除空的 2 碼子目錄。輸出另附 `deleted`、`kept`（`referenced`／`changed`／
+  `missing`）、`failed`
+- 刪完 doctor `documents.orphan_blobs` 回 pass（不符佈局檔案或 1 小時內的孤兒仍會 warn，需人工處理或稍後再跑）
+- 測試：`tests/storage/test_blob_gc.py`（含拿掉刪前再確認時會誤刪的反向測試）、`tests/cli/test_admin_gc_blobs.py`
+
+```bash
+docker exec lore-vault python -m lore_vault.cli.admin gc-blobs          # dry-run
+docker exec lore-vault python -m lore_vault.cli.admin gc-blobs --yes
+```
 
 Git Bash 下帶容器內絕對路徑（如 `--db /data/lore.db`）會被 MSYS 轉成 Windows 路徑，前面加 `MSYS_NO_PATHCONV=1`。
 
@@ -430,7 +455,7 @@ KEY=VALUE、只用標準庫解析；行程環境變數中同名鍵優先。
   metadata 與版本在 `storage/documents.py`；chunk、索引同步、worker 佇列與對帳在 `storage/document_index.py`；
   chunk 向量在 `storage/chunk_vectors.py`
 - blob：`storage/blobs.py` 的 `BlobStore`，`<documents.blob_dir>/<sha256 前 2 碼>/<sha256>`，同目錄暫存檔＋`os.replace`，
-  讀取驗雜湊。容器內 `blob_dir = "/data/blobs"`（named volume），不刪 blob（孤兒由 doctor 回報）
+  讀取驗雜湊。容器內 `blob_dir = "/data/blobs"`（named volume），寫入路徑不刪 blob（孤兒由 doctor 回報，清理用管理指令 `gc-blobs`）
 - 抽取器：`lore_vault.documents.extract.extract(data, filename, mime, limits=Limits.from_config(cfg.documents))`，
   成功回 `Extraction`（segments 非空、`encoding`），失敗拋 `ExtractionError(code, detail)`；格式判定與錯誤碼見模組 docstring。
   文字檔編碼依序：UTF-16 BOM → UTF-8（可帶 BOM）→ cp950（Big5）；cp950 須嚴格解碼成功且通過文字性檢查
@@ -481,7 +506,7 @@ KEY=VALUE、只用標準庫解析；行程環境變數中同名鍵優先。
 - doctor 分類 `documents`（`--blob-dir`，未給則取設定 `documents.blob_dir`，都沒有時 blob 兩項為 skipped；
   沒有 documents 表的舊 schema 全部 skipped）：
   - `documents.blob_exists`：任何 document 引用的 blob 遺失或雜湊不符為 fail（不分狀態）
-  - `documents.orphan_blobs`：無引用的 blob、不符佈局的檔案、超過 1 小時的遺留暫存檔為 warn
+  - `documents.orphan_blobs`：無引用的 blob、不符佈局的檔案、超過 1 小時的遺留暫存檔為 warn（判定與 `gc-blobs` 共用）
   - `documents.chunk_count_matches`：ready 文件的 `chunk_count` ≠ 實際 chunk 數、或非 ready 文件有 chunk 為 fail
   - `documents.fts_rows_match_chunks`：chunk_fts 與可索引文件（ready、未被取代）的 chunk 不是一對一為 fail
   - `documents.superseded_chunks_removed`：被取代或非 ready 的文件仍有 FTS／向量列為 fail（recall 會回舊版）

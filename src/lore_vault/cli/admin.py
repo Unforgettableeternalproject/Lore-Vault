@@ -14,6 +14,10 @@
   別名一律換前綴（換不了就拒絕），舊 key 不留別名；新 key／新別名已存在則拒絕。
   所有引用該 key 的表在單一交易內改寫，執行後核對各表筆數與規劃一致，否則 rollback。
   換完後 MCP 殼的降級快照要等下次快照更新才反映
+- `gc-blobs [--blob-dir DIR] [--min-age-hours N] [--yes]`：清理沒有任何 documents 列
+  引用的孤兒 blob（判定與 doctor `documents.orphan_blobs` 共用）與中斷遺留的暫存檔。
+  只刪 mtime 超過 N 小時（預設 1）的孤兒；刪前持 DB 寫鎖再確認無引用、檔案未變動；
+  不符佈局的檔案只報告不碰；刪完移除空的子目錄。dry-run 只列雜湊前 12 碼與位元組
 
 刪除會為每則被刪的 note 寫墓碑（`note_tombstones`）：重跑匯入不會匯回，
 匯入對帳把它算成「刻意刪除」而非漏匯。
@@ -39,9 +43,22 @@ from typing import TextIO
 
 from lore_vault.schema import SPACES
 from lore_vault.storage import admin
+from lore_vault.storage import blobs as storage_blobs
 from lore_vault.storage.db import connect
 from lore_vault.storage.errors import StorageError
 from lore_vault.storage.migrate import SCHEMA_VERSION, current_version
+
+DEFAULT_GC_MIN_AGE_HOURS = 1.0
+
+
+def _non_negative_hours(value: str) -> float:
+    try:
+        hours = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"不是數字：{value}") from None
+    if not hours >= 0 or hours == float("inf"):
+        raise argparse.ArgumentTypeError(f"必須是非負有限數：{value}")
+    return hours
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -92,6 +109,16 @@ def _parser() -> argparse.ArgumentParser:
     )
     p_space.add_argument("--yes", action="store_true", help="真的變更（預設 dry-run）")
 
+    p_gc = sub.add_parser("gc-blobs", help="清理孤兒 blob 與遺留暫存檔")
+    p_gc.add_argument("--blob-dir", help="blob 目錄（覆寫 documents.blob_dir）")
+    p_gc.add_argument(
+        "--min-age-hours",
+        type=_non_negative_hours,
+        default=DEFAULT_GC_MIN_AGE_HOURS,
+        help="只刪 mtime 超過這個時數的孤兒（預設 1；避免刪到 DB 交易未提交的新 blob）",
+    )
+    p_gc.add_argument("--yes", action="store_true", help="真的刪除（預設 dry-run）")
+
     p_undel = sub.add_parser("undelete-note", help="移除墓碑，讓下次匯入可匯回")
     p_undel.add_argument("--id", required=True, dest="note_id", help="note id")
     p_undel.add_argument("--yes", action="store_true", help="真的移除（預設 dry-run）")
@@ -114,6 +141,35 @@ def _existing(path: str) -> str:
     if not Path(path).is_file():
         raise StorageError(f"資料庫檔案不存在：{path}")
     return path
+
+
+def _blob_store(args: argparse.Namespace) -> storage_blobs.BlobStore:
+    value = args.blob_dir
+    if not value:
+        from lore_vault.config import load_config
+
+        value = load_config(args.config).documents.blob_dir
+    if not value:
+        raise StorageError("缺少 blob 目錄：用 --blob-dir 或設定 documents.blob_dir")
+    store = storage_blobs.BlobStore(value)
+    if not store.root.is_dir():
+        raise StorageError(f"blob 目錄不存在：{store.root}")
+    return store
+
+
+def _gc_blobs(conn: sqlite3.Connection, args: argparse.Namespace) -> dict[str, object]:
+    store = _blob_store(args)
+    plan = storage_blobs.plan_gc(conn, store, min_age_seconds=args.min_age_hours * 3600)
+    result: dict[str, object] = {
+        "mode": "deleted" if args.yes else "dry_run",
+        "blob_dir": str(store.root),
+        **plan.to_dict(store.root),
+    }
+    if args.yes:
+        result.update(storage_blobs.execute_gc(conn, store, plan).to_dict())
+    else:
+        result["hint"] = "確認無誤後加 --yes 執行；不符佈局的檔案不會被刪，需人工處理"
+    return result
 
 
 def _set_space(conn: sqlite3.Connection, args: argparse.Namespace) -> dict[str, object]:
@@ -160,6 +216,10 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> 
             if not args.yes:
                 result["hint"] = "確認無誤後加 --yes 執行"
             out.write(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+            return 0
+        if args.command == "gc-blobs":
+            gc = _gc_blobs(conn, args)
+            out.write(json.dumps(gc, ensure_ascii=False, indent=2) + "\n")
             return 0
         if args.command == "set-space":
             changed = _set_space(conn, args)
@@ -214,7 +274,7 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> 
                 result["hint"] = "確認無誤後加 --yes 執行"
         out.write(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
         return 0
-    except StorageError as exc:
+    except (ConfigError, StorageError) as exc:
         print(f"錯誤：{exc}", file=sys.stderr)
         return 1
     finally:

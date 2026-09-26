@@ -277,6 +277,15 @@ def referenced_sha256(conn: sqlite3.Connection) -> set[str]:
     return {r[0] for r in conn.execute("SELECT DISTINCT sha256 FROM documents")}
 
 
+def sha256_is_referenced(conn: sqlite3.Connection, sha256: str) -> bool:
+    """單一 blob 是否仍有 document 列引用；與 `referenced_sha256` 同表同語意
+    （不分狀態：被取代、failed 都算引用；墓碑不算）。gc 刪除前再確認用。"""
+    row = conn.execute(
+        "SELECT 1 FROM documents WHERE sha256 = ? LIMIT 1", (sha256,)
+    ).fetchone()
+    return row is not None
+
+
 # ── 版本與可索引性 ───────────────────────────────────────────────────
 
 # 被取代的文件：任何 ready 文件沿 `supersedes` 一路往前追到的各版本（遞移）。
