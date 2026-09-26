@@ -14,6 +14,8 @@
   --lv-zone-text: var(--accent-ink);
   --lv-focus: var(--accent-ink);
   --lv-content-max: 1600px;
+  /* 按鈕、篩選 chip、徽章的圓角：方形（Eternity 文件站風格），見「按鈕形狀」段 */
+  --lv-radius-control: 2px;
 }
 [data-theme='dark'] {
   --ink-mute: #9a9585;
@@ -184,7 +186,7 @@ button { font: inherit; }
   border: 1px solid rgba(213, 182, 24, .5);
   background: rgba(213, 182, 24, .08);
   padding: 5px 10px;
-  border-radius: var(--radius-pill);
+  border-radius: var(--lv-radius-control);
   cursor: pointer;
 }
 
@@ -198,7 +200,7 @@ button { font: inherit; }
   padding: 0 14px 0 6px;
   background: var(--zone-tint);
   border: 1px solid var(--zone-stroke);
-  border-radius: var(--radius-pill);
+  border-radius: var(--lv-radius-control);
   color: var(--ink);
   cursor: pointer;
 }
@@ -418,7 +420,7 @@ button { font: inherit; }
 /* chips */
 .lv-chips { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .lv-chip {
-  padding: 5px 12px; border-radius: var(--radius-pill); border: 1px solid var(--line-strong);
+  padding: 5px 12px; border-radius: var(--lv-radius-control); border: 1px solid var(--line-strong);
   background: transparent; color: var(--ink-soft); font-size: 12px; cursor: pointer;
 }
 .lv-chip:hover { color: var(--ink); }
@@ -647,7 +649,7 @@ button.lv-wikilink { background: none; border: none; border-bottom: 1px dashed v
 .lv-row-actions { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
 .lv-pill-btn {
   background: none; border: 1px solid var(--line-strong); color: var(--ink-soft); font-size: 11px;
-  padding: 3px 10px; border-radius: 999px; cursor: pointer; white-space: nowrap;
+  padding: 3px 10px; border-radius: var(--lv-radius-control); cursor: pointer; white-space: nowrap;
 }
 .lv-pill-btn:hover:not(:disabled) { color: var(--ink); border-color: var(--ink-mute); }
 .lv-pill-btn:disabled { opacity: .5; cursor: not-allowed; }
@@ -726,7 +728,7 @@ button.lv-wikilink { background: none; border: none; border-bottom: 1px dashed v
 .lv-restore-results { list-style: none; margin: 0 0 12px; padding: 0; }
 
 .lv-nav__badge {
-  min-width: 18px; padding: 1px 6px; border-radius: 999px; text-align: center;
+  min-width: 18px; padding: 1px 6px; border-radius: var(--lv-radius-control); text-align: center;
   font-family: var(--font-mono); font-size: 10px; color: var(--bg-card); background: var(--lv-error-text);
 }
 .lv-health-badge { color: var(--lv-error-text); border-color: color-mix(in srgb, var(--status-error) 55%, transparent); background: color-mix(in srgb, var(--status-error) 8%, transparent); }
@@ -795,6 +797,13 @@ details.lv-check > .lv-check__head { cursor: pointer; }
 .lv-test-row__label { font-family: var(--font-mono); font-size: 11px; color: var(--ink-mute); }
 .lv-test-row__value { overflow-wrap: anywhere; }
 
+
+/* ── 按鈕形狀 ────────────────────────────────────────────
+   全站按鈕統一為方形（參考 Eternity 文件站：1px 框、直角／極小圓角）。設計系統的 .btn-outline 與對話框按鈕
+   原本是 pill（999px），ds/ 原樣複製不改，在這裡以 --lv-radius-control 覆寫；狀態圓點、space 圖示、品牌標記不是按鈕，維持圓形 */
+.btn-outline, .btn-zone, .btn-terminal, .uep-dialog__btn, .lv-move-target, .zone-state button {
+  border-radius: var(--lv-radius-control);
+}
 
 /* ── 設計系統元件的文字對比覆寫（T-87；ds/components.css 不改）──────────── */
 .btn-outline:hover, .btn-outline--gold, .btn-terminal:hover { color: var(--lv-gold-text); }
