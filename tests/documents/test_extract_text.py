@@ -393,3 +393,36 @@ def test_documents_config_is_validated(key, value):
 
     with pytest.raises(ConfigError):
         load_config(environ={f"LORE_VAULT_DOCUMENTS_{key}": value})
+
+
+# ── cp950 判定信心 ──────────────────────────────────────────────────
+
+
+def test_small_cp950_sample_has_low_confidence_warning():
+    result = extract("繁體中文的世界觀設定".encode("cp950"), "short.txt")
+    assert result.encoding == "cp950"
+    assert [w.code for w in result.warnings] == ["encoding_low_confidence"]
+    assert "10" in result.warnings[0].detail
+
+
+def test_large_cp950_sample_has_no_warning():
+    text = "這是一份以繁體中文撰寫的世界觀設定文件，內容說明各個國家的歷史與文化。" * 3
+    result = extract(text.encode("cp950"), "long.txt")
+    assert result.encoding == "cp950" and result.warnings == ()
+
+
+def test_utf8_never_has_encoding_warning():
+    assert extract("短".encode(), "a.txt").warnings == ()
+
+
+def test_encoding_warnings_rules():
+    from lore_vault.documents.extract.base import encoding_warnings
+
+    assert encoding_warnings("utf-8", non_ascii=1, garbled=99, visible=100) == ()
+    assert encoding_warnings("cp950", non_ascii=50, garbled=0, visible=100) == ()
+    small = encoding_warnings("cp950", non_ascii=49, garbled=0, visible=100)
+    assert [w.code for w in small] == ["encoding_low_confidence"]
+    # 樣本夠大但亂碼偏多（> 1%）
+    garbled = encoding_warnings("cp950", non_ascii=500, garbled=6, visible=500)
+    assert garbled and "亂碼" in garbled[0].detail
+    assert encoding_warnings("cp950", non_ascii=500, garbled=5, visible=500) == ()

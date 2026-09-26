@@ -10,6 +10,10 @@
 - 其他例外（含 blob 遺失／損毀）可能是暫時性的：記一次嘗試、退避後重試；
   達 `worker.max_attempts` 標 failed（error_code=corrupt，detail 記原因）。
 - 程序中斷遺留的 extracting：worker 第一輪收回 pending。
+- pdf／docx／pptx 在子行程抽取（`documents.isolation`）：超過
+  `documents.extract_timeout` 秒 kill 並標 corrupt（detail 註明 timeout），佇列繼續；
+  子行程異常結束走上面的有上限重試；服務關閉時中止子行程、文件留在 extracting。
+  文字格式（有 `Budget` 字元上限）照舊在行程內抽取。
 
 向量：可索引文件（ready、未被取代）中缺向量的 chunk，逐一呼叫 embedder（沿用
 `embedding` 設定，含 keep_alive 與每分鐘上限）。失敗以文件為單位記嘗試，達上限
@@ -44,7 +48,16 @@ from lore_vault.storage.errors import DimensionMismatch
 from lore_vault.storage.timeutil import format_utc
 
 from .chunking import chunk_segments
-from .extract import CORRUPT, ExtractionError, Limits, extract
+from .extract import (
+    BINARY_FORMATS,
+    CORRUPT,
+    Extraction,
+    ExtractionError,
+    Limits,
+    detect_format,
+    extract,
+)
+from .isolation import ExtractionInterrupted, run_isolated
 
 
 @dataclass
@@ -145,13 +158,34 @@ class DocumentWorker:
             if not index.claim(self.conn, item.id):
                 stats.stale += 1
                 continue
-            self._extract_one(item, stats)
+            try:
+                self._extract_one(item, stats)
+            except ExtractionInterrupted:
+                # 文件留在 extracting；下次啟動由 recover_interrupted 收回 pending
+                stats.stopped = STOPPED_SHUTDOWN
+                return
+
+    def _run_extract(self, data: bytes, filename: str, mime: str | None) -> Extraction:
+        """pdf／docx／pptx 在子行程抽取（逾時、記憶體上限）；文字格式在行程內。"""
+        if detect_format(filename, mime) not in BINARY_FORMATS:
+            return extract(data, filename, mime, limits=self.limits)
+        docs = self.config.documents
+        return run_isolated(
+            extract,
+            data,
+            filename,
+            mime,
+            limits=self.limits,
+            timeout=docs.extract_timeout,
+            memory_bytes=docs.extract_memory_mb * 1024 * 1024,
+            should_stop=self.should_stop,
+        )
 
     def _extract_one(self, item: index.ExtractCandidate, stats: ExtractStats) -> None:
         docs = self.config.documents
         try:
             data = self.blobs.read(item.sha256)
-            result = extract(data, item.filename, item.mime, limits=self.limits)
+            result = self._run_extract(data, item.filename, item.mime)
             chunks = chunk_segments(
                 result.segments,
                 max_tokens=docs.chunk_max_tokens,
@@ -163,6 +197,8 @@ class DocumentWorker:
             else:
                 stats.stale += 1
             return
+        except ExtractionInterrupted:
+            raise
         except Exception as exc:  # noqa: BLE001 - 非預期失敗走有上限重試，不讓迴圈掛掉
             detail = _describe(exc)
             if isinstance(exc, BlobError):
@@ -190,7 +226,13 @@ class DocumentWorker:
             ):
                 stats.failed += 1
             return
-        if index.finish_ready(self.conn, item.id, chunks, encoding=result.encoding):
+        if index.finish_ready(
+            self.conn,
+            item.id,
+            chunks,
+            encoding=result.encoding,
+            warnings=[w.to_dict() for w in result.warnings],
+        ):
             stats.done += 1
         else:
             stats.stale += 1

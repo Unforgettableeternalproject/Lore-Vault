@@ -175,7 +175,11 @@ def test_pending_becomes_ready_with_chunks_fts_and_vectors(conn, upload, make_wo
 def test_big5_document_records_cp950(conn, upload, make_worker):
     doc = upload("繁體中文的世界觀設定說明文件".encode("cp950"), "世界觀.txt").document
     make_worker().run_once()
-    assert _doc(conn, doc.id).encoding == "cp950"
+    ready = _doc(conn, doc.id)
+    assert ready.encoding == "cp950"
+    # 樣本只有 14 個非 ASCII 字元：判定信心低，記在 warnings（doctor 會列出）
+    assert [w["code"] for w in ready.warnings] == ["encoding_low_confidence"]
+    assert index.quality_warnings(conn).status == "warn"
 
 
 def test_extraction_error_fails_immediately_without_retry(conn, upload, make_worker):
@@ -347,3 +351,82 @@ def test_late_older_version_does_not_enter_index(conn, upload, make_worker):
     assert _fts_rows(conn, v1.id) == 0 and _fts_rows(conn, v2.id) == 0
     assert _fts_rows(conn, v3.id) == 1
     assert index.fts_rows_match_chunks(conn).status == "pass"
+
+
+# ── 子行程隔離（逾時）─────────────────────────────────────────────
+
+
+def test_extraction_timeout_fails_document_and_queue_continues(
+    conn, upload, make_worker, make_pdf, tmp_path, monkeypatch
+):
+    """卡住的 pdf 在逾時後被 kill、標 corrupt（detail 註明 timeout），
+    同一輪的下一份照常處理。卡住以子行程內的 `time.sleep` 模擬。"""
+    import time
+
+    config = Config(
+        embedding=EmbeddingConfig(dim=DIM),
+        worker=WorkerConfig(max_attempts=2, retry_backoff=10.0),
+        documents=DocumentsConfig(
+            blob_dir=str(tmp_path / "blobs"), extract_timeout=1.0
+        ),
+    )
+    real_run = worker_mod.run_isolated
+    calls = []
+
+    def run(func, data, filename, mime, **kw):
+        calls.append((filename, kw["timeout"]))
+        if filename == "slow.pdf":
+            return real_run(time.sleep, 3600, timeout=kw["timeout"])
+        return real_run(func, data, filename, mime, **kw)
+
+    monkeypatch.setattr(worker_mod, "run_isolated", run)
+    slow = upload(make_pdf(["slow document " * 10]), "slow.pdf").document
+    good = upload(make_pdf(["normal document content " * 5]), "good.pdf").document
+    started = time.monotonic()
+    worker = make_worker()
+    worker.config = config
+    stats = worker.run_once()
+    elapsed = time.monotonic() - started
+    assert [name for name, _ in calls] == ["slow.pdf", "good.pdf"]
+    assert all(timeout == 1.0 for _, timeout in calls)
+    failed = _doc(conn, slow.id)
+    assert failed.status == "failed" and failed.error_code == "corrupt"
+    assert "timeout" in failed.error_detail
+    assert _doc(conn, good.id).status == "ready"
+    assert stats.extract.failed == 1 and stats.extract.done == 1
+    assert elapsed < 60
+
+
+def test_binary_formats_run_isolated_text_formats_in_process(
+    conn, upload, make_worker, make_pdf, monkeypatch
+):
+    seen = []
+    real_run = worker_mod.run_isolated
+
+    def run(func, data, filename, mime, **kw):
+        seen.append(filename)
+        return real_run(func, data, filename, mime, **kw)
+
+    monkeypatch.setattr(worker_mod, "run_isolated", run)
+    upload(make_pdf(["isolated pdf content here " * 4]), "a.pdf")
+    upload(b"plain text body", "b.txt")
+    stats = make_worker().run_once()
+    assert stats.extract.done == 2
+    assert seen == ["a.pdf"]
+
+
+def test_isolated_child_crash_goes_through_retry(
+    conn, upload, make_worker, monkeypatch
+):
+    import os
+
+    real_run = worker_mod.run_isolated
+
+    def run(func, data, filename, mime, **kw):
+        return real_run(os._exit, 7, timeout=kw["timeout"])
+
+    monkeypatch.setattr(worker_mod, "run_isolated", run)
+    doc = upload(b"%PDF-1.4 whatever", "crash.pdf").document
+    stats = make_worker().run_once()
+    assert stats.extract.retry == 1
+    assert _doc(conn, doc.id).status == "pending"

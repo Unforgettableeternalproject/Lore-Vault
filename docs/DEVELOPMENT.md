@@ -172,7 +172,10 @@ stdout 是 MCP 協定通道，log 一律寫 stderr（UTF-8）。設定錯誤時�
   409 版本衝突附 `current`，以 `current.updated` 當 `expected_updated` 重試
 - `upload(path, vault?)`（T-67）：殼讀本機檔案，multipart 轉送 `POST /v1/documents`（帶目前 space）。
   `path` 可為絕對或相對殼工作目錄；任何一段是 `..` 直接拒絕；以 realpath（解開 symlink／junction）
-  比對白名單（殼工作目錄＋`mcp.upload_roots`），逃出去回 `path_not_allowed`。殼端先擋大小
+  比對白名單（殼工作目錄＋`mcp.upload_roots`），逃出去回 `path_not_allowed`。Windows 上另拒絕
+  （`path_not_allowed`）：`C:foo`（有磁碟代號但非絕對，會依該磁碟的目前目錄解析）、`\foo`（有根無磁碟代號）、
+  UNC `\\server\share`、`\\?\`／`\\.\` 裝置前綴、檔名含 `:`（NTFS 替代資料流，如 `a.txt:stream`）；
+  POSIX（容器）不套這組檢查（`/abs/path` 在 Windows 語意下是「有根無磁碟代號」）。殼端先擋大小
   （`documents.max_file_bytes`，同服務端上限）。`vault` 省略時只在 dev 以殼工作目錄的 binding 解析
   （不建 vault，回應 `vault_source: "cwd_binding"`）；lore／personal 必須帶。錯誤碼：
   `path_not_allowed`、`file_not_found`、`not_a_file`、`too_large`、`read_failed`、`vault_required`
@@ -423,6 +426,7 @@ KEY=VALUE、只用標準庫解析；行程環境變數中同名鍵優先。
   `chunk_fts`（比照 `note_fts`）、`document_chunk_embeddings`、`document_tombstones`、`document_enrichment`。
   v9：`documents.encoding`（文字檔偵測到的編碼）、`document_chunks.overlap`（與前一段重疊的字元數，
   `get(doc:…)` 串回全文時略過）、`document_enrichment.kind` 加 `'embedding'`（向量補算的嘗試紀錄）。
+  v10：`documents.warnings`（抽取品質警示，JSON 陣列 `[{code, detail}]`，沒有為 NULL；get／list 回 `warnings`）。
   metadata 與版本在 `storage/documents.py`；chunk、索引同步、worker 佇列與對帳在 `storage/document_index.py`；
   chunk 向量在 `storage/chunk_vectors.py`
 - blob：`storage/blobs.py` 的 `BlobStore`，`<documents.blob_dir>/<sha256 前 2 碼>/<sha256>`，同目錄暫存檔＋`os.replace`，
@@ -431,7 +435,15 @@ KEY=VALUE、只用標準庫解析；行程環境變數中同名鍵優先。
   成功回 `Extraction`（segments 非空、`encoding`），失敗拋 `ExtractionError(code, detail)`；格式判定與錯誤碼見模組 docstring。
   文字檔編碼依序：UTF-16 BOM → UTF-8（可帶 BOM）→ cp950（Big5）；cp950 須嚴格解碼成功且通過文字性檢查
   （非 ASCII 字元 ≥ 90% 為中文字／注音／CJK 標點、中文字 ≥ 80% 落在 Big5 常用字區——擋 GBK 等誤解），否則
-  `unsupported_encoding`。`min_chars`（預設 50）只套 pdf（判掃描件），docx／pptx／文字格式只在完全沒字時 `empty_extraction`
+  `unsupported_encoding`。`min_chars`（預設 50）只套 pdf（判掃描件），docx／pptx／文字格式只在完全沒字時 `empty_extraction`。
+  cp950 判定通過但樣本小（非 ASCII 字元 < 50）或亂碼跡象 > 可見字元 1% → 仍成功，`Extraction.warnings` 帶
+  `encoding_low_confidence`，存進 `documents.warnings`
+- docx／pptx 容器檢查（`check_ooxml_container`，交給 python-docx／python-pptx 之前）：以 `ZipFile.open` 每 64KB
+  串流解壓每個成員、累計**實際**位元組（不留內容，記憶體峰值與宣告值無關）。成員數 > `Limits.max_zip_members`
+  （10,000）、宣告或實際解壓總量 > `max_bytes × unzip_ratio`（200MB）、單一成員實際解壓 > 1MB 且壓縮比 >
+  `max_member_ratio`（200）→ `too_large`；實際解壓量與宣告的 `file_size` 不符或 CRC 錯誤 → `corrupt`。
+  竄改宣告大小的 50MB 炸彈修前峰值約 134MB、修後約 0.3MB（`tests/documents/test_extract_hardening.py`）。
+  兩個套件的 lxml parser 都是 `resolve_entities=False`：外部實體（XXE）不讀檔、billion laughs 不展開（同檔測試）
 - 切段（`documents/chunking.py`）：先依結構段（標題／頁／投影片／整份），超過上限才段內定長切。
   預設每 chunk 估算 ≤ 400 token、重疊 50 token（12.5%）；token 以字元粗估（CJK 1.5、其他非空白 0.25、空白 0，
   約 266 個中文字／1600 個英文字元）。切點優先：空行 → 換行 → 句末標點 → 空白／逗號 → 硬切。
@@ -452,13 +464,19 @@ KEY=VALUE、只用標準庫解析；行程環境變數中同名鍵優先。
   `api.document_worker`，預設開，`blob_dir` 未設時不啟動；上傳時喚醒）：pending → extracting → ready／failed。
   `ExtractionError` 直接 failed（不重試）；其他例外（含 blob 遺失／損毀）有上限重試（`worker.max_attempts`、
   `worker.retry_backoff` 指數退避），達上限 failed（`error_code=corrupt`，detail 記原因）。程序中斷遺留的
-  extracting 在 worker 第一輪收回 pending。ready 後補 chunk 向量（`embedding.*` 設定，含 keep_alive、每分鐘上限）；
+  extracting 在 worker 第一輪收回 pending。pdf／docx／pptx 在子行程抽取（`documents/isolation.py`，一律 spawn）：
+  子行程就緒後超過 `documents.extract_timeout`（60 秒）即 kill，標 failed `corrupt`（detail 含 `timeout`），佇列繼續；
+  子行程異常結束（被殺、沒回結果）走上面的有上限重試；服務關閉時中止子行程，文件留在 extracting 待下次收回。
+  子行程記憶體以 `RLIMIT_AS` 限制為 `documents.extract_memory_mb`（1024MB，0 = 不限；只在 Linux 生效，
+  Windows 沒有此能力，只有逾時保護），超過時 `too_large`。文字格式照舊在行程內抽取（有字元上限）。
+  ready 後補 chunk 向量（`embedding.*` 設定，含 keep_alive、每分鐘上限）；
   向量失敗以文件為單位記嘗試，達上限不再自動補（lexical 仍可命中）。每輪有動作印一行
   `文件本輪：抽取 完成 …／失敗 …／重試 …／放棄 …；向量 …。剩餘 待抽取 …、缺向量 chunk …`
 - recall／get／list：見 docs/ARCHITECTURE.md「MCP 介面」。快照（`GET /v1/snapshot`）明確排除文件表
   （`storage.snapshot.SNAPSHOT_EXCLUDED_TABLES`，產生時核對為空，否則拒絕產生）
 - 設定 `[documents]`：`blob_dir`、`max_file_bytes`（25MB）、`max_chars`（200 萬）、`min_chars`（50，只套 pdf）、
-  `chunk_max_tokens`（400）、`chunk_overlap_tokens`（50，不可超過上限一半）、`stuck_seconds`（3600）；
+  `chunk_max_tokens`（400）、`chunk_overlap_tokens`（50，不可超過上限一半）、`stuck_seconds`（3600）、
+  `extract_timeout`（60 秒）、`extract_memory_mb`（1024，只在 Linux 生效）；
   `[api] document_worker`（true）；`[mcp] upload_roots`
 - doctor 分類 `documents`（`--blob-dir`，未給則取設定 `documents.blob_dir`，都沒有時 blob 兩項為 skipped；
   沒有 documents 表的舊 schema 全部 skipped）：
@@ -470,6 +488,8 @@ KEY=VALUE、只用標準庫解析；行程環境變數中同名鍵優先。
   - `documents.vector_rows_match_chunks`：孤兒向量或維度不符為 fail；可索引 chunk 缺向量為 warn
   - `documents.stuck_processing`：extracting 超過 `documents_stuck_seconds`（預設 3600）為 fail
   - `documents.failed`：抽取失敗與向量補算放棄的文件數（附錯誤碼分布）為 warn
+  - `documents.quality_warnings`：ready 文件帶抽取品質警示（目前只有 cp950 判定信心低 `encoding_low_confidence`）
+    為 warn，列出文件與原因；schema 未到 v10 為 skipped
   - `documents.backlog`：待抽取文件與缺向量 chunk，最舊一筆等超過 1 小時為 warn
   - 以上每項都有「破壞資料後變紅／黃」的測試（`tests/storage/test_document_checks.py`）
 - `/v1/status` 另附 `documents: {enabled, worker, backlog}`；文件 worker 起不來（fatal）時 `ok: false`

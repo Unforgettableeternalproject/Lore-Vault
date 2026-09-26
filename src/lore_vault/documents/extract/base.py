@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import re
 import zipfile
+import zlib
 from dataclasses import dataclass
 from typing import Any
 
@@ -80,6 +81,19 @@ class Segment:
             raise ValueError("segment 不可為空白")
 
 
+# 品質警示碼（不影響成敗，記在 documents.warnings、doctor 以 warn 列出）
+ENCODING_LOW_CONFIDENCE = "encoding_low_confidence"
+
+
+@dataclass(frozen=True)
+class ExtractionWarning:
+    code: str
+    detail: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"code": self.code, "detail": self.detail}
+
+
 @dataclass(frozen=True)
 class Extraction:
     """抽取成功的結果。segments 必定非空——「空結果」只會以 `ExtractionError` 表示。"""
@@ -92,6 +106,8 @@ class Extraction:
     garbled_chars: int = 0
     # 文字類格式偵測到的編碼（utf-8／utf-8-sig／utf-16／cp950）；二進位格式為 None
     encoding: str | None = None
+    # 品質警示（例如 cp950 判定樣本太小）；成功抽取但結果可能不可靠
+    warnings: tuple[ExtractionWarning, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.segments:
@@ -110,10 +126,25 @@ class Limits:
     min_chars: int = 50
     # docx／pptx（zip）解壓後總大小上限 = max_bytes 的倍數，擋壓縮炸彈
     unzip_ratio: int = 8
+    # zip 成員數上限（正常 Office 檔數十到數百個成員）
+    max_zip_members: int = 10_000
+    # 單一成員實際解壓量 / 壓縮量上限；解壓量未達 `ZIP_RATIO_FLOOR` 不檢查。
+    # 正常 Office XML 多在 5–50 倍，大量重複的表格也少見超過 100 倍；
+    # DEFLATE 理論上限約 1032 倍
+    max_member_ratio: int = 200
 
     def __post_init__(self) -> None:
-        if self.max_bytes <= 0 or self.max_chars <= 0 or self.unzip_ratio <= 0:
-            raise ValueError("max_bytes／max_chars／unzip_ratio 必須大於 0")
+        if (
+            self.max_bytes <= 0
+            or self.max_chars <= 0
+            or self.unzip_ratio <= 0
+            or self.max_zip_members <= 0
+            or self.max_member_ratio <= 0
+        ):
+            raise ValueError(
+                "max_bytes／max_chars／unzip_ratio／max_zip_members／"
+                "max_member_ratio 必須大於 0"
+            )
         if self.min_chars < 0:
             raise ValueError("min_chars 不可為負")
 
@@ -231,6 +262,10 @@ _CP950_CJK_RATIO = 0.9
 # 中文字中 Big5 常用字（第一級）至少佔此比例
 _CP950_COMMON_RATIO = 0.8
 CP950 = "cp950"
+# cp950 判定的信心門檻：非 ASCII 字元少於此數（樣本太小，文字性檢查的比例不可靠）、
+# 或亂碼跡象（`garbled_chars`）佔可見字元超過此比例 → encoding_low_confidence
+CP950_MIN_NON_ASCII = 50
+CP950_MAX_GARBLED_RATIO = 0.01
 _CP950_TEXT_RE = re.compile(f"[{CJK_CLASS}㄀-ㄯㆠ-ㆿ]")
 
 
@@ -273,6 +308,29 @@ def looks_like_cp950_text(text: str) -> bool:
         return False
     common = sum(1 for ch in hanzi if _is_big5_common(ch))
     return common / len(hanzi) >= _CP950_COMMON_RATIO
+
+
+def encoding_warnings(
+    encoding: str | None, *, non_ascii: int, garbled: int, visible: int
+) -> tuple[ExtractionWarning, ...]:
+    """cp950 回退判定的信心檢查：通過文字性檢查但樣本小或亂碼偏多時給警示。"""
+    if encoding != CP950:
+        return ()
+    reasons = []
+    if non_ascii < CP950_MIN_NON_ASCII:
+        reasons.append(
+            f"非 ASCII 字元只有 {non_ascii} 個（門檻 {CP950_MIN_NON_ASCII}）"
+        )
+    if visible and garbled / visible > CP950_MAX_GARBLED_RATIO:
+        reasons.append(f"亂碼跡象 {garbled} 個（可見字元 {visible}）")
+    if not reasons:
+        return ()
+    return (
+        ExtractionWarning(
+            ENCODING_LOW_CONFIDENCE,
+            "cp950（Big5）判定信心低：" + "；".join(reasons) + "，內容可能是其他編碼",
+        ),
+    )
 
 
 def _decode(data: bytes) -> tuple[str, str]:
@@ -333,13 +391,74 @@ _OLE_MAGIC = bytes.fromhex("d0cf11e0a1b11ae1")
 _OLE_ENCRYPTED_MARK = "EncryptedPackage".encode("utf-16-le")
 
 
+# 串流解壓的分塊大小：記憶體峰值以此為量級，與宣告大小無關
+ZIP_READ_CHUNK = 64 * 1024
+# 單一成員解壓量低於此值時不檢查壓縮比（小檔的比例沒有意義）
+ZIP_RATIO_FLOOR = 1024 * 1024
+
+
+def _scan_zip_members(archive: zipfile.ZipFile, limits: Limits, label: str) -> None:
+    """逐一串流解壓每個成員、累計**實際**位元組（不留內容），交給解析套件前確認：
+
+    - 宣告的解壓後總大小不超過上限（竄改前的快速擋）
+    - 實際解壓量累計超過上限立即中止 → too_large
+    - 單一成員實際解壓量 / 壓縮量超過 `max_member_ratio` → too_large
+    - 實際解壓量與宣告值（`ZipInfo.file_size`）不符、CRC 錯誤 → corrupt
+
+    `ZipExtFile` 以 central directory 的 file_size 截斷輸出，所以宣告值被低報時
+    讀到宣告量就會因 CRC 不符失敗；以固定大小分塊讀取，解壓器每次最多吐出一塊，
+    不會像 `ZipFile.read()` 那樣一次把整個壓縮串流解進記憶體。
+    """
+    infos = archive.infolist()
+    if len(infos) > limits.max_zip_members:
+        raise ExtractionError(
+            TOO_LARGE,
+            f"{label} 的 zip 成員數 {len(infos)} 超過上限 {limits.max_zip_members}",
+        )
+    declared = sum(info.file_size for info in infos)
+    if declared > limits.max_unzipped_bytes:
+        raise ExtractionError(
+            TOO_LARGE,
+            f"{label} 解壓後 {declared} 位元組，超過上限 {limits.max_unzipped_bytes}",
+        )
+    total = 0
+    for info in infos:
+        if info.is_dir():
+            continue
+        actual = 0
+        with archive.open(info) as member:
+            while chunk := member.read(ZIP_READ_CHUNK):
+                actual += len(chunk)
+                total += len(chunk)
+                if total > limits.max_unzipped_bytes:
+                    raise ExtractionError(
+                        TOO_LARGE,
+                        f"{label} 實際解壓超過上限 {limits.max_unzipped_bytes} 位元組",
+                    )
+                if actual > ZIP_RATIO_FLOOR and actual > limits.max_member_ratio * max(
+                    info.compress_size, 1
+                ):
+                    raise ExtractionError(
+                        TOO_LARGE,
+                        f"{label} 的成員 {info.filename!r} 壓縮比超過 "
+                        f"{limits.max_member_ratio} 倍（疑似壓縮炸彈）",
+                    )
+        if actual != info.file_size:
+            raise ExtractionError(
+                CORRUPT,
+                f"{label} 的成員 {info.filename!r} 實際解壓 {actual} 位元組，"
+                f"與宣告的 {info.file_size} 不符",
+            )
+
+
 def check_ooxml_container(data: bytes, limits: Limits, *, label: str) -> None:
     """docx／pptx 開檔前的容器判定：
 
     - OLE 容器且含 EncryptedPackage → encrypted（Office 以密碼加密）
     - 其他 OLE 容器 → unsupported_format（舊版 .doc／.ppt 改了副檔名）
-    - 不是 zip → unsupported_format；zip 損毀 → corrupt
-    - 解壓後總大小超過上限 → too_large（壓縮炸彈）
+    - 不是 zip → unsupported_format；zip 損毀（含 CRC、宣告大小不符）→ corrupt
+    - 成員數、解壓後總大小（宣告與實際）、單一成員壓縮比超過上限 → too_large
+      （壓縮炸彈；見 `_scan_zip_members`）
     """
     if data.startswith(_OLE_MAGIC):
         if _OLE_ENCRYPTED_MARK in data:
@@ -351,11 +470,13 @@ def check_ooxml_container(data: bytes, limits: Limits, *, label: str) -> None:
         raise ExtractionError(UNSUPPORTED_FORMAT, f"不是 {label}（不是 zip 容器）")
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            total = sum(info.file_size for info in archive.infolist())
-    except (zipfile.BadZipFile, EOFError, ValueError) as exc:
+            _scan_zip_members(archive, limits, label)
+    except ExtractionError:
+        raise
+    except (zipfile.BadZipFile, zipfile.LargeZipFile, EOFError, ValueError) as exc:
         raise ExtractionError(CORRUPT, f"{label} 的 zip 容器損毀：{exc}") from None
-    if total > limits.max_unzipped_bytes:
-        raise ExtractionError(
-            TOO_LARGE,
-            f"{label} 解壓後 {total} 位元組，超過上限 {limits.max_unzipped_bytes}",
-        )
+    except (NotImplementedError, RuntimeError) as exc:
+        # 不支援的壓縮法、加密成員
+        raise ExtractionError(CORRUPT, f"{label} 的 zip 成員無法解壓：{exc}") from None
+    except zlib.error as exc:
+        raise ExtractionError(CORRUPT, f"{label} 的 zip 成員解壓失敗：{exc}") from None

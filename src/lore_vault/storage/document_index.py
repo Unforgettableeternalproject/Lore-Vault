@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -231,10 +231,16 @@ def finish_ready(
     chunks: Iterable[Any],
     *,
     encoding: str | None,
+    warnings: Sequence[Mapping[str, str]] = (),
 ) -> bool:
     """extracting → ready：寫入 chunk（idx、text、locator、overlap），同交易更新
-    chunk_count、補 FTS、並讓被它取代的舊版本退出索引。文件已不是 extracting
-    （被刪除等）時不寫，回 False。"""
+    chunk_count、encoding、品質警示（`warnings`，空則 NULL）、補 FTS、並讓被它取代的
+    舊版本退出索引。文件已不是 extracting（被刪除等）時不寫，回 False。"""
+    warnings_json = (
+        json.dumps([dict(w) for w in warnings], ensure_ascii=False)
+        if warnings
+        else None
+    )
     items = list(chunks)
     if not items:
         raise ValueError(
@@ -272,10 +278,11 @@ def finish_ready(
         conn.execute(
             """
             UPDATE documents SET status = 'ready', error_code = NULL,
-                error_detail = NULL, chunk_count = ?, encoding = ?, updated = ?
+                error_detail = NULL, chunk_count = ?, encoding = ?, warnings = ?,
+                updated = ?
             WHERE id = ?
             """,
-            (len(items), encoding, utc_now(), document_id),
+            (len(items), encoding, warnings_json, utc_now(), document_id),
         )
         conn.execute(
             "DELETE FROM document_enrichment WHERE document_id = ? AND kind = ?",
@@ -295,7 +302,7 @@ def finish_failed(
         cursor = conn.execute(
             """
             UPDATE documents SET status = 'failed', error_code = ?, error_detail = ?,
-                chunk_count = 0, updated = ?
+                chunk_count = 0, warnings = NULL, updated = ?
             WHERE id = ? AND status IN ('pending', 'extracting')
             """,
             (code, detail.strip()[:MAX_ERROR_CHARS] or code, utc_now(), document_id),
@@ -707,6 +714,41 @@ def failed_documents(conn: sqlite3.Connection) -> Reconciliation:
     return Reconciliation(
         "warn",
         f"{len(failed)} 份抽取失敗、{len(embed_failed)} 份向量補算放棄",
+        counts,
+        tuple(details),
+    )
+
+
+def quality_warnings(conn: sqlite3.Connection) -> Reconciliation:
+    """ready 文件的抽取品質警示（v10 `documents.warnings`，例如 cp950 判定信心低）。
+
+    warn：已可搜尋，但內容可能解碼錯誤，需要使用者確認（轉成 UTF-8 重新上傳）。
+    """
+    rows = conn.execute(
+        """
+        SELECT vault, id, filename, warnings FROM documents
+        WHERE status = ? AND warnings IS NOT NULL ORDER BY updated, id
+        """,
+        (STATUS_READY,),
+    ).fetchall()
+    by_code: dict[str, int] = {}
+    details: list[str] = []
+    for vault, doc_id, filename, raw in rows:
+        items = [w for w in json.loads(raw) if isinstance(w, dict)]
+        for item in items:
+            code = str(item.get("code"))
+            by_code[code] = by_code.get(code, 0) + 1
+            if len(details) < MAX_DETAILS:
+                details.append(f"{vault}/{doc_id}（{filename}）：{item.get('detail')}")
+    counts = {
+        "documents": len(rows),
+        **{f"warning_{code}": n for code, n in sorted(by_code.items())},
+    }
+    if not rows:
+        return Reconciliation("pass", "沒有帶品質警示的文件", counts)
+    return Reconciliation(
+        "warn",
+        f"{len(rows)} 份 ready 文件帶抽取品質警示（內容可能解碼錯誤）",
         counts,
         tuple(details),
     )

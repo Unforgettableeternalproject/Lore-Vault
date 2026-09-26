@@ -173,6 +173,12 @@ class DocumentsConfig:
     chunk_overlap_tokens: int = 50
     # 卡在 extracting 超過此秒數 doctor `documents.stuck_processing` 為 fail
     stuck_seconds: float = 3600.0
+    # pdf／docx／pptx 在子行程抽取（`documents.isolation`）：超過此秒數 kill 子行程、
+    # 標 corrupt（detail 註明 timeout）。從子行程就緒起算，不含啟動時間
+    extract_timeout: float = 60.0
+    # 抽取子行程的虛擬記憶體上限（MB，RLIMIT_AS；只在 Linux 生效，Windows 無此能力）。
+    # 0 = 不限制。Python + lxml + pypdf 本身就佔數百 MB 位址空間，不要設太低
+    extract_memory_mb: int = 1024
 
 
 @dataclass(frozen=True)
@@ -345,6 +351,7 @@ def _validate(config: Config) -> None:
         "documents.max_chars": config.documents.max_chars,
         "documents.chunk_max_tokens": config.documents.chunk_max_tokens,
         "documents.stuck_seconds": config.documents.stuck_seconds,
+        "documents.extract_timeout": config.documents.extract_timeout,
     }
     for name, value in positive.items():
         if value <= 0:
@@ -356,6 +363,7 @@ def _validate(config: Config) -> None:
         "mcp.snapshot_interval": config.mcp.snapshot_interval,
         "documents.min_chars": config.documents.min_chars,
         "documents.chunk_overlap_tokens": config.documents.chunk_overlap_tokens,
+        "documents.extract_memory_mb": config.documents.extract_memory_mb,
     }
     for name, value in non_negative.items():
         if value < 0:

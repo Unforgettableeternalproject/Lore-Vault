@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -59,6 +60,8 @@ class Document:
     updated: str
     # 文字類文件偵測到的編碼（v9）；二進位格式與尚未抽取為 None
     encoding: str | None = None
+    # 抽取品質警示（v10）：[{"code", "detail"}, ...]；沒有為空
+    warnings: tuple[dict[str, str], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -75,6 +78,7 @@ class Document:
             "error_detail": self.error_detail,
             "chunk_count": self.chunk_count,
             "encoding": self.encoding,
+            "warnings": [dict(w) for w in self.warnings],
             "created": self.created,
             "updated": self.updated,
         }
@@ -97,7 +101,15 @@ def _row_to_document(row: sqlite3.Row) -> Document:
         created=row["created"],
         updated=row["updated"],
         encoding=row["encoding"] if "encoding" in row.keys() else None,
+        warnings=_warnings(row["warnings"] if "warnings" in row.keys() else None),
     )
+
+
+def _warnings(value: str | None) -> tuple[dict[str, str], ...]:
+    if not value:
+        return ()
+    parsed = json.loads(value)
+    return tuple(dict(item) for item in parsed if isinstance(item, dict))
 
 
 def validate_sha256(value: object) -> str:

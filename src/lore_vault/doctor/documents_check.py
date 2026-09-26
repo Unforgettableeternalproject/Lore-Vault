@@ -109,6 +109,17 @@ def documents_failed(ctx: DoctorContext) -> CheckResult:
     return _to_result(document_index.failed_documents(_db(ctx)))
 
 
+def documents_quality_warnings(ctx: DoctorContext) -> CheckResult:
+    db = _db(ctx)
+    has = any(
+        row[1] == "warnings"
+        for row in db.execute("PRAGMA table_info(documents)").fetchall()
+    )
+    if not has:
+        raise CheckSkipped("缺少 documents.warnings 欄（schema 未遷移到 v10）")
+    return _to_result(document_index.quality_warnings(db))
+
+
 def documents_backlog(ctx: DoctorContext) -> CheckResult:
     max_age = float(
         ctx.settings.get("documents_backlog_max_age", DEFAULT_DOCUMENT_BACKLOG_MAX_AGE)

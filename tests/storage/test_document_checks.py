@@ -25,6 +25,7 @@ CHECKS = (
     "documents.vector_rows_match_chunks",
     "documents.stuck_processing",
     "documents.failed",
+    "documents.quality_warnings",
     "documents.backlog",
 )
 
@@ -168,6 +169,46 @@ def test_failed_document_is_warn_with_error_code(healthy):
     result = _run(conn)["documents.failed"]
     assert result.status.value == "warn"
     assert result.counts["failed_empty_extraction"] == 1
+
+
+def test_quality_warning_is_warn_and_listed(healthy):
+    """ready 文件帶品質警示（cp950 判定信心低）→ warn 並列出；拿掉警示回綠。"""
+    conn, ids = healthy
+    assert _status(_run(conn), "documents.quality_warnings") == "pass"
+    warning = '[{"code": "encoding_low_confidence", "detail": "樣本太小"}]'
+    conn.execute(
+        "UPDATE documents SET warnings = ? WHERE id = ?", (warning, ids["other"])
+    )
+    result = _run(conn)["documents.quality_warnings"]
+    assert result.status.value == "warn"
+    assert result.counts["warning_encoding_low_confidence"] == 1
+    assert any(ids["other"] in line and "樣本太小" in line for line in result.details)
+    conn.execute("UPDATE documents SET warnings = NULL")
+    assert _status(_run(conn), "documents.quality_warnings") == "pass"
+
+
+def test_finish_ready_stores_and_finish_failed_clears_warnings(healthy):
+    conn, _ = healthy
+    doc = insert_document(
+        conn,
+        VAULT,
+        space="dev",
+        filename="big5.txt",
+        mime="text/plain",
+        size_bytes=1,
+        sha256="d" * 64,
+    )
+    assert index.claim(conn, doc.id)
+    warning = {"code": "encoding_low_confidence", "detail": "樣本太小"}
+    chunks = [Chunk(0, "內容", {"kind": "offset", "value": 0})]
+    assert index.finish_ready(
+        conn, doc.id, chunks, encoding="cp950", warnings=[warning]
+    )
+    from lore_vault.storage.documents import get_document
+
+    stored = get_document(conn, VAULT, doc.id, space="dev")
+    assert stored.warnings == (warning,)
+    assert stored.to_dict()["warnings"] == [warning]
 
 
 def test_old_backlog_is_warn(healthy):

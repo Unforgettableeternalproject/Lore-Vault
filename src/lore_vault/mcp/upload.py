@@ -7,6 +7,10 @@
   （同樣取 realpath）之下；逃出去回 `path_not_allowed`
 - 只收一般檔案；讀的是 realpath（檢查過的那一個），不是原路徑
 - 大小在讀檔時就擋：最多讀 `max_bytes + 1` 位元組
+- Windows（`os.name == "nt"`）另拒絕會改變解析基準或開到非一般檔案的形式
+  （`windows_path_problem`）：`C:foo`（依行程在該磁碟的目前目錄解析、丟掉 cwd）、
+  `\\foo`（目前磁碟根目錄）、UNC `\\\\server\\share`、`\\\\?\\`／`\\\\.\\` 裝置前綴、
+  NTFS 替代資料流（`file.txt:stream`）
 """
 
 from __future__ import annotations
@@ -14,7 +18,7 @@ from __future__ import annotations
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import Path, PurePath
+from pathlib import Path, PurePath, PureWindowsPath
 
 
 class UploadPathError(Exception):
@@ -41,6 +45,25 @@ def _within(target: str, root: str) -> bool:
         return False
 
 
+# 是否套用 Windows 路徑形式檢查（測試可替換）
+WINDOWS_PATHS = os.name == "nt"
+
+
+def windows_path_problem(raw: str) -> str | None:
+    """Windows 路徑中不接受的形式；可接受回 None。"""
+    path = PureWindowsPath(raw)
+    drive = path.drive
+    if drive.startswith("\\\\"):
+        return r"不接受 UNC 或裝置路徑（\\server\share、\\?\、\\.\）"
+    if drive and not path.is_absolute():
+        return "有磁碟代號的路徑必須是絕對路徑（C:foo 會依該磁碟的目前目錄解析）"
+    if path.root and not drive:
+        return r"以 \ 開頭的路徑必須帶磁碟代號（會依目前磁碟的根目錄解析）"
+    if ":" in str(path)[len(drive) :]:
+        return "路徑不可含 ':'（NTFS 替代資料流）"
+    return None
+
+
 def resolve_upload_path(
     raw: str, roots: Sequence[str | os.PathLike[str]], *, cwd: str
 ) -> Path:
@@ -48,6 +71,8 @@ def resolve_upload_path(
         raise UploadPathError("invalid_request", "path 不可為空")
     if "\x00" in raw:
         raise UploadPathError("invalid_request", "path 含 NUL")
+    if WINDOWS_PATHS and (problem := windows_path_problem(raw)):
+        raise UploadPathError("path_not_allowed", f"{problem}：{raw!r}")
     parts = PurePath(raw.replace("\\", "/")).parts
     if ".." in parts:
         raise UploadPathError("path_not_allowed", f"路徑不可含 '..'：{raw!r}")

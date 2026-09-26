@@ -219,6 +219,7 @@ def document_summary(doc: Document, superseded_by: str | None) -> dict[str, Any]
         "superseded_by": superseded_by,
         "chunk_count": doc.chunk_count,
         "encoding": doc.encoding,
+        "warnings": [dict(w) for w in doc.warnings],
         "created": doc.created,
         "updated": doc.updated,
     }

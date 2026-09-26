@@ -419,6 +419,22 @@ def _v9(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+# 抽取品質警示（v10）：documents.warnings 為 JSON 陣列 `[{"code", "detail"}, ...]`，
+# 沒有警示為 NULL。目前只有 cp950 判定信心低（encoding_low_confidence）；
+# 成功抽取但結果可能不可靠，doctor `documents.quality_warnings` 以 warn 列出
+_V10_STATEMENTS: tuple[str, ...] = (
+    """
+    ALTER TABLE documents ADD COLUMN warnings TEXT
+        CHECK (warnings IS NULL OR json_valid(warnings))
+    """,
+)
+
+
+def _v10(conn: sqlite3.Connection) -> None:
+    for statement in _V10_STATEMENTS:
+        conn.execute(statement)
+
+
 # 有序遷移：索引 i 的函式把版本從 i 升到 i+1。只能往後加，不可改動已發佈的項目。
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _v1,
@@ -430,6 +446,7 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _v7,
     _v8,
     _v9,
+    _v10,
 )
 
 SCHEMA_VERSION = len(MIGRATIONS)

@@ -26,6 +26,7 @@ from .documents_check import (
     documents_failed,
     documents_fts_rows,
     documents_orphan_blobs,
+    documents_quality_warnings,
     documents_stuck,
     documents_superseded_removed,
     documents_vector_rows,
@@ -277,6 +278,11 @@ def default_registry() -> Registry:
             "documents.failed",
             documents_failed,
             "抽取失敗與向量補算放棄的文件數（非零為 warn，附錯誤碼）",
+        ),
+        (
+            "documents.quality_warnings",
+            documents_quality_warnings,
+            "ready 文件的抽取品質警示（例如 cp950 判定信心低；非零為 warn）",
         ),
         (
             "documents.backlog",

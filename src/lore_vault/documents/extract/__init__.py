@@ -24,7 +24,8 @@
 依序試 UTF-8（可帶 BOM）→ 帶 BOM 的 UTF-16 → cp950（Big5，台灣常見）；cp950 必須
 嚴格解碼成功且通過文字性檢查才採用。含 NUL 或控制字元比例 > 1% 視為二進位
 （unsupported_format）；都不符 → unsupported_encoding。偵測到的編碼記在
-`Extraction.encoding`。
+`Extraction.encoding`。cp950 判定樣本小（非 ASCII 字元 < 50）或亂碼偏多時，
+`Extraction.warnings` 帶 `encoding_low_confidence`（仍算成功）。
 pdf／docx／pptx 另驗檔頭魔數，副檔名與內容不符 → unsupported_format。
 
 空結果：任何格式抽不出可見字元都是 empty_extraction；另外只有 pdf 在去空白字數
@@ -40,6 +41,7 @@ from pathlib import PurePath
 from .base import (
     CORRUPT,
     EMPTY_EXTRACTION,
+    ENCODING_LOW_CONFIDENCE,
     ENCRYPTED,
     ERROR_CODES,
     LOCATOR_KINDS,
@@ -49,10 +51,12 @@ from .base import (
     Budget,
     Extraction,
     ExtractionError,
+    ExtractionWarning,
     Limits,
     Locator,
     Segment,
     clean_text,
+    encoding_warnings,
     garbled_chars,
     merge_cjk_spacing,
     visible_chars,
@@ -62,6 +66,7 @@ __all__ = [
     "BINARY_FORMATS",
     "CORRUPT",
     "EMPTY_EXTRACTION",
+    "ENCODING_LOW_CONFIDENCE",
     "ENCRYPTED",
     "ERROR_CODES",
     "FORMATS",
@@ -74,6 +79,7 @@ __all__ = [
     "UNSUPPORTED_FORMAT",
     "Extraction",
     "ExtractionError",
+    "ExtractionWarning",
     "Limits",
     "Locator",
     "Segment",
@@ -251,10 +257,17 @@ def extract(
             EMPTY_EXTRACTION,
             f"只抽出 {chars} 個字（門檻 {limits.min_chars}），多半是掃描件或純圖片",
         )
+    garbled = sum(garbled_chars(s.text) for s in segments)
     return Extraction(
         format=fmt,
         segments=tuple(segments),
         char_count=chars,
-        garbled_chars=sum(garbled_chars(s.text) for s in segments),
+        garbled_chars=garbled,
         encoding=budget.encoding,
+        warnings=encoding_warnings(
+            budget.encoding,
+            non_ascii=sum(1 for s in segments for ch in s.text if ord(ch) > 0x7F),
+            garbled=garbled,
+            visible=chars,
+        ),
     )
