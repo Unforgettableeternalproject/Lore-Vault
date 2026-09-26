@@ -37,11 +37,14 @@ test('寫筆記 → 檢索命中 → 開啟詳情', async ({ page }) => {
   const hit = page.locator('.lv-result', { hasText: 'zephyrquartz 注入預算調整' });
   await expect(hit).toBeVisible();
   await expect(hit.locator('.lv-src')).toHaveText('首段'); // enrich worker 關閉：摘要尚未產生
+  await expect(hit.getByTestId('result-author')).toHaveText('Xavier (Bernie)');
   await expect(page.getByRole('button', { name: '語意檢索離線' })).toBeVisible();
 
   await hit.click();
   await expect(page.getByRole('heading', { name: 'zephyrquartz 注入預算調整' })).toBeVisible();
   await expect(page.getByTestId('note-summary')).toContainText('摘要尚未產生');
+  // 署名預設開（A22）：UI 寫入的作者為 Xavier (Bernie)
+  await expect(page.getByTestId('note-author')).toHaveText('Xavier (Bernie)');
   await expect(page.locator('.lv-md table td', { hasText: '800 字' })).toBeVisible();
   await expect(page).toHaveURL(/\/ui\/notes\/[0-9a-f]+$/);
 

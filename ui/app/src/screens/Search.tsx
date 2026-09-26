@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 
 import { Banner, ErrorState, Loading, SourceTag } from '../components/ui';
 import { ALL, useApp, vaultName } from '../lib/context';
-import { describeDegradedReason, formatTime, isAbort, locatorLabel } from '../lib/format';
+import { authorLabel, describeDegradedReason, formatTime, isAbort, locatorLabel } from '../lib/format';
 import { routePath } from '../lib/router';
 import type { RecallItem, RecallResult } from '../lib/types';
 
@@ -265,6 +265,11 @@ function ResultRow({
       </span>
       <span class="lv-result__meta">
         <span class="lv-result__vault">{vaultLabel}</span>
+        {item.kind === 'note' && (
+          <span class={'lv-result__author' + (item.author ? '' : ' lv-muted')} data-testid="result-author">
+            {authorLabel(item.author)}
+          </span>
+        )}
         <span class="lv-mono">{formatTime(item.updated)}</span>
         <span class={'lv-result__score' + (degraded ? ' is-degraded' : '')} title="RRF 融合分數">
           {degraded ? '關鍵字' : '混合'} · {item.score.toFixed(4)}

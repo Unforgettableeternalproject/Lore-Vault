@@ -123,6 +123,15 @@ describe('檢索狀態呈現', () => {
     expect(navigate).toHaveBeenCalledWith('/ui/docs/doc%3Au1?chunk=3&q=q');
   });
 
+  it('筆記結果顯示作者；未具名要標出', async () => {
+    const { api } = makeApi({
+      '/v1/recall': () => json(result({ items: [item({ id: 'a', author: 'Minka' }), item({ id: 'b', author: null })] })),
+    });
+    renderWithApp(<Search initialQuery="q" />, api);
+    await waitFor(() => expect(screen.getAllByTestId('result-author')).toHaveLength(2));
+    expect(screen.getAllByTestId('result-author').map((el) => el.textContent)).toEqual(['Minka', '未具名']);
+  });
+
   it('缺向量：提示語意那一路查不到', async () => {
     const { api } = makeApi({
       '/v1/recall': () => json(result({ missing_embeddings: 4, missing_chunk_embeddings: 2, items: [item({})] })),

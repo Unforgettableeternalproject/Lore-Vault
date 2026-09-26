@@ -241,8 +241,52 @@ describe('兩段式刪除', () => {
     fireEvent.click(screen.getByRole('button', { name: '確認刪除' }));
     await waitFor(() => expect(callsTo('/v1/note_delete')).toHaveLength(2));
     expect(callsTo('/v1/note_delete')[1]!.body).toEqual({ space: 'dev', vault: VAULT, id: 'n1', confirm_token: 'tok-1' });
-    await waitFor(() => expect(navigate).toHaveBeenCalledWith('/ui/notes'));
+    expect(await screen.findByTestId('note-deleted')).toBeTruthy();
     expect(toast).toHaveBeenCalledWith(expect.stringContaining('已刪除'), 'success');
+    fireEvent.click(screen.getByRole('button', { name: '回筆記列表' }));
+    expect(navigate).toHaveBeenCalledWith('/ui/notes');
+  });
+
+  async function deleteThenUndelete(undelete: Handler) {
+    const ctx = makeApi({
+      '/v1/get': getHandler(() => note({ links: [] })),
+      '/v1/note_delete': (body) =>
+        body.confirm_token
+          ? json({ executed: true, plan: {} })
+          : json({ executed: false, plan: { target: 'note', vault: VAULT, counts: { notes: 1 } }, confirm_token: 't', expires_at: null }),
+      '/v1/note_undelete': undelete,
+    });
+    const rendered = renderWithApp(<NoteDetail id="n1" />, ctx.api);
+    fireEvent.click(await screen.findByRole('button', { name: '刪除…' }));
+    await screen.findByTestId('delete-plan');
+    fireEvent.click(screen.getByRole('button', { name: '確認刪除' }));
+    await screen.findByTestId('note-deleted');
+    fireEvent.click(screen.getByRole('button', { name: '復原這則筆記' }));
+    return { ...ctx, ...rendered };
+  }
+
+  it('復原：restored=true 還原原 id 與內容，回到閱讀', async () => {
+    const { callsTo, toast } = await deleteThenUndelete(() =>
+      json({ undeleted: {}, restored: true, reimportable: false, note: { id: 'n1', vault: VAULT, title: '注入預算', author: null, updated: 'x' } }),
+    );
+    await screen.findByTestId('note-summary');
+    expect(callsTo('/v1/note_undelete')[0]!.body).toEqual({ space: 'dev', id: 'n1' });
+    expect(toast).toHaveBeenCalledWith(expect.stringContaining('已還原'), 'success');
+  });
+
+  it('復原：舊墓碑 restored=false 明講內容沒回來（區分可否重跑匯入）', async () => {
+    await deleteThenUndelete(() => json({ undeleted: {}, restored: false, reimportable: true, note: null }));
+    const result = await screen.findByTestId('undelete-result');
+    expect(result.textContent).toContain('內容未還原');
+    expect(result.textContent).toContain('重跑匯入');
+    expect(screen.queryByRole('button', { name: '復原這則筆記' })).toBeNull();
+  });
+
+  it('復原被拒（409 not_restorable）顯示原因', async () => {
+    await deleteThenUndelete(() => apiError(409, 'not_restorable', { reason: 'vault_deleted' }));
+    const result = await screen.findByTestId('undelete-result');
+    expect(result.textContent).toContain('所屬 vault 已被刪除');
+    expect(result.textContent).toContain('vault_deleted');
   });
 
   it('規劃已變動（409 plan_changed）：顯示新規劃並要求重新規劃，不自動重送', async () => {

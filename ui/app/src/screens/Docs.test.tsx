@@ -8,6 +8,7 @@ import type { ChunkFull, DocumentMeta, UploadResult } from '../lib/types';
 import { apiError, json, makeApi, renderWithApp, type Handler } from '../test/harness';
 import { DocDetail } from './DocDetail';
 import { Docs, MAX_UPLOAD_BYTES } from './Docs';
+import { Notes } from './Notes';
 
 afterEach(cleanup);
 
@@ -78,6 +79,51 @@ describe('文件列表狀態', () => {
     fireEvent.click(await screen.findByRole('button', { name: '重試' }));
     await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.stringContaining('retry_limit'), 'error'));
     expect(toast.mock.calls[0]![0]).toContain('人工重試上限');
+  });
+
+  it('刪除後可復原；復原被拒時顯示原因', async () => {
+    let refused = true;
+    const { api, callsTo } = makeApi({
+      '/v1/list': listOf([doc()]),
+      '/v1/document_delete': (body) =>
+        body.confirm_token
+          ? json({ executed: true, plan: {} })
+          : json({ executed: false, plan: { target: 'document', filename: 'a.md', counts: { documents: 1, document_chunks: 3 } }, confirm_token: 't', expires_at: null }),
+      '/v1/document_undelete': () =>
+        refused ? apiError(409, 'not_restorable', { reason: 'blob_missing' }) : json({ document: {}, space: 'dev', tombstone: {} }),
+    });
+    const { toast } = renderWithApp(<Docs />, api);
+    fireEvent.click(await screen.findByRole('button', { name: '刪除 a.md' }));
+    expect((await screen.findByTestId('delete-plan')).textContent).toContain('文件段落');
+    fireEvent.click(screen.getByRole('button', { name: '確認刪除' }));
+    const banner = await screen.findByTestId('doc-deleted');
+    fireEvent.click(within(banner).getByRole('button', { name: '復原' }));
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.stringContaining('原始檔已不在'), 'error'));
+    refused = false;
+    fireEvent.click(within(screen.getByTestId('doc-deleted')).getByRole('button', { name: '復原' }));
+    await waitFor(() => expect(screen.queryByTestId('doc-deleted')).toBeNull());
+    expect(callsTo('/v1/document_undelete').at(-1)!.body).toEqual({ space: 'dev', id: 'doc:u1' });
+  });
+});
+
+describe('筆記列表作者', () => {
+  it('作者未具名要標出；最後修改者不同時另外顯示', async () => {
+    const { api } = makeApi({
+      '/v1/list': () =>
+        json({
+          items: [
+            { id: 'a', kind: 'note', vault: VAULT, title: '甲', topics: [], updated: 'x', author: 'codex', updated_by: 'Xavier (Bernie)' },
+            { id: 'b', kind: 'note', vault: VAULT, title: '乙', topics: [], updated: 'x', author: null, updated_by: null },
+          ],
+          next_cursor: null,
+          has_more: false,
+          unsupported_kinds: [],
+        }),
+    });
+    renderWithApp(<Notes />, api);
+    await screen.findByText('甲');
+    expect(screen.getAllByTestId('note-author').map((el) => el.textContent)).toEqual(['codex', '未具名']);
+    expect(screen.getByTestId('note-updated-by').textContent).toBe('最後修改 Xavier (Bernie)');
   });
 });
 

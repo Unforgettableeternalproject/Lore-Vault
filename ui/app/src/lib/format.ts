@@ -26,6 +26,14 @@ const ERROR_TEXT: Record<string, string> = {
   invalid_request: '請求參數不合法',
 };
 
+const RESTORE_REASON: Record<string, string> = {
+  vault_deleted: '所屬 vault 已被刪除',
+  exists: '同一 id 已經存在',
+  incomplete: '這是舊版墓碑，缺少復原所需的資料',
+  blob_missing: '原始檔已不在（可能已被清理）',
+  duplicate: '同 vault 已有相同內容的文件',
+};
+
 /** FastAPI 預設 422：`{detail: [{loc: ["body", "<欄位>"], type}]}`；回傳被拒的 body 欄位名。 */
 export function rejectedFields(err: ApiError): string[] {
   if (err.status !== 422) return [];
@@ -54,6 +62,11 @@ export function describeError(err: unknown): string {
     if (err.status === 422) {
       const fields = rejectedFields(err);
       return `服務拒絕請求欄位${fields.length ? `：${fields.join('、')}` : ''}（HTTP 422）`;
+    }
+    if (err.code === 'not_restorable') {
+      const reason = (err.body as { error?: { reason?: unknown } } | null)?.error?.reason;
+      const text = typeof reason === 'string' ? (RESTORE_REASON[reason] ?? reason) : '原因不明';
+      return `無法復原：${text}（not_restorable${typeof reason === 'string' ? ` · ${reason}` : ''}）`;
     }
     const known = ERROR_TEXT[err.code];
     const base = known ?? err.message;

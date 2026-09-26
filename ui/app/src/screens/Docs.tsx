@@ -54,6 +54,8 @@ export function Docs() {
   const [dragging, setDragging] = useState(false);
   const [retrying, setRetrying] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<DocumentMeta | null>(null);
+  const [lastDeleted, setLastDeleted] = useState<DocumentMeta | null>(null);
+  const [undeleting, setUndeleting] = useState(false);
   const seq = useRef(0);
   const fileInput = useRef<HTMLInputElement>(null);
 
@@ -168,6 +170,21 @@ export function Docs() {
     }
   };
 
+  const undelete = async (doc: DocumentMeta) => {
+    setUndeleting(true);
+    try {
+      await api.post('/v1/document_undelete', { space: space.id, id: doc.id });
+      toast(`已復原「${doc.filename}」，重新排入抽取`, 'success');
+      setLastDeleted(null);
+      refreshVaults();
+      setTick((t) => t + 1);
+    } catch (err) {
+      toast(describeError(err), 'error');
+    } finally {
+      setUndeleting(false);
+    }
+  };
+
   const items = page?.items ?? [];
   const byId = new Map(items.map((d) => [d.id, d]));
 
@@ -274,6 +291,21 @@ export function Docs() {
             ))}
           </ul>
         </div>
+      )}
+
+      {lastDeleted && (
+        <Banner
+          tone="info"
+          label="DELETED"
+          testId="doc-deleted"
+          action={
+            <button type="button" class="btn-outline btn-outline--sm" disabled={undeleting} onClick={() => void undelete(lastDeleted)}>
+              {undeleting ? '復原中…' : '復原'}
+            </button>
+          }
+        >
+          已刪除「{lastDeleted.filename}」v{lastDeleted.version}（留有墓碑；原始檔仍在時可復原，復原後會重新抽取）。
+        </Banner>
       )}
 
       {page && page.unsupported_kinds.length > 0 && (
@@ -399,6 +431,7 @@ export function Docs() {
           onCancel={() => setDeleting(null)}
           onDone={() => {
             toast(`已刪除「${deleting.filename}」`, 'success');
+            setLastDeleted(deleting);
             setDeleting(null);
             refreshVaults();
             setTick((t) => t + 1);

@@ -411,6 +411,8 @@ button { font: inherit; }
 .lv-result__text { font-family: var(--font-serif-tc); font-size: 14px; line-height: 1.8; color: var(--ink-soft); min-width: 0; overflow-wrap: anywhere; }
 .lv-result__meta { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; text-align: right; }
 .lv-result__vault { font-size: 12px; color: var(--ink-soft); }
+.lv-result__author { font-family: var(--font-mono); font-size: 11px; color: var(--ink-soft); }
+.lv-table__who { display: flex; flex-direction: column; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
 .lv-result__score { font-family: var(--font-mono); font-size: 10px; color: var(--ink-mute); }
 .lv-result__score.is-degraded { color: var(--uep-gold); }
 .lv-truncated {

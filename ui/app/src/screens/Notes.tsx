@@ -1,5 +1,6 @@
 // 筆記列表（T-80）：依目前 vault 篩選分頁瀏覽，標籤與時間篩選走 `/v1/list` 的 topics／since。
-// list 回應不含摘要與摘要來源（見回報的 API 缺口）；有 `author` 欄位才顯示作者，否則顯示「未具名」。
+// list 回應不含摘要與摘要來源（見回報的 API 缺口）；作者（A22 author）沒有值時顯示「未具名」，
+// 最後修改者（updated_by）與作者不同時另外標出。
 import { useEffect, useState } from 'preact/hooks';
 
 import { Banner, ErrorState, Loading, SourceTag } from '../components/ui';
@@ -166,8 +167,15 @@ export function Notes() {
                 <span role="cell" class="lv-mono lv-muted">
                   {n.topics.map((t) => `#${t}`).join(' ')}
                 </span>
-                <span role="cell" class={'lv-mono' + (n.author ? '' : ' lv-muted')} data-testid="note-author">
-                  {authorLabel(n.author)}
+                <span role="cell" class="lv-table__who">
+                  <span class={'lv-mono' + (n.author ? '' : ' lv-muted')} data-testid="note-author">
+                    {authorLabel(n.author)}
+                  </span>
+                  {n.updated_by && n.updated_by !== n.author && (
+                    <span class="lv-mono lv-muted lv-small" data-testid="note-updated-by">
+                      最後修改 {n.updated_by}
+                    </span>
+                  )}
                 </span>
                 <span role="cell" class="lv-mono lv-muted is-right">
                   {formatTime(n.updated)}

@@ -11,7 +11,7 @@ import { authorLabel, describeError, formatTime, isAbort } from '../lib/format';
 import { Markdown } from '../lib/markdown';
 import { loadSendAuthor, saveSendAuthor, UI_AUTHOR } from '../lib/prefs';
 import { routePath } from '../lib/router';
-import type { ConflictCurrent, GetResult, NoteFull, UpdateResult } from '../lib/types';
+import type { ConflictCurrent, GetResult, NoteFull, NoteUndeleteResult, UpdateResult } from '../lib/types';
 
 /** 詳情頁一次取全文的字數預算；超過仍會標 truncated 並提供「載入全文」 */
 export const DETAIL_BUDGET = 200_000;
@@ -71,6 +71,9 @@ export function NoteDetail({ id }: { id: string }) {
   const [saveError, setSaveError] = useState<unknown>(null);
   const [confirmOverwrite, setConfirmOverwrite] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [deleted, setDeleted] = useState<{ title: string } | null>(null);
+  const [undeleting, setUndeleting] = useState(false);
+  const [undeleteResult, setUndeleteResult] = useState<{ tone: 'ok' | 'warn' | 'error'; text: string } | null>(null);
   const [sendAuthor, setSendAuthor] = useState(loadSendAuthor);
 
   const fetchNote = async (signal?: AbortSignal, want = budget): Promise<GetResult<NoteFull>> => {
@@ -260,6 +263,64 @@ export function NoteDetail({ id }: { id: string }) {
     setMode('read');
     toast('已放棄你的修改，顯示目前版本', 'info');
   };
+
+  const undelete = async () => {
+    setUndeleting(true);
+    setUndeleteResult(null);
+    try {
+      const { data } = await api.post<NoteUndeleteResult>('/v1/note_undelete', { space: space.id, id });
+      refreshVaults();
+      if (data.restored) {
+        toast(`已還原「${data.note?.title ?? deleted?.title ?? id}」`, 'success');
+        setDeleted(null);
+        setNote(null);
+        setTick((t) => t + 1);
+        return;
+      }
+      // 舊版墓碑沒有內容快照：只移除了墓碑
+      setUndeleteResult({
+        tone: 'warn',
+        text: data.reimportable
+          ? '已移除墓碑，但這則沒有內容快照（舊版刪除），內容未還原；下次重跑匯入時會匯回。'
+          : '已移除墓碑，但這則沒有內容快照（舊版刪除），內容無法還原。',
+      });
+    } catch (err) {
+      setUndeleteResult({ tone: 'error', text: describeError(err) });
+    } finally {
+      setUndeleting(false);
+    }
+  };
+
+  if (deleted) {
+    return (
+      <section class="lv-screen">
+        <div class="lv-eyebrow">NOTE · {space.en} · 已刪除</div>
+        <h1 class="lv-title">已刪除「{deleted.title}」</h1>
+        <div class="zone-state" role="status" data-testid="note-deleted">
+          已留下墓碑。v12 起的刪除保留內容快照，可以原 id 與原內容還原。
+        </div>
+        {undeleteResult && (
+          <p
+            class={'lv-notice ' + (undeleteResult.tone === 'error' ? 'lv-notice--error' : 'lv-notice--warn')}
+            role={undeleteResult.tone === 'error' ? 'alert' : 'status'}
+            data-testid="undelete-result"
+          >
+            {undeleteResult.text}
+          </p>
+        )}
+        <div class="lv-actions lv-actions--wrap">
+          {!undeleteResult || undeleteResult.tone === 'error' ? (
+            <button type="button" class="btn-outline btn-outline--gold" disabled={undeleting} onClick={() => void undelete()}>
+              {undeleting ? '復原中…' : '復原這則筆記'}
+            </button>
+          ) : null}
+          <button type="button" class="btn-outline" onClick={() => navigate(routePath('notes'))}>
+            回筆記列表
+          </button>
+        </div>
+      </section>
+    );
+  }
 
   if (loading && !note) return <Loading />;
   if (error !== null && !note) return <ErrorState error={error} onRetry={() => setTick((t) => t + 1)} />;
@@ -540,16 +601,16 @@ export function NoteDetail({ id }: { id: string }) {
           args={{ space: space.id, vault: note.vault, id: note.id }}
           describe={
             <>
-              刪除「{note.title}」。會留下墓碑（避免重新匯入時復活）；<strong>復原只移除墓碑，內容不會回來</strong>
-              ，有匯入來源者需重跑匯入。
+              刪除「{note.title}」。會留下墓碑與內容快照（避免重新匯入時復活），刪除後可從這裡或維護頁復原。
             </>
           }
           onCancel={() => setDeleting(false)}
           onDone={() => {
             setDeleting(false);
+            setMode('read');
+            setDeleted({ title: note.title });
             toast(`已刪除「${note.title}」`, 'success');
             refreshVaults();
-            navigate(routePath('notes'));
           }}
         />
       )}

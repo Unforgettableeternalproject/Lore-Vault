@@ -1,5 +1,5 @@
 // /v1 回應形狀（對照 docs/ARCHITECTURE.md 與服務端 to_dict）。只宣告畫面用得到的欄位；
-// 未知欄位保留在物件上不刪，`author`（A22）等尚未上線的欄位宣告為可選。
+// 未知欄位保留在物件上不刪；A22 作者欄位（author／updated_by）宣告為可選（舊資料可能為 null）。
 
 export type SummarySource = 'summary' | 'lead' | 'excerpt' | 'none';
 
@@ -139,6 +139,7 @@ export interface NoteListItem {
   topics: string[];
   updated: string;
   author?: string | null;
+  updated_by?: string | null;
   summary?: string | null;
   summary_source?: SummarySource;
 }
@@ -211,6 +212,14 @@ export interface DocumentRetryResult {
   space: string;
   manual_retries: number;
   max_manual_retries: number;
+}
+
+/** POST /v1/note_undelete：有內容快照時 restored=true 並附還原後的 note。 */
+export interface NoteUndeleteResult {
+  undeleted: Record<string, unknown>;
+  restored: boolean;
+  reimportable: boolean;
+  note: { id: string; vault: string; title: string; author?: string | null; updated: string } | null;
 }
 
 /** 兩段式確認端點的回應。 */

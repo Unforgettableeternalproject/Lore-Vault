@@ -3,16 +3,14 @@ import { expect, type APIRequestContext, type Page } from '@playwright/test';
 
 import { E2E_TOKEN } from './constants';
 
-export async function watchPage(page: Page, options: { allowAuthorOff?: boolean } = {}) {
-  await page.addInitScript((authorOff) => {
+export async function watchPage(page: Page) {
+  await page.addInitScript(() => {
     const w = window as unknown as { __csp: string[] };
     w.__csp = [];
     document.addEventListener('securitypolicyviolation', (e: SecurityPolicyViolationEvent) => {
       w.__csp.push(`${e.violatedDirective} ${e.blockedURI}`);
     });
-    // 服務端 A22（author）上線前會以 422 拒收 author；E2E 關掉署名，不受後端進度影響
-    if (authorOff) window.localStorage.setItem('lore-vault.author', 'off');
-  }, options.allowAuthorOff ?? true);
+  });
   const consoleErrors: string[] = [];
   page.on('console', (msg) => {
     // 未登入時 session 檢查的 401 是預期的資源錯誤
