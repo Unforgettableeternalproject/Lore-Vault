@@ -8,6 +8,7 @@ token 缺少或不合格時 `create_app` 直接拋 `ConfigError`，服務不會�
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 
@@ -22,6 +23,24 @@ from .spike import router as spike_router
 from .state import AppState
 
 
+def _configure_logging() -> None:
+    """讓 lore_vault.* 的 INFO log 出現在 stdout（docker logs）。
+
+    uvicorn 只設定自己的 logger，root 預設 WARNING 會吞掉補算進度與暖機結果。
+    只在 lore_vault logger 尚無 handler 時加一個，避免重複輸出。
+    """
+    root = logging.getLogger("lore_vault")
+    if root.handlers:
+        return
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    )
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
+    root.propagate = False
+
+
 def create_app(
     settings: ApiSettings | None = None,
     *,
@@ -29,6 +48,8 @@ def create_app(
 ) -> FastAPI:
     """建立 app。`settings` 省略時從環境變數載入（`environ` 供測試注入）。"""
     if settings is None:
+        # 正式啟動路徑（uvicorn --factory）；測試會注入 settings，不改動全域 logging
+        _configure_logging()
         settings = load_settings(environ=environ)
     validate_token(settings.token)
     state = AppState(settings)

@@ -27,6 +27,39 @@ logger = logging.getLogger("lore_vault.api.worker")
 _MAX_ERROR = 300
 
 
+def _pending(conn: Any) -> tuple[int, int]:
+    """目前待補的摘要與向量筆數（供每輪 log 用）。"""
+    summary = conn.execute(
+        "SELECT count(*) FROM notes WHERE summary IS NULL"
+    ).fetchone()
+    embedding = conn.execute(
+        "SELECT count(*) FROM notes n LEFT JOIN note_embeddings e"
+        " ON e.note_seq = n.seq WHERE e.note_seq IS NULL"
+    ).fetchone()
+    return int(summary[0]), int(embedding[0])
+
+
+def _progress_line(stats: dict[str, dict[str, Any]], pending: tuple[int, int]) -> str:
+    parts = []
+    for kind, label in (("summary", "摘要"), ("embedding", "向量")):
+        k = stats.get(kind, {})
+        parts.append(
+            f"{label} 完成 {k.get('done', 0)}／重試 {k.get('retry', 0)}"
+            f"／放棄 {k.get('gave_up', 0)}"
+        )
+    return (
+        "補算本輪：" + "；".join(parts) + f"。剩餘 摘要 {pending[0]}、向量 {pending[1]}"
+    )
+
+
+def _has_activity(stats: dict[str, dict[str, Any]]) -> bool:
+    return any(
+        k.get(field)
+        for k in stats.values()
+        for field in ("done", "retry", "gave_up", "stale", "stopped")
+    )
+
+
 def _describe(exc: BaseException) -> str:
     text = f"{type(exc).__name__}: {exc}"
     return text if len(text) <= _MAX_ERROR else text[: _MAX_ERROR - 1] + "…"
@@ -105,8 +138,16 @@ class BackgroundEnricher:
                         self._last_run = utc_now()
                         self._runs += 1
                 else:
+                    stats_dict = stats.to_dict()
+                    # 有動作的輪次才印一行進度，避免每 poll_interval 洗版
+                    if _has_activity(stats_dict):
+                        try:
+                            pending = _pending(conn)
+                        except Exception:  # noqa: BLE001 - 進度 log 失敗不影響補算
+                            pending = (-1, -1)
+                        logger.info(_progress_line(stats_dict, pending))
                     with self._lock:
-                        self._last_stats = stats.to_dict()
+                        self._last_stats = stats_dict
                         self._last_error = None
                         self._last_run = utc_now()
                         self._runs += 1
