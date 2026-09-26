@@ -2,7 +2,7 @@
 
 - 設定檔路徑：`load_config(path=...)` 參數 > 環境變數 `LORE_VAULT_CONFIG` > 不讀檔。
 - 環境變數覆寫單一項目：`LORE_VAULT_<SECTION>_<KEY>`，例如
-  `LORE_VAULT_EMBEDDING_BASE_URL`、`LORE_VAULT_SUMMARY_MODEL`、`LORE_VAULT_DATABASE_PATH`。
+  `LORE_VAULT_EMBEDDING_BASE_URL`、`LORE_VAULT_SUMMARY_MODEL`、`LORE_VAULT_ASK_MODEL`、`LORE_VAULT_DATABASE_PATH`。
 - `.env`：只在呼叫端明確傳 `env_file` 時讀取，合併進「環境變數」這一層
   （真正的環境變數優先），不寫回 `os.environ`。
 - OpenAI key 只從環境變數 `OPENAI_API_KEY`（或 `.env`）讀；設定檔裡出現任何
@@ -102,6 +102,21 @@ class SummaryConfig:
 
 
 @dataclass(frozen=True)
+class AskConfig:
+    """`ask()`（D11）：recall 的 note 片段交 LLM 整理成逐點回答。"""
+
+    provider: str = "openai"
+    base_url: str = "https://api.openai.com/v1"
+    model: str = "gpt-6-luna"
+    # 必須明確設定：不指定時推理會吃光 max_completion_tokens、回空字串（D4）
+    reasoning_effort: str = "low"
+    max_completion_tokens: int = 2000
+    timeout: float = 60.0
+    # 每則 note 送進模型的正文節錄上限（字元；D11 實測用 6000）
+    snippet_max_chars: int = 6000
+
+
+@dataclass(frozen=True)
 class WorkerConfig:
     # 同一則 note、同一版本最多嘗試幾次，超過標記失敗
     max_attempts: int = 3
@@ -158,6 +173,9 @@ class McpConfig:
     # `upload` 工具可讀取的額外目錄（以 os.pathsep 分隔，Windows 為 ';'）。
     # 殼的工作目錄一律在白名單內（A19 D10-6）；殼能讀到其下任何檔案
     upload_roots: str | None = None
+    # `ask` 工具的請求逾時（秒）：要涵蓋服務端檢索 + 模型呼叫（ask.timeout），
+    # 所以比一般請求的 timeout 長
+    ask_timeout: float = 90.0
 
 
 @dataclass(frozen=True)
@@ -220,6 +238,7 @@ class Config:
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     summary: SummaryConfig = field(default_factory=SummaryConfig)
+    ask: AskConfig = field(default_factory=AskConfig)
     worker: WorkerConfig = field(default_factory=WorkerConfig)
     backup: BackupConfig = field(default_factory=BackupConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
@@ -232,6 +251,7 @@ _SECTIONS: dict[str, type] = {
     "database": DatabaseConfig,
     "embedding": EmbeddingConfig,
     "summary": SummaryConfig,
+    "ask": AskConfig,
     "worker": WorkerConfig,
     "backup": BackupConfig,
     "api": ApiConfig,
@@ -370,6 +390,10 @@ def _validate(config: Config) -> None:
     if not config.summary.reasoning_effort.strip():
         # 不指定 effort 會回空字串（D4），不允許清空
         raise ConfigError("summary.reasoning_effort 不可為空")
+    if config.ask.provider != "openai":
+        raise ConfigError(f"不支援的 ask provider：{config.ask.provider}")
+    if not config.ask.reasoning_effort.strip():
+        raise ConfigError("ask.reasoning_effort 不可為空")
     positive = {
         "embedding.dim": config.embedding.dim,
         "embedding.timeout": config.embedding.timeout,
@@ -377,6 +401,9 @@ def _validate(config: Config) -> None:
         "embedding.cold_query_timeout": config.embedding.cold_query_timeout,
         "summary.max_completion_tokens": config.summary.max_completion_tokens,
         "summary.timeout": config.summary.timeout,
+        "ask.max_completion_tokens": config.ask.max_completion_tokens,
+        "ask.timeout": config.ask.timeout,
+        "ask.snippet_max_chars": config.ask.snippet_max_chars,
         "worker.max_attempts": config.worker.max_attempts,
         "worker.batch_size": config.worker.batch_size,
         "worker.poll_interval": config.worker.poll_interval,
@@ -384,6 +411,7 @@ def _validate(config: Config) -> None:
         "backup.max_age_hours": config.backup.max_age_hours,
         "mcp.timeout": config.mcp.timeout,
         "mcp.snapshot_max_age_hours": config.mcp.snapshot_max_age_hours,
+        "mcp.ask_timeout": config.mcp.ask_timeout,
         "documents.max_file_bytes": config.documents.max_file_bytes,
         "documents.max_chars": config.documents.max_chars,
         "documents.chunk_max_tokens": config.documents.chunk_max_tokens,
