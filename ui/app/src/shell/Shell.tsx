@@ -9,7 +9,7 @@ import type { ApiClient, Notice } from '../lib/api';
 import { ALL, AppContext, type AppEnv, type HealthBadge, type ToastKind, type VaultsState } from '../lib/context';
 import { describeError, recallDegradedBadge } from '../lib/format';
 import { healthBadge } from '../lib/health';
-import { loadSpace, saveSpace, type Theme } from '../lib/prefs';
+import { loadSpace, loadVaultsCollapsed, saveSpace, saveVaultsCollapsed, type Theme } from '../lib/prefs';
 import { SCREENS, routePath, useRoute, type ScreenId } from '../lib/router';
 import { createShortcutHandler, SHORTCUTS } from '../lib/shortcuts';
 import { SPACES, type SpaceId } from '../lib/spaces';
@@ -61,6 +61,14 @@ export function Shell({ api, principal, author, limits, theme, onToggleTheme, de
   // 窄螢幕的側欄抽屜與快捷鍵說明
   const [navOpen, setNavOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  // 側欄 vault 區段：可收合（記住狀態），展開時限高捲動，讓下方寫入位置留在首屏
+  const [vaultsCollapsed, setVaultsCollapsed] = useState(loadVaultsCollapsed);
+  const vaultList = useRef<HTMLUListElement>(null);
+  const toggleVaults = () =>
+    setVaultsCollapsed((c) => {
+      saveVaultsCollapsed(!c);
+      return !c;
+    });
   const menuBtn = useRef<HTMLButtonElement>(null);
   const sidebar = useRef<HTMLElement>(null);
 
@@ -172,6 +180,13 @@ export function Shell({ api, principal, author, limits, theme, onToggleTheme, de
     // navigate／switchSpace 每次 render 都是新函式，但行為不變；不列入以免畫面重掛
     [api, principal, author, limits, space, vaults, vault, toast, health, degraded],
   );
+
+  // 目前選的 vault 捲進可視範圍（限高清單，選到下面的項目時不必自己捲）
+  useEffect(() => {
+    if (vaultsCollapsed) return;
+    const active = vaultList.current?.querySelector<HTMLElement>('.lv-vaults__item.is-active');
+    if (active && typeof active.scrollIntoView === 'function') active.scrollIntoView({ block: 'nearest' });
+  }, [vault, vaultsCollapsed, vaults.items.length]);
 
   const degradedBadge = degraded ? recallDegradedBadge(degradedReason(degraded)) : null;
 
@@ -311,8 +326,27 @@ export function Shell({ api, principal, author, limits, theme, onToggleTheme, de
             </nav>
             <div class="lv-vaults">
               <div class="lv-vaults__head">
-                <span id="lv-vaults-label">VAULTS · {space.en}</span>
+                <button
+                  type="button"
+                  class="lv-vaults__toggle"
+                  id="lv-vaults-label"
+                  aria-expanded={!vaultsCollapsed}
+                  aria-controls="lv-vaults-body"
+                  onClick={toggleVaults}
+                >
+                  <span class="lv-vaults__caret" aria-hidden="true">
+                    {vaultsCollapsed ? '▸' : '▾'}
+                  </span>
+                  VAULTS · {space.en}
+                  {vaults.items.length > 0 && <span class="lv-vaults__total">{vaults.items.length}</span>}
+                </button>
+                {vaultsCollapsed && vault !== ALL && (
+                  <span class="lv-vaults__current" title={vault}>
+                    {vaultLabel}
+                  </span>
+                )}
               </div>
+              <div id="lv-vaults-body" hidden={vaultsCollapsed}>
               {vaults.loading && <p class="lv-vaults__empty">載入中…</p>}
               {vaults.error && (
                 <p class="lv-vaults__empty lv-vaults__error" role="alert">
@@ -326,7 +360,7 @@ export function Shell({ api, principal, author, limits, theme, onToggleTheme, de
                 <EmptyState size="sm" title="還沒有 vault" />
               )}
               {vaults.items.length > 0 && (
-                <ul class="lv-vaults__list" aria-labelledby="lv-vaults-label">
+                <ul class="lv-vaults__list" aria-labelledby="lv-vaults-label" ref={vaultList}>
                   <li>
                     <button
                       type="button"
@@ -356,6 +390,7 @@ export function Shell({ api, principal, author, limits, theme, onToggleTheme, de
                   ))}
                 </ul>
               )}
+              </div>
             </div>
             <div class="lv-write-target">
               <div class="lv-write-target__label">目前寫入位置</div>

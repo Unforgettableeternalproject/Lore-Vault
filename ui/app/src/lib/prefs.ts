@@ -6,6 +6,7 @@ export type Theme = 'dark' | 'light';
 
 const THEME_KEY = 'lore-vault.theme';
 const SPACE_KEY = 'lore-vault.space';
+const VAULTS_COLLAPSED_KEY = 'lore-vault.sidebar-vaults-collapsed';
 
 function read(key: string): string | null {
   try {
@@ -38,6 +39,15 @@ export function loadSpace(): SpaceId {
 
 export function saveSpace(space: SpaceId): void {
   write(SPACE_KEY, space);
+}
+
+/** 側欄 vault 區段是否收合（預設展開）。 */
+export function loadVaultsCollapsed(): boolean {
+  return read(VAULTS_COLLAPSED_KEY) === '1';
+}
+
+export function saveVaultsCollapsed(collapsed: boolean): void {
+  write(VAULTS_COLLAPSED_KEY, collapsed ? '1' : '0');
 }
 
 // 署名（A22 author）不是偏好：一律用登入帳號的顯示名稱（session display_name，A23），

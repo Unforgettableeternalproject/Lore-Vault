@@ -380,7 +380,20 @@ button { font: inherit; }
 .lv-select { font-family: var(--font-sans); font-size: var(--lv-fs-body); max-width: 100%; min-width: 0; }
 
 /* 側欄 vault 列表 */
-.lv-vaults__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.lv-vaults__list {
+  list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px;
+  /* 約 9 項高（含「本 space 全部」），其餘在清單內捲動，下方寫入位置留在首屏 */
+  max-height: calc(9 * 34px); overflow-y: auto; overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+.lv-vaults__toggle {
+  display: inline-flex; align-items: center; gap: 6px; padding: 2px 0; background: none; border: none; cursor: pointer;
+  font: inherit; letter-spacing: inherit; color: inherit;
+}
+.lv-vaults__toggle:hover { color: var(--ink); }
+.lv-vaults__caret { width: 12px; font-family: var(--font-sans); font-size: 12px; }
+.lv-vaults__total { margin-left: 4px; color: var(--ink-mute); letter-spacing: 0; }
+.lv-vaults__current { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-soft); letter-spacing: 0; font-family: var(--font-sans); }
 .lv-vaults__item {
   width: 100%; display: flex; justify-content: space-between; gap: 8px; align-items: baseline;
   padding: 7px 10px; background: none; border: none; border-left: 2px solid transparent;
@@ -1111,6 +1124,9 @@ details.lv-check > .lv-check__head { cursor: pointer; }
   .lv-sidebar__tools { display: flex; gap: 8px; }
   .lv-sidebar__tools .lv-icon-btn { width: 44px; height: 44px; padding: 0; }
   .lv-write-target { margin-top: 0; }
+  /* 抽屜本身可捲動：手機不再做內層捲動 */
+  .lv-vaults__list { max-height: none; overflow: visible; }
+  .lv-vaults__toggle { min-height: 44px; }
 
   .lv-main { padding: 20px var(--gutter-mobile) 64px; }
   .lv-title { font-size: 32px; margin-bottom: 18px; }
