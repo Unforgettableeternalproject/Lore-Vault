@@ -13,6 +13,7 @@ import {
   groupChecks,
   healthBadge,
   hoursSince,
+  parseBackupDetail,
 } from '../lib/health';
 import type { BacklogStatus, CheckStatus, DoctorCheck, EpisodeSummary, StatusResult, WorkerStatus } from '../lib/types';
 
@@ -177,7 +178,7 @@ function StatusView({ status }: { status: StatusResult }) {
           </div>
           <div class="lv-side-block">
             <div class="lv-side-block__label">服務狀態</div>
-            <dl class="lv-kv">
+            <dl class="lv-kv lv-kv--stack">
               <dt>最近備份</dt>
               <dd data-testid="health-backup">
                 <BackupView check={backup} />
@@ -284,11 +285,16 @@ function BacklogView({ title, backlog, worker }: { title: string; backlog: Backl
 function BackupView({ check }: { check: DoctorCheck | null }) {
   if (!check) return <span class="lv-muted">服務未回報備份檢查</span>;
   if (check.status === 'skipped') return <span class="lv-muted">未檢查：{check.summary}</span>;
-  const last = check.details.find((d) => d.startsWith('最近一次')) ?? null;
+  const last = parseBackupDetail(check.details.find((d) => d.startsWith('最近一次')) ?? null);
   return (
     <span class={check.status === 'pass' ? undefined : 'lv-text-error'}>
       {check.summary}
-      {last && <span class="lv-status__raw">{last}</span>}
+      {last && (
+        <span class="lv-status__raw" data-testid="health-backup-last">
+          最近一次：{last.time}
+          {last.file && <span class="lv-backup-file lv-mono">{last.file}</span>}
+        </span>
+      )}
     </span>
   );
 }

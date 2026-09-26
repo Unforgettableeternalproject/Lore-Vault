@@ -821,7 +821,7 @@ button.lv-wikilink { background: none; border: none; border-bottom: 1px dashed v
 .lv-health-count--fail.is-nonzero .lv-health-count__n { color: var(--lv-error-text); }
 .lv-health-count--warn.is-nonzero { border-color: var(--uep-gold); background: color-mix(in srgb, var(--uep-gold) 8%, transparent); }
 .lv-health-count--warn.is-nonzero .lv-health-count__n { color: var(--lv-gold-text); }
-.lv-health-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 300px); gap: 32px; }
+.lv-health-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 400px); gap: 32px; }
 .lv-health-groups { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
 .lv-health-side { display: flex; flex-direction: column; gap: 28px; }
 .lv-check-group { border: 1px solid var(--line); }
@@ -847,6 +847,10 @@ details.lv-check > .lv-check__head { cursor: pointer; }
 .lv-kv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 16px; margin: 0; font-size: var(--lv-fs-body); }
 .lv-kv dt { font-family: var(--font-mono); font-size: var(--lv-fs-meta); letter-spacing: .12em; color: var(--ink-mute); padding-top: 2px; }
 .lv-kv dd { margin: 0; overflow-wrap: anywhere; }
+/* 側欄的 key-value：標籤在上、值在下，窄欄不擠壓換行 */
+.lv-kv--stack { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+.lv-kv--stack dd + dt { margin-top: 12px; }
+.lv-backup-file { display: block; margin-top: 2px; color: var(--ink-mute); overflow-wrap: anywhere; }
 /* 寬鬆版 key-value（連線設定）：固定標籤欄寬、拉開行距與欄距；手機改上下堆疊 */
 .lv-kv--roomy { grid-template-columns: minmax(96px, 150px) minmax(0, 1fr); gap: 14px 32px; font-size: 14px; line-height: 1.6; }
 .lv-kv--roomy dt { font-size: var(--lv-fs-meta); padding-top: 3px; }

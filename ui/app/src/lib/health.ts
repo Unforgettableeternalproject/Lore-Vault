@@ -1,5 +1,6 @@
 // `/v1/status` 的整理：頂列徽章計數、doctor 分組排序、備份與收料新鮮度判讀。
 import type { HealthBadge } from './context';
+import { formatTime } from './format';
 import type { CheckStatus, DoctorCheck, StatusResult } from './types';
 
 export function healthBadge(status: StatusResult): HealthBadge {
@@ -70,4 +71,15 @@ export function formatAge(hours: number | null): string {
   if (hours < 1) return `${Math.round(hours * 60)} 分鐘前`;
   if (hours < 48) return `${hours.toFixed(1)} 小時前`;
   return `${Math.round(hours / 24)} 天前`;
+}
+
+/**
+ * 服務的備份明細是「最近一次：<ISO 時間>（<檔名>）」：時間改成全站一致的本地格式，檔名另列。
+ * 格式不符就原樣顯示，不吞掉資訊。
+ */
+export function parseBackupDetail(detail: string | null): { time: string; file: string | null } | null {
+  if (!detail) return null;
+  const m = /^最近一次：\s*(\S+?)\s*(?:（(.+)）)?$/.exec(detail);
+  if (!m) return { time: detail.replace(/^最近一次：\s*/, ''), file: null };
+  return { time: formatTime(m[1]), file: m[2] ?? null };
 }
