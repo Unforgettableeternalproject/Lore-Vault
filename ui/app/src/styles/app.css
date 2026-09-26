@@ -515,9 +515,16 @@ button { font: inherit; }
 .lv-filters { display: flex; flex-wrap: wrap; gap: 24px; margin: 28px 0 0; align-items: center; }
 .lv-filters__label { font-family: var(--font-mono); font-size: 10px; letter-spacing: .16em; color: var(--ink-mute); margin-right: 4px; }
 .lv-table { margin-top: 20px; }
+/* 欄寬定義在表格本身，表頭與每一列用 subgrid 共用同一組欄線：
+   有 auto 欄（操作鈕）時各列各算寬度會錯位（表頭沒有按鈕、該欄寬 0） */
+.lv-table--notes, .lv-table--docs, .lv-table--vaults { display: grid; column-gap: 16px; }
+.lv-table > * { grid-column: 1 / -1; }
 .lv-table__head, .lv-table__row { display: grid; gap: 16px; padding: 12px 14px; align-items: start; }
-.lv-table--notes .lv-table__head, .lv-table--notes .lv-table__row { grid-template-columns: minmax(0, 1fr) minmax(0, 200px) minmax(0, 180px) 120px; }
-.lv-table--docs .lv-table__head, .lv-table--docs .lv-table__row { grid-template-columns: minmax(0, 1fr) 56px 72px minmax(0, 240px) 90px auto; }
+.lv-table--notes > .lv-table__head, .lv-table--notes > .lv-table__row,
+.lv-table--docs > .lv-table__head, .lv-table--docs > .lv-table__row,
+.lv-table--vaults > .lv-table__head, .lv-table--vaults > .lv-table__row { grid-template-columns: subgrid; }
+.lv-table--notes { grid-template-columns: minmax(0, 1fr) minmax(0, 200px) minmax(0, 180px) 120px; }
+.lv-table--docs { grid-template-columns: minmax(0, 1fr) 64px 80px minmax(0, 240px) 100px auto; }
 .lv-table__head {
   border-bottom: 1px solid var(--line-strong); font-family: var(--font-mono); font-size: 10px;
   letter-spacing: .14em; color: var(--ink-mute);
@@ -730,7 +737,7 @@ button.lv-wikilink { background: none; border: none; border-bottom: 1px dashed v
 .lv-inline-form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
 .lv-inline-form .lv-input { flex: 1 1 220px; min-width: 0; }
 .lv-inline-form .lv-notice { flex-basis: 100%; margin: 4px 0 0; }
-.lv-table--vaults .lv-table__head, .lv-table--vaults .lv-table__row { grid-template-columns: minmax(0, 1fr) 56px 56px 120px 110px auto; }
+.lv-table--vaults { grid-template-columns: minmax(0, 1fr) 64px 64px 130px 110px auto; }
 
 .lv-section { margin-top: 32px; padding-top: 20px; border-top: 1px solid var(--line); }
 .lv-section__head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
@@ -973,9 +980,10 @@ details.lv-check > .lv-check__head { cursor: pointer; }
   .lv-header { gap: 14px; padding: 0 16px; }
   .lv-header .uep-brand-subtitle, .lv-space__hint { display: none; }
   .lv-conn { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .lv-table--notes .lv-table__head, .lv-table--notes .lv-table__row { grid-template-columns: minmax(0, 1fr) 96px 96px 84px; gap: 10px; }
-  .lv-table--docs .lv-table__head, .lv-table--docs .lv-table__row { grid-template-columns: minmax(0, 1fr) 44px 64px minmax(0, 160px) 76px auto; gap: 10px; }
-  .lv-table--vaults .lv-table__head, .lv-table--vaults .lv-table__row { grid-template-columns: minmax(0, 1fr) 44px 44px 96px 84px auto; gap: 10px; }
+  .lv-table--notes { grid-template-columns: minmax(0, 1fr) 110px 110px 96px; column-gap: 10px; }
+  .lv-table--docs { grid-template-columns: minmax(0, 1fr) 52px 72px minmax(0, 160px) 84px auto; column-gap: 10px; }
+  .lv-table--vaults { grid-template-columns: minmax(0, 1fr) 52px 52px 110px 90px auto; column-gap: 10px; }
+  .lv-table__head, .lv-table__row { gap: 10px; }
   .lv-doc__grid { grid-template-columns: minmax(140px, 180px) minmax(0, 1fr); gap: 24px; }
   .lv-health-grid, .lv-memory-grid { grid-template-columns: minmax(0, 1fr); }
   .lv-detail { gap: 32px; }
@@ -984,6 +992,7 @@ details.lv-check > .lv-check__head { cursor: pointer; }
 @media (max-width: 900px) {
   .lv-conn { display: none; }
   .lv-table__head { display: none; }
+  .lv-table--notes, .lv-table--docs, .lv-table--vaults { display: block; }
   .lv-table--notes .lv-table__row, .lv-table--docs .lv-table__row, .lv-table--vaults .lv-table__row {
     grid-template-columns: minmax(0, 1fr); gap: 6px;
   }
