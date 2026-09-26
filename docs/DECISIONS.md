@@ -21,6 +21,7 @@
 | A15 | MCP 為各機器本地 stdio 殼、轉發服務 HTTP，並負責快照拉取與不可達降級；服務自帶 bearer token（本機也需帶），遠端再經 Cloudflare Access service token；`pm-proxy.py` 退役。對外沿用 `pm` 與 `pm-api` 子網域 | 艾斯維爾 2026-09-26 同意 D8 提案（先試做） |
 | A16 | U.E.P 接口（D6）不在本次範圍；使用者 UI 在目前部分完成後接著做，設計系統由艾斯維爾提供 | 艾斯維爾 2026-09-26 |
 | A17 | 管線寫回 concept 時，repo-scope 的 vault 歸屬：先依 `source_turns` 查來源 episode 的 vault（A），查不到再以 scope 比對 vault 的顯示名／別名（B），都失敗或有歧義則明確拒收不猜。同名 repo 以組織名區分（scope 寫成 `org/repo`）。repo 改名由之後的 UI 提供別名／重新導向管理 | 艾斯維爾 2026-09-26 |
+| A18 | 內容分群：space 先分 `dev`／`lore`／`personal`，現有 vault 全歸 `dev`。agent 預設讀 `dev`，**不以 token 限制**；以 MCP 工具切換「目前 space」，其餘工具只回傳目前 space 的內容。檔案存儲與檢索納入範圍（D10 提案方向），Podcast 不做 | 艾斯維爾 2026-09-26 |
 
 ## 待裁決
 
@@ -144,7 +145,7 @@ Ollama 另裝了 `nomic-embed-text`，PM 未使用。
 - 檢索預設限同一 space，跨 space 需明示（同 vault 硬範圍的做法）
 - token 綁可存取的 space：coding agent 與遠端 MCP 殼預設只開 `dev`，U.E.P 開 `lore`，避免私人內容被所有 agent 檢索
 
-待定：space 名稱與數量、token 範圍是否採用、與 PM 切換的先後順序。
+**已定案（A18）**：不採 token 範圍限制，改為 MCP 切換目前 space。
 
 ### D10 檔案（文件）存儲與檢索
 
