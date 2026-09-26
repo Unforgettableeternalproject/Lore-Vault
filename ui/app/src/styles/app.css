@@ -330,7 +330,10 @@ button { font: inherit; }
 .lv-muted { color: var(--ink-mute); }
 .lv-mono { font-family: var(--font-mono); font-size: 11px; }
 /* 橫向溢出的根因：vault key、錨點路徑等不含空白的長 mono 字串撐破容器。一律允許任意處斷行 */
-.lv-mono, .lv-code-tag, .lv-crumb, .lv-crumb__link, .lv-eyebrow { overflow-wrap: anywhere; min-width: 0; }
+.lv-mono, .lv-code-tag, .lv-crumb, .lv-crumb__link, .lv-eyebrow, .lv-title,
+.lv-table__summary, .lv-summary-box__text { overflow-wrap: anywhere; min-width: 0; }
+/* 摘要裡的長路徑（例如 `C:/Users/.../watch.py`）：flex 子項預設 min-width:auto 會撐寬整列 */
+.lv-table__summary > * { min-width: 0; }
 .lv-crumb__link { text-align: left; }
 .lv-small { font-size: 11px; }
 .lv-upper { text-transform: uppercase; }
