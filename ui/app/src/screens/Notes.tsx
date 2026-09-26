@@ -7,6 +7,7 @@
 import { useEffect, useState } from 'preact/hooks';
 
 import { Banner, ErrorState, Loading, SourceTag } from '../components/ui';
+import { VaultPicker } from '../components/VaultPicker';
 import { useApp, vaultName } from '../lib/context';
 import { authorLabel, daysAgoIso, describeError, formatTime, isAbort } from '../lib/format';
 import { routePath } from '../lib/router';
@@ -126,6 +127,7 @@ export function Notes() {
       </div>
 
       <div class="lv-filters">
+        <VaultPicker />
         <div class="lv-chips" role="group" aria-label="標籤篩選">
           <span class="lv-filters__label">TAGS</span>
           <button type="button" class={'lv-chip lv-chip--mono' + (tag === null ? ' is-on' : '')} aria-pressed={tag === null} onClick={() => setTag(null)}>

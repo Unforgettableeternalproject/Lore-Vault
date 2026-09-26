@@ -476,6 +476,41 @@ button { font: inherit; }
 .lv-truncated__text strong { color: var(--ink-title); }
 
 /* ── 列表（筆記／文件）──────────────────────────────────── */
+/* 頁面內 vault 篩選器（components/VaultPicker）：可搜尋的下拉，與側欄共用 AppEnv.vault */
+.lv-vpick { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.lv-vpick__box { position: relative; flex: 1 1 auto; width: 300px; max-width: 100%; min-width: 0; }
+.lv-vpick__input {
+  width: 100%; box-sizing: border-box; padding: 7px 30px 7px 10px; background: var(--bg-sunken);
+  border: 1px solid var(--line-strong); border-radius: var(--lv-radius-control); color: var(--ink);
+  font-family: var(--font-sans); font-size: 13px; cursor: pointer; text-overflow: ellipsis;
+}
+.lv-vpick__input:focus { border-color: var(--zone-stroke, var(--uep-gold)); cursor: text; }
+.lv-vpick__input::placeholder { color: var(--ink-mute); opacity: 1; }
+.lv-vpick__caret {
+  position: absolute; right: 10px; top: 50%; transform: translateY(-50%); pointer-events: none;
+  font-size: 11px; color: var(--ink-mute);
+}
+.lv-vpick.is-open .lv-vpick__caret { transform: translateY(-50%) rotate(180deg); }
+.lv-vpick__list {
+  position: absolute; left: 0; top: calc(100% + 4px); z-index: 60; width: max(100%, 320px); max-width: min(420px, calc(100vw - 2 * var(--gutter-mobile)));
+  max-height: 340px; overflow-y: auto; margin: 0; padding: 4px; list-style: none;
+  background: var(--bg-card); border: 1px solid var(--line-strong); border-radius: var(--lv-radius-control);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, .35);
+}
+.lv-vpick__opt {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 8px 10px;
+  border-left: 2px solid transparent; cursor: pointer; color: var(--ink-soft);
+}
+.lv-vpick__opt.is-active { background: var(--zone-tint); color: var(--ink); --ink-mute: var(--ink-soft); }
+.lv-vpick__opt.is-current { border-left-color: var(--zone-soft); color: var(--ink-title); }
+.lv-vpick__opt-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.lv-vpick__opt-label { font-size: 13px; overflow-wrap: anywhere; }
+.lv-vpick__opt-sub { font-family: var(--font-mono); font-size: 10px; color: var(--ink-mute); overflow-wrap: anywhere; }
+.lv-vpick__opt-count { flex: none; font-family: var(--font-mono); font-size: 10px; color: var(--ink-mute); white-space: nowrap; }
+.lv-vpick__empty { padding: 10px; font-size: 12px; color: var(--ink-mute); }
+.lv-filters--top { margin: -8px 0 20px; }
+.lv-filters--search { margin: 0; }
+
 .lv-filters { display: flex; flex-wrap: wrap; gap: 24px; margin: 28px 0 0; align-items: center; }
 .lv-filters__label { font-family: var(--font-mono); font-size: 10px; letter-spacing: .16em; color: var(--ink-mute); margin-right: 4px; }
 .lv-table { margin-top: 20px; }
@@ -968,5 +1003,9 @@ details.lv-check > .lv-check__head { cursor: pointer; }
   }
   .lv-link-btn { margin-left: 0; padding: 0 4px; }
   .lv-input, .lv-select { min-height: 44px; font-size: 16px; }
+  .lv-vpick { flex: 1 1 100%; }
+  .lv-vpick__box { width: auto; }
+  .lv-vpick__input { min-height: 44px; font-size: 16px; }
+  .lv-vpick__opt { min-height: 44px; }
   .lv-search__input { font-size: 16px; }
 }

@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 
 import { Banner, ErrorState, Loading, TwoPhaseDelete } from '../components/ui';
+import { VaultPicker } from '../components/VaultPicker';
 import { ApiError } from '../lib/api';
 import { ALL, useApp, vaultName } from '../lib/context';
 import {
@@ -196,6 +197,9 @@ export function Docs() {
       <h1 id="lv-docs-title" class="lv-title">
         文件
       </h1>
+      <div class="lv-filters lv-filters--top">
+        <VaultPicker />
+      </div>
 
       <div
         class={'lv-drop' + (dragging ? ' is-dragging' : '')}

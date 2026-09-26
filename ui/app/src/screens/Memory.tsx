@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'preact/hooks';
 
 import { ErrorState, Loading } from '../components/ui';
+import { VaultPicker } from '../components/VaultPicker';
 import { ALL, useApp, vaultName } from '../lib/context';
 import { formatTime, isAbort } from '../lib/format';
 import { formatAge, hoursSince } from '../lib/health';
@@ -98,6 +99,7 @@ function ConceptList() {
   return (
     <div class="lv-memory-concepts">
       <div class="lv-filters lv-filters--tight">
+        <VaultPicker />
         <label class="lv-filters__group">
           <span class="lv-filters__label">類型</span>
           <select class="lv-select" value={kind} aria-label="concept 類型" onChange={(e) => setKind((e.target as HTMLSelectElement).value)}>
