@@ -1,5 +1,6 @@
 // 頁碼分頁：左側每頁筆數（10／30／50／100）與總數，右側首頁／上一頁／頁碼／下一頁／末頁與跳頁。
 // 搭配服務端的 offset／with_total（`/v1/list`、`/v1/concept_query`）；頁碼從 1 起算。
+// 載入中不停用按鈕（前一個請求會被取消），避免按鈕在載入時閃爍成停用樣式。
 import { useEffect, useState } from 'preact/hooks';
 
 export const PAGE_SIZES = [10, 30, 50, 100] as const;
@@ -84,10 +85,10 @@ export function Pager({
         </span>
       </div>
       <div class="lv-pager2__right">
-        <button type="button" class="btn-terminal lv-pager2__btn" disabled={page <= 1 || loading} onClick={() => go(1)} aria-label="第一頁">
+        <button type="button" class="btn-terminal lv-pager2__btn" disabled={page <= 1} onClick={() => go(1)} aria-label="第一頁">
           «
         </button>
-        <button type="button" class="btn-terminal lv-pager2__btn" disabled={page <= 1 || loading} onClick={() => go(page - 1)} aria-label="上一頁">
+        <button type="button" class="btn-terminal lv-pager2__btn" disabled={page <= 1} onClick={() => go(page - 1)} aria-label="上一頁">
           ‹
         </button>
         <ol class="lv-pager2__pages">
@@ -103,7 +104,6 @@ export function Pager({
                   class={'btn-terminal lv-pager2__btn' + (p === page ? ' is-current' : '')}
                   aria-current={p === page ? 'page' : undefined}
                   aria-label={`第 ${p} 頁`}
-                  disabled={loading && p !== page}
                   onClick={() => go(p)}
                 >
                   {p}
@@ -112,10 +112,10 @@ export function Pager({
             ),
           )}
         </ol>
-        <button type="button" class="btn-terminal lv-pager2__btn" disabled={page >= pages || loading} onClick={() => go(page + 1)} aria-label="下一頁">
+        <button type="button" class="btn-terminal lv-pager2__btn" disabled={page >= pages} onClick={() => go(page + 1)} aria-label="下一頁">
           ›
         </button>
-        <button type="button" class="btn-terminal lv-pager2__btn" disabled={page >= pages || loading} onClick={() => go(pages)} aria-label="最後一頁">
+        <button type="button" class="btn-terminal lv-pager2__btn" disabled={page >= pages} onClick={() => go(pages)} aria-label="最後一頁">
           »
         </button>
         <form class="lv-pager2__jump" onSubmit={submitJump}>
@@ -132,7 +132,7 @@ export function Pager({
             onInput={(e) => setJump((e.target as HTMLInputElement).value)}
           />
           <span aria-hidden="true">／{pages} 頁</span>
-          <button type="submit" class="btn-terminal lv-pager2__btn" disabled={loading}>
+          <button type="submit" class="btn-terminal lv-pager2__btn">
             前往
           </button>
         </form>
