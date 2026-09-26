@@ -405,3 +405,18 @@ KEY=VALUE、只用標準庫解析；行程環境變數中同名鍵優先。
 `pipeline.py --pull-episodes OUT.jsonl [--since UTC]`（`GET /v1/episodes`，全部 vault、依 cursor 讀到底）、
 `pipeline.py --push-concepts [--dry-run]`（`POST /v1/concepts` upsert；刪除＝上次推過、這次已不在池內的 id，
 記在 `pipeline_state.json`）。尚未接進 STAGES，三個判卷階段不變。
+
+## 文件存儲與抽取（T-58～T-62，上傳／worker／索引尚未接上）
+
+- schema v8：`documents`（必屬某 vault，查詢經 `vault_clause` 強制 space＋vault）、`document_chunks`、
+  `chunk_fts`（比照 `note_fts`）、`document_chunk_embeddings`、`document_tombstones`、`document_enrichment`。
+  metadata 原語在 `storage/documents.py`。
+- blob：`storage/blobs.py` 的 `BlobStore`，`<documents.blob_dir>/<sha256 前 2 碼>/<sha256>`，同目錄暫存檔＋`os.replace`，
+  讀取驗雜湊。容器內 `blob_dir = "/data/blobs"`（named volume），不刪 blob（孤兒由 doctor 回報）。
+- 抽取器：`lore_vault.documents.extract.extract(data, filename, mime, limits=Limits.from_config(cfg.documents))`，
+  成功回 `Extraction`（segments 非空），失敗拋 `ExtractionError(code, detail)`；格式判定與錯誤碼見模組 docstring。
+- 設定 `[documents]`：`blob_dir`、`max_file_bytes`（25MB）、`max_chars`（200 萬）、`min_chars`（50，pdf／docx／pptx
+  去空白字數低於此值為 `empty_extraction`）。
+- doctor 分類 `documents`（`--blob-dir`，未給則取設定 `documents.blob_dir`，都沒有為 skipped）：
+  - `documents.blob_exists`：任何 document 引用的 blob 遺失或雜湊不符為 fail（不分狀態）
+  - `documents.orphan_blobs`：無引用的 blob、不符佈局的檔案、超過 1 小時的遺留暫存檔為 warn

@@ -19,6 +19,7 @@ from .concept_snapshot_check import (
     concept_snapshot_age,
     concept_snapshot_path_agreement,
 )
+from .documents_check import documents_blob_exists, documents_orphan_blobs
 from .framework import Check, CheckResult, CheckSkipped, DoctorContext, Registry
 from .hook_imports import DEFAULT_HOOKS_DIR, DEFAULT_SPIKE_DIR, check_hook_imports
 from .snapshot_check import snapshot_age, snapshot_schema
@@ -226,6 +227,19 @@ def default_registry() -> Registry:
         ),
     ):
         registry.add(Check(name, "space", func, description))
+    for name, func, description in (
+        (
+            "documents.blob_exists",
+            documents_blob_exists,
+            "document 引用的 blob 都存在且內容雜湊正確",
+        ),
+        (
+            "documents.orphan_blobs",
+            documents_orphan_blobs,
+            "沒有 document 引用的 blob、不明檔案、遺留暫存檔（非零為 warn）",
+        ),
+    ):
+        registry.add(Check(name, "documents", func, description))
     for name, func, description in (
         (
             "enrich.failed",

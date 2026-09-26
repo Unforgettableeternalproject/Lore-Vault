@@ -260,6 +260,124 @@ def _v7(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+# v8 發佈時的抽取錯誤碼（A19、設計 4.3），展開進 v8 的 CHECK。
+# 已發佈、不可改：改了會讓新建庫與既有庫的 v8 不一致。要新增錯誤碼時另加一個
+# 遷移重建 CHECK，並把 DOCUMENT_ERROR_CODES 指向新的清單。
+_V8_ERROR_CODES = (
+    "encrypted",
+    "corrupt",
+    "empty_extraction",
+    "too_large",
+    "unsupported_format",
+    "unsupported_encoding",
+)
+_V8_ERROR_CODE_LIST = ", ".join(f"'{code}'" for code in _V8_ERROR_CODES)
+
+# 目前 schema 接受的錯誤碼；與 `documents.extract.ERROR_CODES` 同步（測試比對）
+DOCUMENT_ERROR_CODES = _V8_ERROR_CODES
+
+# 文件存儲（A19，T-58；設計 SPACES_AND_DOCUMENTS.md 3.1／3.2／4.4）：
+# - documents：每個 vault 各自一列 metadata；space 由 vault 決定，查詢一律經
+#   `vaults.vault_clause`。原始檔以 sha256 內容定址存在 blob 目錄（跨 vault 共用）。
+#   (vault, sha256) 刻意不設 UNIQUE：同 vault 去重由上傳端處理（T-67），
+#   failed 後重新上傳的語意尚未定案，唯一鍵會先把路堵死。
+#   status='failed' 與 error_code 非空互為充要條件；錯誤碼只收白名單。
+# - document_chunks：seq 是 FTS／向量表的關聯鍵（比照 notes.seq）；locator 為 JSON。
+# - chunk_fts：比照 note_fts（有內容、rowid = document_chunks.seq、CJK bigram 由
+#   Python 展開）。設計草案寫 contentless（content=''），但 contentless 表刪列需要
+#   contentless_delete=1（SQLite 3.43+，高於 sqlite_check 的 3.37 下限），而版本
+#   取代與刪除都要能清索引列，所以改用與 note_fts 同一套。
+# - document_chunk_embeddings：比照 note_embeddings，隨 chunk CASCADE 刪除。
+# - document_tombstones：刻意無外鍵（document 與 vault 都刪了，墓碑還要在）。
+# - document_enrichment：抽取的嘗試／退避紀錄（佇列本身由 status='pending' 推導）。
+#   文件內容不可變（新版本＝新列），不需要 note_enrichment 的 for_updated。
+_V8_STATEMENTS: tuple[str, ...] = (
+    f"""
+    CREATE TABLE documents (
+        id           TEXT PRIMARY KEY CHECK (id LIKE 'doc:_%'),
+        vault        TEXT NOT NULL REFERENCES vaults(key),
+        filename     TEXT NOT NULL CHECK (length(trim(filename)) > 0),
+        mime         TEXT NOT NULL,
+        size_bytes   INTEGER NOT NULL CHECK (size_bytes >= 0),
+        sha256       TEXT NOT NULL CHECK (
+            length(sha256) = 64 AND sha256 = lower(sha256)
+            AND sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
+        version      INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
+        supersedes   TEXT REFERENCES documents(id),
+        status       TEXT NOT NULL
+            CHECK (status IN ('pending', 'extracting', 'ready', 'failed')),
+        error_code   TEXT
+            CHECK (error_code IS NULL OR error_code IN ({_V8_ERROR_CODE_LIST})),
+        error_detail TEXT,
+        chunk_count  INTEGER NOT NULL DEFAULT 0 CHECK (chunk_count >= 0),
+        created      TEXT NOT NULL,
+        updated      TEXT NOT NULL,
+        CHECK ((status = 'failed') = (error_code IS NOT NULL)),
+        CHECK (supersedes IS NULL OR supersedes != id)
+    ) STRICT
+    """,
+    "CREATE INDEX documents_vault_updated ON documents(vault, updated, id)",
+    "CREATE INDEX documents_vault_sha256 ON documents(vault, sha256)",
+    "CREATE INDEX documents_sha256 ON documents(sha256)",
+    "CREATE INDEX documents_status ON documents(status, updated)",
+    "CREATE INDEX documents_supersedes ON documents(supersedes)",
+    """
+    CREATE TABLE document_chunks (
+        seq         INTEGER PRIMARY KEY,
+        document_id TEXT NOT NULL REFERENCES documents(id),
+        idx         INTEGER NOT NULL CHECK (idx >= 0),
+        text        TEXT NOT NULL,
+        locator     TEXT NOT NULL CHECK (json_valid(locator)),
+        UNIQUE (document_id, idx)
+    ) STRICT
+    """,
+    f"""
+    CREATE VIRTUAL TABLE chunk_fts USING fts5(
+        content, tokenize = "{FTS_TOKENIZE}"
+    )
+    """,
+    """
+    CREATE TABLE document_chunk_embeddings (
+        chunk_seq INTEGER PRIMARY KEY
+            REFERENCES document_chunks(seq) ON DELETE CASCADE,
+        dim       INTEGER NOT NULL CHECK (dim > 0),
+        vector    BLOB NOT NULL,
+        model     TEXT,
+        updated   TEXT NOT NULL
+    ) STRICT
+    """,
+    """
+    CREATE TABLE document_tombstones (
+        document_id TEXT PRIMARY KEY CHECK (length(trim(document_id)) > 0),
+        vault       TEXT NOT NULL,
+        sha256      TEXT NOT NULL CHECK (length(sha256) = 64),
+        deleted_at  TEXT NOT NULL,
+        reason      TEXT NOT NULL
+    ) STRICT
+    """,
+    "CREATE INDEX document_tombstones_vault ON document_tombstones(vault)",
+    """
+    CREATE TABLE document_enrichment (
+        document_id  TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+        kind         TEXT NOT NULL CHECK (kind IN ('extract')),
+        attempts     INTEGER NOT NULL CHECK (attempts >= 0),
+        status       TEXT NOT NULL CHECK (status IN ('pending', 'failed')),
+        last_error   TEXT,
+        last_attempt TEXT NOT NULL,
+        next_attempt TEXT NOT NULL,
+        PRIMARY KEY (document_id, kind)
+    ) STRICT
+    """,
+    "CREATE INDEX document_enrichment_status ON document_enrichment(kind, status)",
+)
+
+
+def _v8(conn: sqlite3.Connection) -> None:
+    for statement in _V8_STATEMENTS:
+        conn.execute(statement)
+
+
 # 有序遷移：索引 i 的函式把版本從 i 升到 i+1。只能往後加，不可改動已發佈的項目。
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _v1,
@@ -269,6 +387,7 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _v5,
     _v6,
     _v7,
+    _v8,
 )
 
 SCHEMA_VERSION = len(MIGRATIONS)

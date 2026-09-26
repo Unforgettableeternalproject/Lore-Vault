@@ -76,3 +76,14 @@ snapshot_max_age_hours = 24.0
 # PreToolUse 讀的 concept 快照檔（GET /v1/concepts/export）；未設定時為 <snapshot_dir>/concepts.json
 # hook 端以 client.env 的 LORE_VAULT_CONCEPT_SNAPSHOT 指向同一個檔才會改讀它
 # concept_snapshot_path = "C:/path/to/lore-vault/snapshot/concepts.json"
+
+[documents]
+# 文件原始檔（blob，依 sha256 內容定址、去重）目錄；無預設，未設定時不能收文件。
+# docker 內為 /data/blobs（named volume），不要放 NTFS bind mount
+# blob_dir = "C:/path/to/lore-vault/blobs"
+# 單檔原始大小上限（位元組，預設 25MB）
+max_file_bytes = 26214400
+# 抽出文字總長上限（字元）；超過標 too_large
+max_chars = 2000000
+# pdf／docx／pptx 抽出文字去空白後少於此字數標 empty_extraction（多半是掃描件）
+min_chars = 50

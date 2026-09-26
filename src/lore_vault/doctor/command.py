@@ -116,6 +116,10 @@ def main(
         help="MCP 殼寫入的 concept 快照（未給則由設定推導；路徑一致性對帳用）",
     )
     parser.add_argument(
+        "--blob-dir",
+        help="文件 blob 目錄（documents 對帳用；未給則取設定的 documents.blob_dir）",
+    )
+    parser.add_argument(
         "--config", help="Lore Vault 設定檔（未給則依 LORE_VAULT_CONFIG）"
     )
     args = parser.parse_args(argv)
@@ -151,6 +155,7 @@ def main(
             "concept_snapshot_max_age_hours": args.concept_snapshot_max_age_hours,
             "mcp_concept_snapshot_path": args.mcp_concept_snapshot_path,
             "config": args.config,
+            "blob_dir": args.blob_dir,
         }
         settings.update({k: v for k, v in optional.items() if v is not None})
         if args.db:

@@ -21,6 +21,12 @@ EXPECTED_TABLES = {
     "concepts",
     "injections",
     "note_tombstones",
+    "documents",
+    "document_chunks",
+    "chunk_fts",
+    "document_chunk_embeddings",
+    "document_tombstones",
+    "document_enrichment",
 }
 
 
@@ -170,7 +176,7 @@ def test_v7_adds_space_and_existing_vaults_become_dev(db_path):
         raw.execute(
             "INSERT INTO vault_aliases (alias, vault) VALUES ('old-m', 'folder/m')"
         )
-        assert migrate(raw) == SCHEMA_VERSION == 7
+        assert migrate(raw, migrations=migrate_mod.MIGRATIONS[:7]) == 7
         rows = raw.execute("SELECT key, space FROM vaults ORDER BY key").fetchall()
         assert rows == [("folder/m", "dev"), ("global", "dev")]
         assert resolve_write(raw, "old-m", space="dev") == "folder/m"

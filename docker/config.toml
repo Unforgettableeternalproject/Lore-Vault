@@ -12,3 +12,7 @@ base_url = "http://host.docker.internal:11434"
 [backup]
 # 主機 bind mount 的備份目錄：只放備份檔，不是 live DB
 dir = "/backups"
+
+[documents]
+# 原始檔 blob 放 named volume 內（與資料庫同一個 volume，不 bind mount）
+blob_dir = "/data/blobs"

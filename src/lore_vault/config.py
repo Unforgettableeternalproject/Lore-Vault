@@ -148,6 +148,21 @@ class McpConfig:
 
 
 @dataclass(frozen=True)
+class DocumentsConfig:
+    """文件存儲與抽取（A19、T-58～T-62）。"""
+
+    # blob（原始檔，內容定址）目錄；容器內為 named volume 下的 /data/blobs。
+    # 未設定 = 不能收文件（使用端缺值時明確報錯），doctor 的 blob 對帳記為 skipped
+    blob_dir: str | None = None
+    # 單檔原始大小上限（位元組），預設 25MB
+    max_file_bytes: int = 25 * 1024 * 1024
+    # 抽出文字總長上限（字元），超過標 too_large
+    max_chars: int = 2_000_000
+    # pdf／docx／pptx 抽出文字去空白後少於此字數標 empty_extraction（多半是掃描件）
+    min_chars: int = 50
+
+
+@dataclass(frozen=True)
 class Config:
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
@@ -156,6 +171,7 @@ class Config:
     backup: BackupConfig = field(default_factory=BackupConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
     mcp: McpConfig = field(default_factory=McpConfig)
+    documents: DocumentsConfig = field(default_factory=DocumentsConfig)
 
 
 _SECTIONS: dict[str, type] = {
@@ -166,6 +182,7 @@ _SECTIONS: dict[str, type] = {
     "backup": BackupConfig,
     "api": ApiConfig,
     "mcp": McpConfig,
+    "documents": DocumentsConfig,
 }
 
 # 布林設定可接受的寫法（環境變數是字串；TOML 可直接寫 true／false）
@@ -311,6 +328,8 @@ def _validate(config: Config) -> None:
         "backup.max_age_hours": config.backup.max_age_hours,
         "mcp.timeout": config.mcp.timeout,
         "mcp.snapshot_max_age_hours": config.mcp.snapshot_max_age_hours,
+        "documents.max_file_bytes": config.documents.max_file_bytes,
+        "documents.max_chars": config.documents.max_chars,
     }
     for name, value in positive.items():
         if value <= 0:
@@ -320,6 +339,7 @@ def _validate(config: Config) -> None:
         "summary.rate_per_minute": config.summary.rate_per_minute,
         "worker.retry_backoff": config.worker.retry_backoff,
         "mcp.snapshot_interval": config.mcp.snapshot_interval,
+        "documents.min_chars": config.documents.min_chars,
     }
     for name, value in non_negative.items():
         if value < 0:
