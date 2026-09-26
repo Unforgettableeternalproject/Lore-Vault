@@ -23,6 +23,7 @@
 | A17 | 管線寫回 concept 時，repo-scope 的 vault 歸屬：先依 `source_turns` 查來源 episode 的 vault（A），查不到再以 scope 比對 vault 的顯示名／別名（B），都失敗或有歧義則明確拒收不猜。同名 repo 以組織名區分（scope 寫成 `org/repo`）。repo 改名由之後的 UI 提供別名／重新導向管理 | 艾斯維爾 2026-09-26 |
 | A18 | 內容分群：space 先分 `dev`／`lore`／`personal`，現有 vault 全歸 `dev`。agent 預設讀 `dev`，**不以 token 限制**；以 MCP 工具切換「目前 space」，其餘工具只回傳目前 space 的內容。檔案存儲與檢索納入範圍（D10 提案方向），Podcast 不做 | 艾斯維爾 2026-09-26 |
 | A19 | 文件支援：md、txt、json、yaml、toml、pdf、docx、pptx 一次支援，其他純文字檔（含程式碼）一律當 txt；pdf 中文抽取先以 `E:\Documents` 的樣本做前置實測；文件 LLM 摘要第一版不做；單檔上限 25MB／200 萬字元；`upload_roots` 預設為殼 cwd、可設定額外白名單。space 的三個小項（程式白名單 + doctor、非 dev 不自動建 global、換 space 只走管理指令）照設計 | 艾斯維爾 2026-09-26，設計見 `docs/design/SPACES_AND_DOCUMENTS.md` |
+| A20 | `dev` 與非 dev（`lore`／`personal`）之間不互相轉換、不共用 vault；換 space 只允許 `lore`↔`personal`，並在單一交易內把 key 改成新前綴（舊 key 不留別名）。快照含全部 space、由殼端過濾；無 body 的 `POST /v1/status` 免帶 space | 艾斯維爾 2026-09-26 |
 
 ## 待裁決
 
