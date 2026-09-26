@@ -24,6 +24,7 @@ import os
 import re
 import sys
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -536,6 +537,29 @@ def iter_prompt_groups(records: list[dict[str, Any]]) -> Iterator[tuple[str, lis
         yield current_id, current
 
 
+def _time_span(timestamps: list[str]) -> tuple[str | None, str | None]:
+    """一輪的 (最早, 最晚) 時間戳，輸出維持 transcript 的原字串。
+
+    不能直接取第一筆與最後一筆：meta 回合的記錄不一定照時間順序寫入，
+    實測 ended_at 比 started_at 早 3ms，服務端以 invalid 拒收。
+    比較用解析後的時間，不用字典序——格式（小數位數、時區寫法）不保證一致。
+    任一筆解析不了就退回原本的首尾，不為了排序丟掉整輪。
+    """
+    if not timestamps:
+        return None, None
+    try:
+        parsed = [(datetime.fromisoformat(ts.replace("Z", "+00:00")), ts) for ts in timestamps]
+    except ValueError:
+        return timestamps[0], timestamps[-1]
+    try:
+        earliest = min(parsed, key=lambda item: item[0])[1]
+        latest = max(parsed, key=lambda item: item[0])[1]
+    except TypeError:
+        # 有時區與無時區的混在一起無法比較
+        return timestamps[0], timestamps[-1]
+    return earliest, latest
+
+
 def build_episode(prompt_id: str, records: list[dict[str, Any]], turn_index: int = 0,
                   injections: dict[tuple[str, str], list[str]] | None = None,
                   pinned_root: str | None = None) -> dict[str, Any]:
@@ -686,6 +710,8 @@ def build_episode(prompt_id: str, records: list[dict[str, Any]], turn_index: int
     files_edited = _dedup(raw_edited)
     files_read = _dedup(raw_read)
 
+    started_at, ended_at = _time_span(timestamps)
+
     user_text = "\n\n".join(user_texts)
     # 空 list 與缺欄位要分得開：前者是「這輪沒被注入」，後者是「這筆語料早於這個 schema」。
     # 舊語料停在舊格式而沒有任何標示，是先前踩過的坑
@@ -719,8 +745,8 @@ def build_episode(prompt_id: str, records: list[dict[str, Any]], turn_index: int
         # 現在加成本為零，等資料累積起來再加就要 migrate。
         "agent": AGENT_CLAUDE_CODE,
         "origin": origin,
-        "started_at": timestamps[0] if timestamps else None,
-        "ended_at": timestamps[-1] if timestamps else None,
+        "started_at": started_at,
+        "ended_at": ended_at,
         "cwd": cwds,
         "repo": repo,
         # 正規化檔案路徑時用的基準，絕對路徑。存下來是為了讓之後的重建
