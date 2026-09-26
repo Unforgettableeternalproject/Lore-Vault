@@ -112,18 +112,8 @@ export function Vaults() {
       {vaults.loading && vaults.items.length === 0 && <Loading />}
       {vaults.error && <ErrorState error={`vault 列表載入失敗：${vaults.error}`} onRetry={refreshVaults} />}
       {!vaults.loading && !vaults.error && vaults.items.length === 0 && (
-        <EmptyState
-          title="這個 space 還沒有 vault"
-          testId="vaults-empty"
-          action={
-            !creating && (
-              <button type="button" class="btn-outline btn-outline--gold" onClick={() => setCreating(true)}>
-                + 建立 vault
-              </button>
-            )
-          }
-        >
-          筆記與文件都要放進某個 vault；先建立一個再開始寫入。
+        <EmptyState title="這個 space 還沒有 vault" testId="vaults-empty">
+          筆記與文件都要放進某個 vault；先按右上角「+ 建立 vault」建立一個。
         </EmptyState>
       )}
 

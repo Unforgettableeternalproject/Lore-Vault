@@ -210,30 +210,6 @@ export function Notes() {
                 更新
               </span>
             </div>
-            {items.length === 0 && !loading && (
-              <EmptyState
-                testId="notes-empty"
-                title={tag || time !== 'all' ? '沒有符合篩選條件的筆記' : '這裡還沒有筆記'}
-                action={
-                  tag || time !== 'all' ? (
-                    <button
-                      type="button"
-                      class="btn-outline"
-                      onClick={() => {
-                        setTag(null);
-                        setTime('all');
-                      }}
-                    >
-                      清除篩選
-                    </button>
-                  ) : (
-                    <button type="button" class="btn-outline btn-outline--gold" onClick={() => navigate(routePath('notes', ['new']))}>
-                      + 新增筆記
-                    </button>
-                  )
-                }
-              />
-            )}
             {items.map((n) => (
               <a
                 key={n.id}
@@ -305,6 +281,30 @@ export function Notes() {
               </a>
             ))}
           </div>
+          {items.length === 0 && !loading && (
+            <EmptyState
+              testId="notes-empty"
+              title={tag || time !== 'all' ? '沒有符合篩選條件的筆記' : '這裡還沒有筆記'}
+              action={
+                tag || time !== 'all' ? (
+                  <button
+                    type="button"
+                    class="btn-outline"
+                    onClick={() => {
+                      setTag(null);
+                      setTime('all');
+                    }}
+                  >
+                    清除篩選
+                  </button>
+                ) : (
+                  <button type="button" class="btn-outline btn-outline--gold" onClick={() => navigate(routePath('notes', ['new']))}>
+                    + 新增筆記
+                  </button>
+                )
+              }
+            />
+          )}
           <div class="lv-pager">
             <span>
               第 {pageNo} 頁 · 本頁 {items.length} 則{loading ? ' · 更新中…' : ''}

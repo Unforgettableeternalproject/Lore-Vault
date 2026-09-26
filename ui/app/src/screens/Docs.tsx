@@ -331,15 +331,10 @@ export function Docs() {
               <span role="columnheader" class="is-right">
                 版本
               </span>
-              <span role="columnheader" class="lv-visually-hidden">
-                操作
+              <span role="columnheader">
+                <span class="lv-visually-hidden">操作</span>
               </span>
             </div>
-            {items.length === 0 && !loading && (
-              <EmptyState title="這裡還沒有文件" testId="docs-empty">
-                把檔案拖到上方區塊，或按「選擇檔案」上傳。
-              </EmptyState>
-            )}
             {items.map((d) => {
               const st = documentStatus(d);
               const replacedBy = d.superseded_by ? byId.get(d.superseded_by) : undefined;
@@ -409,6 +404,11 @@ export function Docs() {
               );
             })}
           </div>
+          {items.length === 0 && !loading && (
+            <EmptyState title="這裡還沒有文件" testId="docs-empty">
+              把檔案拖到上方區塊，或按「選擇檔案」上傳。
+            </EmptyState>
+          )}
           <div class="lv-pager">
             <span>
               第 {cursors.length} 頁 · 本頁 {items.length} 份{processing ? ' · 有文件處理中，自動更新' : ''}
