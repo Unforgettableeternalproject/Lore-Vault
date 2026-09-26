@@ -32,3 +32,8 @@ agent_memory_spike/data/*
 
 # 暫時不追蹤的檔案
 /README.md
+# UI（ui/app）：相依套件、建置產物與 E2E 產物
+ui/app/node_modules/
+ui/app/dist/
+ui/app/test-results/
+ui/app/playwright-report/

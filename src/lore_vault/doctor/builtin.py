@@ -13,6 +13,7 @@ from lore_vault.storage import checks as storage_checks
 from lore_vault.storage import enrichment as storage_enrichment
 from lore_vault.storage import imports as storage_imports
 from lore_vault.storage import ingest_checks as storage_ingest
+from lore_vault.storage import manage as storage_manage
 
 from .backup_check import backup_recent
 from .concept_snapshot_check import (
@@ -186,6 +187,14 @@ def space_key_prefix_agreement(ctx: DoctorContext) -> CheckResult:
     return _to_result(storage_checks.space_key_prefix_agreement(ctx.require("db")))
 
 
+def vaults_alias_integrity(ctx: DoctorContext) -> CheckResult:
+    return _to_result(storage_manage.alias_integrity(ctx.require("db")))
+
+
+def tombstones_disjoint(ctx: DoctorContext) -> CheckResult:
+    return _to_result(storage_manage.tombstones_disjoint(ctx.require("db")))
+
+
 def default_registry() -> Registry:
     registry = Registry()
     registry.add(
@@ -347,6 +356,22 @@ def default_registry() -> Registry:
             "vaults",
             vaults_auto_created,
             "episode 收料／管線自動建立的 vault 數與來源（供審視）",
+        )
+    )
+    registry.add(
+        Check(
+            "vaults.alias_integrity",
+            "vaults",
+            vaults_alias_integrity,
+            "別名不等於任何 vault 的正式 key，且指向現存 vault",
+        )
+    )
+    registry.add(
+        Check(
+            "tombstones.disjoint",
+            "tombstones",
+            tombstones_disjoint,
+            "note／文件墓碑與現行表沒有重複 id（undelete 須同交易刪墓碑）",
         )
     )
     for name, func, description in (

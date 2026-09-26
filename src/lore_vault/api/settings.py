@@ -66,6 +66,8 @@ class ApiSettings:
     document_worker_factory: DocumentWorkerFactory | None = None
     # 覆寫 config.api.document_worker
     document_worker: bool | None = None
+    # UI session 與登入限流用的時鐘（epoch 秒；None = time.time）
+    clock: Callable[[], float] | None = None
 
     @property
     def run_worker(self) -> bool:

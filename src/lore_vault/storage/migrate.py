@@ -435,6 +435,29 @@ def _v10(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+# 文件復原與人工重試（v11，T-74）：
+# - document_tombstones 補上重建 documents 列所需的 metadata（filename／mime／
+#   size_bytes／version）。舊墓碑為 NULL，復原時明確拒絕、不猜
+# - documents.manual_retries：經管理端點人工重排抽取的次數（有上限）。
+#   `reset_for_retry` 會清掉 document_enrichment 的嘗試紀錄，人工次數不能放那裡
+_V11_STATEMENTS: tuple[str, ...] = (
+    "ALTER TABLE document_tombstones ADD COLUMN filename TEXT",
+    "ALTER TABLE document_tombstones ADD COLUMN mime TEXT",
+    "ALTER TABLE document_tombstones ADD COLUMN size_bytes INTEGER",
+    "ALTER TABLE document_tombstones ADD COLUMN version INTEGER",
+    """
+    ALTER TABLE documents
+        ADD COLUMN manual_retries INTEGER NOT NULL DEFAULT 0
+        CHECK (manual_retries >= 0)
+    """,
+)
+
+
+def _v11(conn: sqlite3.Connection) -> None:
+    for statement in _V11_STATEMENTS:
+        conn.execute(statement)
+
+
 # 有序遷移：索引 i 的函式把版本從 i 升到 i+1。只能往後加，不可改動已發佈的項目。
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _v1,
@@ -447,6 +470,7 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _v8,
     _v9,
     _v10,
+    _v11,
 )
 
 SCHEMA_VERSION = len(MIGRATIONS)

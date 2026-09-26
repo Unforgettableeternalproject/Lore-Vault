@@ -106,7 +106,7 @@ side-car 紀錄：`{session_id, prompt_id, injected: [concept_id]}`，不含原�
 
 ## MCP 介面（草案）
 
-HTTP 契約為 `POST /v1/<工具名>` + JSON body，另有 `POST /v1/vaults` 建 vault（write 不自動建）；所有 `/v1` 需 bearer token，`GET /healthz` 公開。`GET /v1/snapshot` 提供降級用唯讀快照（只含 vaults（含 `space`）、notes、FTS，不含向量與 episode／concept／injection，**明確排除文件**（T-69）；整庫不分 space，由殼端依目前 space 過濾）。
+HTTP 契約為 `POST /v1/<工具名>` + JSON body，另有 `POST /v1/vaults` 建 vault（write 不自動建）；所有 `/v1` 需認證（bearer token，或 UI session cookie ＋ `X-Lore-Vault-UI: 1`，見下方「UI 認證」），`GET /healthz` 公開。`GET /v1/snapshot` 提供降級用唯讀快照（只含 vaults（含 `space`）、notes、FTS，不含向量與 episode／concept／injection，**明確排除文件**（T-69）；整庫不分 space，由殼端依目前 space 過濾）。
 
 **文件上傳**（T-67）：`POST /v1/documents` 是唯一的 multipart 端點，欄位 `file`、`vault`、`space`（必填）、`filename?`、`mime?`（未知欄位 400）。大小在讀取 body 時就擋（413 `too_large`，單檔上限 `documents.max_file_bytes`，預設 25MB）；格式不支援 400 `unsupported_format`；服務未設 `documents.blob_dir` 500 `documents_not_configured`。回應 `{document_id, status, sha256, duplicate, retried, vault, space, filename, version, supersedes, size_bytes}`：新列或重試 201、`duplicate: true` 200。抽取在服務程序內的背景 worker，回應時 status 多為 `pending`。重複上傳（同 vault）：同內容且現行 → 回既有（不重新排隊）；同內容只有 failed → 沿用該列重跑（`retried: true`）；同檔名不同內容 → 新版本（`supersedes`）。
 
@@ -115,6 +115,16 @@ HTTP 契約為 `POST /v1/<工具名>` + JSON body，另有 `POST /v1/vaults` 建
 - `vault="*"` 只解除 vault 這一層：代表「該 space 內的全部 vault」；沒有跨 space 查詢，要看別的 space 就切換
 - `POST /v1/vaults`：非 dev 的 key／別名不以 `<space>/` 開頭回 400 `space_key_prefix_required`；key 已屬於其他 space 回 409（key 全域唯一）
 - vault 相關回應（`vault_resolve`、`vaults`、`status.vault`）帶 `space` 欄位
+
+**UI 認證（A21）**：使用者 UI 由服務在 `/ui` 提供（Vite 建置的靜態檔，SPA fallback 到 `index.html`；`/ui`、`/ui/*` 本身免認證，資料一律走需認證的 `/v1`）。本地登入端點（不列入 OpenAPI，皆要求 `X-Lore-Vault-UI: 1`）：
+
+| 端點 | 契約 |
+|---|---|
+| `POST /ui/api/login` | body `{"key": "<存取金鑰>"}`（= `LORE_VAULT_API_TOKEN`，常數時間比對）。成功 204 + `Set-Cookie`：`__Host-lv_session`（`ui.cookie_secure=false` 時為 `lv_session`、不帶 Secure）、HttpOnly、SameSite=Strict、Path=/、Max-Age=絕對期限。金鑰錯 401 `invalid_credentials`；body 格式錯 400 `invalid_request`、超過 4KB 413 `too_large`；缺標頭 403 `csrf_required`；限流中 429 `too_many_attempts` + `Retry-After`（退避期間正確金鑰也擋） |
+| `POST /ui/api/logout` | 註銷目前 session 並清 cookie；沒有 session 也回 204 |
+| `GET /ui/api/session` | `{authenticated, expires_at, idle_expires_at}`；無效或過期 401 |
+
+`/v1/*` 的認證：帶了 `Authorization` 標頭就只走 bearer（行為與 A15 相同，不看 cookie）；否則接受有效的 session cookie，但必須帶 `X-Lore-Vault-UI: 1`，缺少回 403 `csrf_required`。session 只存在服務記憶體，重啟即失效；有絕對與閒置兩種期限。登入限流分每來源與全域，來源 IP 只在直接連線位址屬於 `ui.trusted_proxies` 時才採信 `CF-Connecting-IP`。`/ui` 回應帶嚴格 CSP（無 inline、無第三方來源，字型自託管）與 `nosniff`、`no-referrer`、`frame-ancestors 'none'`。
 
 spike 接入端點（階段 8，同樣需 bearer；每筆 body 項目 = schema dict 另加 `vault`）。**不帶 space、固定 `dev`**（episode／concept／injection 只屬於 dev；key 在其他 space 的 vault 對這些端點而言不存在，episode 收料遇到時該筆 `invalid`、不自動建）；A17 步驟 B 的 scope 比對只看 dev vault：
 
@@ -125,6 +135,31 @@ spike 接入端點（階段 8，同樣需 bearer；每筆 body 項目 = schema d
 | `GET /v1/concepts/export` | query `vault` 預設明示 `*`（scope 由客戶端 scorer 判斷），可指定單一 vault。body 與 spike `concepts.json` 同格式（頂層 list、欄位與順序同 spike；`usability` 只在有值時出現）；依寫入順序排序（不依 id）。scope 缺欄位的 concept 不匯出（header `X-Lore-Vault-Excluded-Missing-Scope`）。ETag = body sha256，`If-None-Match` 符合回 304 |
 | `POST /v1/concepts` | `{"vault": key 或 "*", "mode": "upsert"／"create"／"update", "concepts": [Concept + vault?], "delete": [id]}`，合計 ≤ 1000。**整批成功或整批不寫**：任一筆 invalid／conflict 回 400／409（`error.code = batch_rejected`，附逐筆結果）。歸屬：既有 id 沿用原 vault（凍結）；新 id 且 `scope=null` → `global`（kind=global，不存在時自動建、`origin='pipeline'`）；新 id 且 scope 為 repo 名 → 每筆 vault 或批次單一 vault；都沒帶時依 A17：(A) `source_turns` 的 `[prompt_id, turn_index]` 查 episodes 所屬 vault（部分查不到可，指向多個 vault 即歧義、不退 B）→ (B) scope 不分大小寫比對非 global vault 的 display、key／別名的整串、最後一段（repo）與最後兩段（`org/repo`），唯一命中才採用 → 都失敗該筆 invalid，逐筆帶 `code`＝`vault_unresolved`／`vault_ambiguous`（歧義另附 `candidates`，scope 撞名可改寫成 `org/repo`）；A、B 只解析到既有 vault，不自動建。成功的逐筆結果附 `vault` 與 `resolved_by`（`existing`／`global`／`explicit`／`source_turns`／`scope_match`）。scope 必須出現。新增排在匯出最後；`delete` 不存在回 `not_found`（冪等） |
 | `POST /v1/injections` | `{"injections": [Injection + vault + recorded?]}`，每批 ≤ 500。status：`accepted`／`duplicate`（同 vault 內容全等的重送，不看 recorded）／`unknown_vault`（不自動建，稍後重送）／`invalid` |
+
+**UI 管理端點**（T-70～T-75，`lore_vault.api.manage`；不提供 MCP 工具）。同 `/v1` 慣例：POST、bearer、未知欄位 422、body 必帶 `space`（缺 400 `space_required`）；vault 在別的 space 與不存在相同（404 `unknown_vault`），墓碑在別的 space 與不存在相同（404 `not_found`），錯誤訊息不帶出別 space 的 key。
+
+`VaultSummary`：`{key, display, kind, space, origin (manual／episode／pipeline), aliases, note_count, document_count, created, last_updated}`（`last_updated`＝note／文件最大的 `updated`，都沒有為 null）。
+
+| 端點 | 請求 | 回應 | 錯誤 |
+|---|---|---|---|
+| `vault_list` | `{space}` | `{space, vaults: [VaultSummary]}`（空 space 回空陣列） | |
+| `vault_update` | `{space, vault, display}` | `VaultSummary`（只改 display） | 400 `invalid_request`、404 |
+| `vault_alias_add` | `{space, vault, alias}` | `VaultSummary` | 409 `vault_exists`（`existing: {key}`；佔用者在別 space 時為 null）、400 `space_key_prefix_required`／`vault_required`（`*`） |
+| `vault_alias_remove` | `{space, vault, alias}` | `VaultSummary` | 400 `cannot_remove_key`（正式 key）、404 `not_found`（不是這個 vault 的別名） |
+| `vault_move_space` ⚠ | `{space, key, to_space, new_key?, confirm_token?}` | 規劃：`plan`＝`{key, new_key, from, to, aliases: {舊: 新}, counts: {"表.欄": 筆數}}`；執行另附 `vault: VaultSummary`（新 space） | 400 `space_change_refused`（A20：只允許 lore↔personal）、404（別名或不在該 space）、409 `vault_conflict` |
+| `vault_delete` ⚠ | `{space, key, reason?, confirm_token?}` | `plan`＝`{target: "vault", vault, counts, note_ids, requires_force}`；確認即等同 `--force` | 404（只接受正式 key） |
+| `note_delete` ⚠ | `{space, vault, id, reason?, confirm_token?}` | `plan`＝同上（`target: "note"`） | 404 `not_found` |
+| `document_delete` ⚠ | `{space, vault, id, reason?, confirm_token?}` | `plan`＝`{target: "document", document_id, vault, sha256, filename, supersedes, relinked, counts, blob_still_referenced}` | 404 `not_found` |
+| `tombstones` | `{space, vault, kinds?: ["note","document"], cursor?, limit? (≤500, 預設 50)}` | `{items, next_cursor}`；item＝`{kind, id, vault, vault_exists, deleted_at, reason}` + note：`{source, reimportable}`／document：`{sha256, filename, restorable}`。依刪除時間由新到舊；`vault="*"` 為 space 內全部，已刪的 vault 可用原 key 查 | 400 `vault_required`／`invalid_cursor`／`invalid_request` |
+| `note_undelete` | `{space, id}` | `{undeleted: 墓碑, restored: false, reimportable}`（沿用 CLI：只移除墓碑，內容不回來；有匯入來源者重跑匯入才回來） | 404 |
+| `document_undelete` | `{space, id}` | `{document: Document, space, tombstone}`；同一 id 重建、`status: "pending"` 重新抽取，版本鏈比照上傳（同檔名現行版本為 `supersedes`） | 409 `not_restorable`（`reason`：`incomplete` v11 前墓碑／`blob_missing`／`duplicate` 同內容已存在／`vault_deleted`／`exists`）、500 `documents_not_configured` |
+| `document_retry` | `{space, vault, id}` | `{document, space, manual_retries, max_manual_retries}`；failed → pending（沿用上傳重試的 `reset_for_retry`） | 409 `not_failed`／`retry_limit`（每份 3 次） |
+| `concept_query` | `{space, vault, scope?, scope_state?: repo／global／missing, kind?, cursor?, limit? (≤200)}` | `{items, next_cursor}`；item＝`{id, vault, kind, scope, scope_state, statement, anchors, surprisal, usability_verdict, updated}`，依 updated 由新到舊。**不回** cue／probe／why／source_*／probe_result／usability 的 evidence | 400 `invalid_request`／`invalid_cursor` |
+| `episode_summary` | `{space, vault}` | `{space, vault, total, last_recorded, by_machine: [{machine, episodes, last_recorded, last_started}], by_vault: [{vault, …}]}`；不讀 data 欄、不含任何對話原文 | |
+
+concept／episode 只屬 dev：在 lore／personal 查詢 `vault="*"` 回空、指定 dev 的 key 為 404。
+
+**兩段式確認**（⚠ 標記的端點）：不帶 `confirm_token` → 只規劃，回 `{executed: false, plan, confirm_token, expires_at}`；以**完全相同的參數**加上 token 再送一次 → `{executed: true, plan, …}`。token＝base64url(payload)．HMAC-SHA256，payload 綁定操作名、全部請求參數（含 space、reason）、規劃內容的 sha256 與到期時間（5 分鐘）；祕密每個服務程序隨機產生（重啟後舊 token 失效）。簽章不符、格式錯誤、參數或操作不符 → 400 `invalid_confirm_token`；過期 → 400 `confirm_token_expired`。執行時在同一個寫入交易內重新規劃並比對 digest，不符 → 409 `plan_changed`（`error.plan` 附目前規劃，需重新確認）。指紋除規劃本身外另含：note 的 `updated`、文件的 status／updated／supersedes、vault 內 note／文件最大的 `updated`。執行後目標已不存在，重送同一 token 得 404。
 
 MCP 為各機器本地 stdio 殼（`python -m lore_vault.mcp`，A15）：服務連線失敗、逾時或 502／503／504、Cloudflare 521–524／530 時，`recall`／`get`／`list`／`vault_resolve` 改讀本地快照、只走 lexical 並標 `degraded`；`write`／`update` 直接失敗不排佇列；401／403／其他 4xx 與 500 直接報錯不降級。降級查詢同樣以殼的目前 space 過濾（快照保留 `vaults.space`）。
 

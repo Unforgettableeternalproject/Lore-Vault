@@ -182,6 +182,38 @@ class DocumentsConfig:
 
 
 @dataclass(frozen=True)
+class UiConfig:
+    """使用者 UI（A21）：靜態檔位置與本地身分驗證（session cookie、登入限流）。
+
+    登入用的存取金鑰就是 `LORE_VAULT_API_TOKEN`，不另設密碼。
+    """
+
+    # Vite 建置產物（index.html 所在目錄）；未設定 = 不提供 /ui 靜態檔
+    # （/ui/api/* 仍可用，供 Vite dev server proxy）。容器內為 /app/ui
+    static_dir: str | None = None
+    # session cookie 帶 Secure（名稱加 __Host- 前綴）。只有本機 http 開發才關閉；
+    # 瀏覽器對 http://localhost 視為安全來源，預設值在本機多半也能用
+    cookie_secure: bool = True
+    # session 絕對期限（小時）：登入後最多這麼久，不因使用而延長
+    session_absolute_hours: float = 12.0
+    # session 閒置期限（分鐘）：超過這麼久沒有認證請求即失效
+    session_idle_minutes: float = 60.0
+    # 同時存在的 session 上限；超過時淘汰最舊的
+    max_sessions: int = 32
+    # 登入失敗計數的時間窗（秒）
+    login_failure_window_seconds: float = 900.0
+    # 同一來源 IP 在時間窗內的失敗上限；達到後進入退避（429）
+    login_max_failures_per_ip: int = 5
+    # 所有來源合計的失敗上限（擋分散來源的猜測；也會暫時擋住擁有者）
+    login_max_failures_global: int = 20
+    # 退避基準（秒）：達上限後第 n 次失敗鎖 base * 2^n，最長不超過時間窗
+    login_lockout_seconds: float = 60.0
+    # 受信任代理（逗號分隔的 IP 或 CIDR）。只有直接連線來源在清單內時才採信
+    # `CF-Connecting-IP` 當作用戶端 IP；空 = 一律用直接連線來源
+    trusted_proxies: str = ""
+
+
+@dataclass(frozen=True)
 class Config:
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
@@ -191,6 +223,7 @@ class Config:
     api: ApiConfig = field(default_factory=ApiConfig)
     mcp: McpConfig = field(default_factory=McpConfig)
     documents: DocumentsConfig = field(default_factory=DocumentsConfig)
+    ui: UiConfig = field(default_factory=UiConfig)
 
 
 _SECTIONS: dict[str, type] = {
@@ -202,6 +235,7 @@ _SECTIONS: dict[str, type] = {
     "api": ApiConfig,
     "mcp": McpConfig,
     "documents": DocumentsConfig,
+    "ui": UiConfig,
 }
 
 # 布林設定可接受的寫法（環境變數是字串；TOML 可直接寫 true／false）
@@ -352,6 +386,13 @@ def _validate(config: Config) -> None:
         "documents.chunk_max_tokens": config.documents.chunk_max_tokens,
         "documents.stuck_seconds": config.documents.stuck_seconds,
         "documents.extract_timeout": config.documents.extract_timeout,
+        "ui.session_absolute_hours": config.ui.session_absolute_hours,
+        "ui.session_idle_minutes": config.ui.session_idle_minutes,
+        "ui.max_sessions": config.ui.max_sessions,
+        "ui.login_failure_window_seconds": config.ui.login_failure_window_seconds,
+        "ui.login_max_failures_per_ip": config.ui.login_max_failures_per_ip,
+        "ui.login_max_failures_global": config.ui.login_max_failures_global,
+        "ui.login_lockout_seconds": config.ui.login_lockout_seconds,
     }
     for name, value in positive.items():
         if value <= 0:

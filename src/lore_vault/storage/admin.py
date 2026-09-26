@@ -1,4 +1,6 @@
-"""管理操作（不經 HTTP／MCP）：刪單則 note、刪整個 vault、換 space（改 key）。
+"""管理操作：刪單則 note、刪整個 vault、換 space（改 key）、復原文件。
+
+經管理指令（`cli.admin`）與 UI 管理端點（`api.manage`，兩段式確認）；不提供 MCP 工具。
 
 每個刪除先「規劃」（只讀、列出會刪的筆數與 id），實際刪除在單一交易內重新規劃再刪，
 並核對實際刪除筆數與規劃一致，不一致整段 rollback。
@@ -29,7 +31,7 @@ key 與別名改成新前綴，引用 vault key 的欄位全部在同一交易�
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -297,6 +299,19 @@ def _write_document_tombstones(
 ) -> int:
     if not reason.strip():
         raise StorageError("刪除原因不可為空")
+    if _has_column(conn, "document_tombstones", "filename"):
+        # v11：一併記下重建 documents 列所需的 metadata（undelete_document 用）
+        return conn.execute(
+            f"""
+            INSERT OR REPLACE INTO document_tombstones
+                (document_id, vault, sha256, deleted_at, reason,
+                 filename, mime, size_bytes, version)
+            SELECT d.id, d.vault, d.sha256, ?, ?,
+                   d.filename, d.mime, d.size_bytes, d.version
+            FROM documents d WHERE {where}
+            """,
+            (utc_now(), reason, *params),
+        ).rowcount
     return conn.execute(
         f"""
         INSERT OR REPLACE INTO document_tombstones
@@ -305,6 +320,12 @@ def _write_document_tombstones(
         """,
         (utc_now(), reason, *params),
     ).rowcount
+
+
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    return any(
+        row["name"] == column for row in conn.execute(f"PRAGMA table_info({table})")
+    )
 
 
 def _delete_documents(conn: sqlite3.Connection, where: str, params: tuple) -> dict:
@@ -357,6 +378,115 @@ def delete_document(
         if plan.supersedes is not None:
             document_index.sync_chain(conn, plan.supersedes)
         return plan
+
+
+class NotRestorable(StorageError):
+    """墓碑缺重建所需的資料（v11 前的舊墓碑、原始檔遺失、同內容已存在等）。"""
+
+    def __init__(self, message: str, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+def find_document_tombstone(
+    conn: sqlite3.Connection, document_id: str
+) -> dict[str, Any]:
+    """查一則文件墓碑（只有 metadata）；沒有就 NotFound。"""
+    row = conn.execute(
+        "SELECT * FROM document_tombstones WHERE document_id = ?", (document_id,)
+    ).fetchone()
+    if row is None:
+        raise NotFound(f"文件 {document_id!r} 沒有墓碑")
+    keys = row.keys()
+    return {
+        "document_id": row["document_id"],
+        "vault": row["vault"],
+        "sha256": row["sha256"],
+        "deleted_at": row["deleted_at"],
+        "reason": row["reason"],
+        "filename": row["filename"] if "filename" in keys else None,
+        "mime": row["mime"] if "mime" in keys else None,
+        "size_bytes": row["size_bytes"] if "size_bytes" in keys else None,
+        "version": row["version"] if "version" in keys else None,
+    }
+
+
+def undelete_document(
+    conn: sqlite3.Connection,
+    document_id: str,
+    *,
+    space: str,
+    blob_ok: Callable[[str], bool],
+) -> dict[str, Any]:
+    """以墓碑 metadata 與仍在的原始檔重建文件（同一 id），狀態回到 pending 重新抽取。
+
+    - 墓碑所屬 vault 已刪除 → `NotRestorable("vault_deleted")`；在別的 space →
+      `UnknownVault`（呼叫端應先以墓碑 space 過濾，別讓訊息帶出別 space 的 key）
+    - 舊墓碑（v11 前，無 filename／mime／size）→ `NotRestorable(reason="incomplete")`
+    - `blob_ok(sha256) -> bool`：原始檔存在且雜湊相符；否則
+      `NotRestorable("blob_missing")`
+    - 同 vault 已有相同內容的現行文件 → `NotRestorable("duplicate")`（不重複建）
+    - 版本鏈比照上傳：同檔名現行版本為 `supersedes`、version = 該檔名最大版本 + 1
+    - 刪墓碑與建列在同一交易
+    回傳 {"document": Document, "tombstone": 墓碑 dict}。
+    """
+    from . import documents as store
+
+    with transaction(conn):
+        grave = find_document_tombstone(conn, document_id)
+        if not conn.execute(
+            "SELECT 1 FROM vaults WHERE key = ?", (grave["vault"],)
+        ).fetchone():
+            raise NotRestorable(
+                f"文件 {document_id!r} 所屬的 vault 已刪除；請先建立 vault 再重新上傳",
+                "vault_deleted",
+            )
+        key = resolve_write(conn, grave["vault"], space=space)
+        if grave["filename"] is None or grave["mime"] is None:
+            raise NotRestorable(
+                f"文件 {document_id!r} 的墓碑缺檔名／格式（v11 前刪除）；請重新上傳",
+                "incomplete",
+            )
+        if grave["size_bytes"] is None:
+            raise NotRestorable(
+                f"文件 {document_id!r} 的墓碑缺檔案大小；請重新上傳", "incomplete"
+            )
+        if conn.execute(
+            "SELECT 1 FROM documents WHERE id = ?", (document_id,)
+        ).fetchone():
+            raise NotRestorable(f"文件 {document_id!r} 已存在", "exists")
+        if not blob_ok(grave["sha256"]):
+            raise NotRestorable(
+                f"文件 {document_id!r} 的原始檔已不存在或損毀"
+                "（可能已被 gc-blobs 清掉）",
+                "blob_missing",
+            )
+        same = store.find_by_sha256(conn, key, grave["sha256"], space=space)
+        superseded = store.superseded_by(conn, [d.id for d in same])
+        live = [d for d in same if d.id not in superseded]
+        if live:
+            raise NotRestorable(
+                f"vault 內已有相同內容的文件 {live[0].id!r}", "duplicate"
+            )
+        previous, max_version = store.latest_live_by_filename(
+            conn, key, grave["filename"]
+        )
+        conn.execute(
+            "DELETE FROM document_tombstones WHERE document_id = ?", (document_id,)
+        )
+        doc = store.insert_document(
+            conn,
+            key,
+            space=space,
+            filename=grave["filename"],
+            mime=grave["mime"],
+            size_bytes=int(grave["size_bytes"]),
+            sha256=grave["sha256"],
+            supersedes=previous.id if previous is not None else None,
+            version=max_version + 1 if max_version else None,
+            document_id=document_id,
+        )
+        return {"document": doc, "tombstone": grave}
 
 
 # ── 整個 vault ──

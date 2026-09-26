@@ -16,6 +16,12 @@ from lore_vault.documents.service import UploadRejected
 from lore_vault.notes import InvalidCursor, NoChanges, VersionConflict
 from lore_vault.recall import UnsupportedKind
 from lore_vault.schema import InvalidCharacters
+from lore_vault.storage.admin import (
+    NeedsForce,
+    NotRestorable,
+    PlanChanged,
+    SpaceChangeRefused,
+)
 from lore_vault.storage.errors import (
     DuplicateRecord,
     InvalidSpace,
@@ -27,6 +33,7 @@ from lore_vault.storage.errors import (
     VaultConflict,
     VaultRequired,
 )
+from lore_vault.storage.manage import AliasConflict, CannotRemoveKey, RetryRefused
 
 CREATE_VAULT_HINT = (
     "以 POST /v1/vaults 建立（key、display；key 由客戶端用 lore_vault.binding 算出），"
@@ -48,6 +55,22 @@ class VaultExists(Exception):
     def __init__(self, message: str, existing: dict[str, Any]) -> None:
         super().__init__(message)
         self.existing = existing
+
+
+class ConfirmTokenInvalid(ValueError):
+    """確認 token 無法解析、簽章不符，或與這次請求的操作／參數不符（竄改或誤用）。"""
+
+
+class ConfirmTokenExpired(ValueError):
+    """確認 token 已過期：重新規劃取得新 token。"""
+
+
+class ConfirmPlanChanged(Exception):
+    """規劃後資料已變動：token 綁定的規劃內容與執行當下重新規劃的結果不同。"""
+
+    def __init__(self, message: str, plan: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.plan = plan
 
 
 def error_body(code: str, message: str, **extra: Any) -> dict[str, Any]:
@@ -129,6 +152,36 @@ def install_error_handlers(app: FastAPI) -> None:
     async def upload_rejected(request: Request, exc: Exception) -> JSONResponse:
         assert isinstance(exc, UploadRejected)
         return _json(413 if exc.code == "too_large" else 400, exc.code, exc)
+
+    # 管理端點（api.manage）
+    simple(SpaceChangeRefused, 400, "space_change_refused")
+    simple(CannotRemoveKey, 400, "cannot_remove_key")
+    simple(PlanChanged, 409, "plan_changed")
+    simple(NeedsForce, 409, "needs_force")
+    simple(ConfirmTokenInvalid, 400, "invalid_confirm_token")
+    simple(ConfirmTokenExpired, 400, "confirm_token_expired")
+
+    async def confirm_plan_changed(request: Request, exc: Exception) -> JSONResponse:
+        assert isinstance(exc, ConfirmPlanChanged)
+        return _json(409, "plan_changed", exc, plan=exc.plan)
+
+    async def alias_conflict(request: Request, exc: Exception) -> JSONResponse:
+        # 佔用者在別的 space 時 existing 為 null（不透露存在性以外的資訊）
+        assert isinstance(exc, AliasConflict)
+        existing = {"key": exc.existing} if exc.existing is not None else None
+        return _json(409, "vault_exists", exc, existing=existing)
+
+    async def with_reason(request: Request, exc: Exception) -> JSONResponse:
+        # NotRestorable → 409 not_restorable（附 reason）；RetryRefused → 409 reason
+        if isinstance(exc, NotRestorable):
+            return _json(409, "not_restorable", exc, reason=exc.reason)
+        assert isinstance(exc, RetryRefused)
+        return _json(409, exc.reason, exc)
+
+    app.add_exception_handler(ConfirmPlanChanged, confirm_plan_changed)
+    app.add_exception_handler(AliasConflict, alias_conflict)
+    app.add_exception_handler(NotRestorable, with_reason)
+    app.add_exception_handler(RetryRefused, with_reason)
 
     simple(PayloadTooLarge, 413, "too_large")
     simple(DocumentsNotConfigured, 500, "documents_not_configured")

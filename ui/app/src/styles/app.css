@@ -1,0 +1,276 @@
+/* Lore Vault 專案樣式：由設計稿（ui/design-source/Lore Vault.dc.html）的行內樣式整理成 class，
+   一律吃設計系統 tokens 與 --zone-* 別名，不寫死 zone 顏色。CSP 不允許行內樣式。 */
+
+:root { color-scheme: light; }
+[data-theme='dark'] { color-scheme: dark; }
+
+body { font-size: 14px; }
+button { font: inherit; }
+:focus-visible { outline: 2px solid var(--uep-gold); outline-offset: 2px; }
+
+/* ── 共用 ─────────────────────────────────────────────── */
+.lv-eyebrow {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: .22em;
+  color: var(--zone-soft, var(--ink-mute));
+}
+.lv-title {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-size: 42px;
+  margin: 6px 0 24px;
+  color: var(--ink-title);
+}
+.lv-field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 18px; }
+.lv-field__label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: .14em;
+  color: var(--ink-mute);
+}
+.lv-input {
+  padding: 11px 12px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+.lv-input:focus { border-color: var(--zone-stroke, var(--uep-gold)); outline: none; }
+.lv-actions { display: flex; gap: 10px; margin-top: 4px; }
+.lv-hint {
+  margin: 18px 0 0;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: .08em;
+  line-height: 1.6;
+  color: var(--ink-mute);
+}
+.lv-notice {
+  margin: 0 0 16px;
+  padding: 10px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+.lv-notice--error {
+  border-color: color-mix(in srgb, var(--status-error) 55%, transparent);
+  background: color-mix(in srgb, var(--status-error) 8%, transparent);
+  color: var(--status-error);
+}
+.lv-notice--warn {
+  border-color: color-mix(in srgb, var(--uep-gold) 50%, transparent);
+  background: color-mix(in srgb, var(--uep-gold) 8%, transparent);
+  color: var(--uep-gold);
+}
+.lv-icon-btn { min-width: 44px; justify-content: center; }
+
+/* ── 啟動與登入 ───────────────────────────────────────── */
+.lv-boot {
+  min-height: 100vh;
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: .1em;
+  color: var(--ink-mute);
+}
+.lv-boot--error { color: var(--status-error); }
+.lv-login {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px var(--gutter-mobile);
+  background: var(--bg);
+}
+.lv-login__card {
+  width: 100%;
+  max-width: 440px;
+  padding: 32px;
+  background: var(--bg-card);
+  border: 1px solid var(--line);
+  border-top: 2px solid var(--zone-soft);
+  border-radius: var(--radius-sm);
+}
+.lv-brand { display: flex; align-items: center; gap: 12px; margin-bottom: 28px; }
+.lv-brand__mark { width: 29px; height: 29px; font-size: 15px; }
+
+/* ── App Shell ────────────────────────────────────────── */
+.lv-app { min-height: 100vh; display: flex; flex-direction: column; background: var(--bg); color: var(--ink); }
+.lv-header {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  height: var(--topbar-h);
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 0 24px;
+  background: color-mix(in srgb, var(--bg) 94%, transparent);
+  backdrop-filter: blur(var(--blur-topbar));
+  border-bottom: 1px solid var(--line);
+}
+.lv-header__zone-bar { position: absolute; left: 0; right: 0; top: 0; height: 2px; background: var(--zone-soft); }
+.lv-header__spacer { flex: 1; }
+.lv-conn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: .08em;
+  color: var(--ink-mute);
+}
+.lv-conn__dot { width: 7px; height: 7px; border-radius: 50%; background: var(--status-success); }
+.lv-degraded-badge {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: .14em;
+  color: var(--uep-gold);
+  border: 1px solid rgba(213, 182, 24, .5);
+  background: rgba(213, 182, 24, .08);
+  padding: 5px 10px;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+}
+
+/* space 切換 */
+.lv-space { position: relative; }
+.lv-space__trigger {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 40px;
+  padding: 0 14px 0 6px;
+  background: var(--zone-tint);
+  border: 1px solid var(--zone-stroke);
+  border-radius: var(--radius-pill);
+  color: var(--ink);
+  cursor: pointer;
+}
+.lv-space__glyph {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--zone-main);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+.lv-space__glyph--lg { width: 36px; height: 36px; font-size: 14px; }
+.lv-space__text { display: flex; flex-direction: column; align-items: flex-start; line-height: 1.15; }
+.lv-space__kicker { font-family: var(--font-mono); font-size: 9px; letter-spacing: .22em; color: var(--ink-mute); }
+.lv-space__name { font-size: 13px; font-weight: 600; }
+.lv-space__hint { font-family: var(--font-mono); font-size: 11px; color: var(--ink-mute); margin-left: 4px; }
+.lv-space__menu {
+  position: absolute;
+  top: 50px;
+  left: 0;
+  width: 340px;
+  background: var(--bg-card);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-dialog);
+  box-shadow: 0 0 0 1px rgba(213, 182, 24, .08), 0 24px 60px rgba(0, 0, 0, .45);
+  padding: 8px;
+  z-index: 200;
+}
+.lv-space__menu-head {
+  padding: 10px 12px 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: .16em;
+  color: var(--ink-mute);
+}
+.lv-space__option {
+  width: 100%;
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  padding: 12px;
+  margin-bottom: 4px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+  text-align: left;
+  color: var(--ink);
+}
+.lv-space__option:hover { background: var(--zone-tint); }
+.lv-space__option.is-current { background: var(--zone-tint); border-color: var(--zone-stroke); }
+.lv-space__option-text { flex: 1; min-width: 0; }
+.lv-space__option-name { display: block; font-weight: 600; font-size: 14px; }
+.lv-space__option-desc { display: block; font-size: 12px; color: var(--ink-mute); margin-top: 2px; }
+
+/* 版面 */
+.lv-body { display: grid; grid-template-columns: 260px minmax(0, 1fr); flex: 1; }
+.lv-sidebar {
+  border-right: 1px solid var(--line);
+  padding: 24px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  position: sticky;
+  top: var(--topbar-h);
+  height: calc(100vh - var(--topbar-h));
+  overflow-y: auto;
+  min-width: 0;
+}
+.lv-nav { display: flex; flex-direction: column; gap: 2px; }
+.lv-nav__item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 10px;
+  border-left: 2px solid transparent;
+  color: var(--ink-soft);
+  text-decoration: none;
+  font-size: 14px;
+}
+.lv-nav__item:hover { background: var(--zone-tint); color: var(--ink); }
+.lv-nav__item.is-active { border-left-color: var(--zone-soft); background: var(--zone-tint); color: var(--ink-title); }
+.lv-nav__glyph { width: 18px; text-align: center; font-family: var(--font-mono); font-size: 13px; color: var(--zone-soft); }
+.lv-nav__label { flex: 1; }
+.lv-vaults__head {
+  display: flex;
+  justify-content: space-between;
+  padding: 0 10px 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: .16em;
+  color: var(--ink-mute);
+}
+.lv-vaults__empty { margin: 0; padding: 0 10px; font-size: 12px; color: var(--ink-mute); }
+.lv-write-target {
+  margin-top: auto;
+  padding: 14px;
+  border: 1px solid var(--zone-stroke);
+  background: var(--zone-tint);
+  border-radius: var(--radius-sm);
+}
+.lv-write-target__label { font-family: var(--font-mono); font-size: 9px; letter-spacing: .22em; color: var(--ink-mute); }
+.lv-write-target__value { margin-top: 6px; font-size: 13px; font-weight: 600; }
+.lv-main { padding: 40px 56px 80px; min-width: 0; }
+.lv-screen { max-width: 940px; }
+.lv-placeholder { margin-top: 8px; }
+
+/* 窄螢幕：先確保可用（完整 RWD 由 T-86 處理） */
+@media (max-width: 800px) {
+  .lv-header { gap: 12px; padding: 0 var(--gutter-mobile); overflow-x: auto; }
+  .lv-header .uep-brand-subtitle, .lv-space__hint, .lv-conn { display: none; }
+  .lv-body { grid-template-columns: minmax(0, 1fr); }
+  .lv-sidebar { position: static; height: auto; border-right: none; border-bottom: 1px solid var(--line); }
+  .lv-main { padding: 24px var(--gutter-mobile) 64px; }
+  .lv-space__menu { width: min(340px, calc(100vw - 2 * var(--gutter-mobile))); }
+}

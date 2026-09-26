@@ -117,6 +117,21 @@ def test_openapi_is_served_behind_auth(anon):
         "/v1/concepts",
         "/v1/concepts/export",
         "/v1/injections",
+        # UI 管理端點（api.manage）
+        "/v1/vault_list",
+        "/v1/vault_update",
+        "/v1/vault_alias_add",
+        "/v1/vault_alias_remove",
+        "/v1/vault_move_space",
+        "/v1/vault_delete",
+        "/v1/note_delete",
+        "/v1/document_delete",
+        "/v1/tombstones",
+        "/v1/note_undelete",
+        "/v1/document_undelete",
+        "/v1/document_retry",
+        "/v1/concept_query",
+        "/v1/episode_summary",
     } == paths
 
 

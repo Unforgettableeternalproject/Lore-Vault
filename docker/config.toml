@@ -16,3 +16,12 @@ dir = "/backups"
 [documents]
 # 原始檔 blob 放 named volume 內（與資料庫同一個 volume，不 bind mount）
 blob_dir = "/data/blobs"
+
+[ui]
+# ui-builder 階段建置的靜態檔（Dockerfile COPY 到這裡）；服務在 /ui 提供
+static_dir = "/app/ui"
+# 容器只經 127.0.0.1:5056 發布，連進來的一律是主機（Docker Desktop 閘道，如 172.20.0.1）：
+# 本機 cloudflared 會帶 CF-Connecting-IP，採信它才能依真實來源限流。
+trusted_proxies = "172.16.0.0/12"
+# 依來源限流生效後，全域上限放寬，避免外人連續猜錯把使用者鎖在 UI 外
+login_max_failures_global = 60

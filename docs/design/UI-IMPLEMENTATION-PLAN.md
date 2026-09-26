@@ -1,3 +1,5 @@
+> **2026-09-26 更新**：認證改採服務本地登入＋HttpOnly session cookie（A21），不用 sessionStorage 保存 token；以 `docs/ARCHITECTURE.md` 的 UI 認證契約為準，本文 3.2 與 T-77 的 sessionStorage 描述已過時。
+
 # UI 實作計畫
 
 > 分析對象：`ui/design-source/`（Claude Design 匯出稿，2026-09-26 匯入，分支 `feature/ui` @ `e8edbe8`）。
