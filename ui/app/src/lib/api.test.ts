@@ -202,3 +202,83 @@ describe('狀態標記不可被吞掉', () => {
     expect(onNotices).toHaveBeenCalledWith([], '/v1/recall');
   });
 });
+
+describe('上傳（XHR）', () => {
+  class FakeXhr {
+    static last: FakeXhr | null = null;
+    headers: Record<string, string> = {};
+    withCredentials = false;
+    status = 0;
+    responseText = '';
+    upload: { onprogress: ((e: ProgressEvent) => void) | null } = { onprogress: null };
+    onload: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    onabort: (() => void) | null = null;
+    method = '';
+    url = '';
+    sent: unknown = null;
+    private responseHeaders: Record<string, string> = {};
+    constructor() {
+      FakeXhr.last = this;
+    }
+    open(method: string, url: string) {
+      this.method = method;
+      this.url = url;
+    }
+    setRequestHeader(k: string, v: string) {
+      this.headers[k] = v;
+    }
+    getResponseHeader(k: string) {
+      return this.responseHeaders[k.toLowerCase()] ?? null;
+    }
+    abort() {
+      this.onabort?.();
+    }
+    send(body: unknown) {
+      this.sent = body;
+    }
+    respond(status: number, body: unknown, headers: Record<string, string> = { 'content-type': 'application/json' }) {
+      this.upload.onprogress?.({ lengthComputable: true, loaded: 5, total: 10 } as ProgressEvent);
+      this.status = status;
+      this.responseText = JSON.stringify(body);
+      this.responseHeaders = headers;
+      this.onload?.();
+    }
+  }
+
+  function setupXhr() {
+    const onUnauthorized = vi.fn();
+    const api = createApiClient({ xhr: () => new FakeXhr() as unknown as XMLHttpRequest, onUnauthorized });
+    return { api, onUnauthorized };
+  }
+
+  it('帶 CSRF 標頭與 cookie、回報進度、成功回 data', async () => {
+    const { api } = setupXhr();
+    const progress: number[] = [];
+    const form = new FormData();
+    const pending = api.upload('/v1/documents', form, { onProgress: (f) => progress.push(f) });
+    const xhr = FakeXhr.last!;
+    expect(xhr.headers[UI_HEADER]).toBe('1');
+    expect(xhr.withCredentials).toBe(true);
+    expect(xhr.sent).toBe(form);
+    xhr.respond(201, { document_id: 'doc:1', duplicate: false });
+    const result = await pending;
+    expect(result.status).toBe(201);
+    expect(result.data).toEqual({ document_id: 'doc:1', duplicate: false });
+    expect(progress).toEqual([0.5]);
+  });
+
+  it('413 too_large 轉成 ApiError；401 通知 onUnauthorized', async () => {
+    const { api, onUnauthorized } = setupXhr();
+    const big = api.upload('/v1/documents', new FormData());
+    FakeXhr.last!.respond(413, { error: { code: 'too_large', message: '太大' } });
+    const err = await caught(big);
+    expect(err.status).toBe(413);
+    expect(err.code).toBe('too_large');
+
+    const anon = api.upload('/v1/documents', new FormData());
+    FakeXhr.last!.respond(401, { error: { code: 'unauthorized', message: 'x' } });
+    await caught(anon);
+    expect(onUnauthorized).toHaveBeenCalledTimes(1);
+  });
+});

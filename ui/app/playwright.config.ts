@@ -1,4 +1,4 @@
-// E2E：啟動一個臨時的 Lore Vault 服務（暫存資料庫、固定測試 token、不跑背景 worker），
+// E2E：啟動一個臨時的 Lore Vault 服務（暫存資料庫與 blob 目錄、固定測試 token、只開文件 worker），
 // 由它提供 `npm run build` 產出的 dist。不連接也不影響執行中的正式服務。
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -37,7 +37,13 @@ export default defineConfig({
       LORE_VAULT_UI_STATIC_DIR: resolve(import.meta.dirname, 'dist'),
       LORE_VAULT_API_ENRICH_WORKER: 'false',
       LORE_VAULT_API_EMBEDDING_WARMUP: 'false',
-      LORE_VAULT_API_DOCUMENT_WORKER: 'false',
+      // 文件流程要真的抽取：開文件 worker、blob 放暫存目錄
+      LORE_VAULT_API_DOCUMENT_WORKER: 'true',
+      LORE_VAULT_DOCUMENTS_BLOB_DIR: join(scratch, 'blobs'),
+      // 語意模型指向不存在的位址：不論這台機器有沒有跑 Ollama，recall 都穩定走降級（lexical）
+      LORE_VAULT_EMBEDDING_BASE_URL: 'http://127.0.0.1:9',
+      LORE_VAULT_EMBEDDING_QUERY_TIMEOUT: '0.5',
+      LORE_VAULT_EMBEDDING_TIMEOUT: '1',
     },
   },
 });

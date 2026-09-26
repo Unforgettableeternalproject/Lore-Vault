@@ -1,0 +1,44 @@
+// 畫面共用的環境：API client、目前 space、vault 清單與篩選、導覽、toast。
+// 由 Shell 提供；元件測試以假的值直接包 Provider。
+import { createContext } from 'preact';
+import { useContext } from 'preact/hooks';
+
+import type { ApiClient } from './api';
+import type { Navigate } from './router';
+import type { SpaceMeta } from './spaces';
+import type { VaultSummary } from './types';
+
+export type ToastKind = 'success' | 'error' | 'warning' | 'info';
+
+export interface VaultsState {
+  items: VaultSummary[];
+  loading: boolean;
+  error: string | null;
+}
+
+export interface AppEnv {
+  api: ApiClient;
+  space: SpaceMeta;
+  vaults: VaultsState;
+  /** 目前篩選的 vault key；`*` = 本 space 全部 */
+  vault: string;
+  setVault: (key: string) => void;
+  refreshVaults: () => void;
+  navigate: Navigate;
+  toast: (message: string, kind?: ToastKind) => void;
+}
+
+export const ALL = '*';
+
+export const AppContext = createContext<AppEnv | null>(null);
+
+export function useApp(): AppEnv {
+  const env = useContext(AppContext);
+  if (!env) throw new Error('useApp 必須在 AppContext.Provider 內使用');
+  return env;
+}
+
+export function vaultName(env: Pick<AppEnv, 'vaults'>, key: string): string {
+  if (key === ALL) return '本 space 全部';
+  return env.vaults.items.find((v) => v.key === key)?.display ?? key;
+}

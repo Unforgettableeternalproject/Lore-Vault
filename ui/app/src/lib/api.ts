@@ -58,6 +58,8 @@ export interface ApiClientOptions {
   onUnauthorized?: () => void;
   /** 每個成功回應都呼叫（notices 可能是空陣列，讓全域狀態能在恢復時清除） */
   onNotices?: (notices: Notice[], path: string) => void;
+  /** 測試可注入 XHR（上傳用） */
+  xhr?: ApiClientXhrFactory;
 }
 
 const LOGIN_PATH = '/ui/api/login';
@@ -128,10 +130,22 @@ export interface RequestOptions {
   signal?: AbortSignal;
 }
 
+export interface UploadOptions {
+  /** 上傳進度（0–1）；瀏覽器無法計算總量時不呼叫 */
+  onProgress?: (fraction: number) => void;
+  signal?: AbortSignal;
+}
+
 export interface ApiClient {
   request<T>(path: string, options?: RequestOptions): Promise<ApiResponse<T>>;
   get<T>(path: string, signal?: AbortSignal): Promise<ApiResponse<T>>;
   post<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<ApiResponse<T>>;
+  /** multipart 上傳（fetch 沒有上傳進度，改用 XHR）；錯誤與成功處理同 request */
+  upload<T>(path: string, form: FormData, options?: UploadOptions): Promise<ApiResponse<T>>;
+}
+
+export interface ApiClientXhrFactory {
+  (): XMLHttpRequest;
 }
 
 export function createApiClient(options: ApiClientOptions = {}): ApiClient {
@@ -168,17 +182,76 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
       // 錯誤回應本身不是 JSON（例如代理層的 HTML 錯誤頁）：保留原文供顯示
       body = err instanceof ApiError ? err.body : null;
     }
+    throw failure(path, resp.status, body, resp.headers.get('retry-after'));
+  }
+
+  function failure(path: string, status: number, body: unknown, retryAfter: string | null): ApiError {
     const error = isRecord(body) && isRecord(body.error) ? body.error : null;
-    const code = typeof error?.code === 'string' ? error.code : `http_${resp.status}`;
+    const code = typeof error?.code === 'string' ? error.code : `http_${status}`;
     const message =
-      typeof error?.message === 'string' ? error.message : `服務回應錯誤（HTTP ${resp.status}）`;
-    if (resp.status === 401 && path !== LOGIN_PATH) options.onUnauthorized?.();
-    throw new ApiError(resp.status, code, message, body, parseRetryAfter(resp.headers.get('retry-after')));
+      typeof error?.message === 'string' ? error.message : `服務回應錯誤（HTTP ${status}）`;
+    if (status === 401 && path !== LOGIN_PATH) options.onUnauthorized?.();
+    return new ApiError(status, code, message, body, parseRetryAfter(retryAfter));
+  }
+
+  function upload<T>(path: string, form: FormData, opts: UploadOptions = {}): Promise<ApiResponse<T>> {
+    const makeXhr = options.xhr ?? (() => new XMLHttpRequest());
+    return new Promise((resolve, reject) => {
+      const xhr = makeXhr();
+      xhr.open('POST', path);
+      xhr.withCredentials = true;
+      xhr.setRequestHeader(UI_HEADER, '1');
+      xhr.setRequestHeader('Accept', 'application/json');
+      if (opts.onProgress) {
+        const report = opts.onProgress;
+        xhr.upload.onprogress = (e: ProgressEvent) => {
+          if (e.lengthComputable && e.total > 0) report(e.loaded / e.total);
+        };
+      }
+      const onAbort = () => xhr.abort();
+      opts.signal?.addEventListener('abort', onAbort, { once: true });
+      xhr.onerror = () =>
+        reject(new ApiError(0, 'network_error', '無法連線到 Lore Vault 服務', 'upload failed'));
+      xhr.onabort = () => reject(new DOMException('上傳已取消', 'AbortError'));
+      xhr.onload = () => {
+        opts.signal?.removeEventListener('abort', onAbort);
+        const text = xhr.responseText;
+        const type = xhr.getResponseHeader('content-type') ?? '';
+        let body: unknown = null;
+        let parsed = true;
+        if (text) {
+          if (type.includes('json')) {
+            try {
+              body = JSON.parse(text) as unknown;
+            } catch {
+              parsed = false;
+              body = text;
+            }
+          } else {
+            parsed = false;
+            body = text;
+          }
+        }
+        if (xhr.status >= 200 && xhr.status < 300) {
+          if (!parsed) {
+            reject(new ApiError(xhr.status, 'bad_response', `服務回傳非 JSON 內容（HTTP ${xhr.status}）`, body));
+            return;
+          }
+          const notices = extractNotices(body);
+          options.onNotices?.(notices, path);
+          resolve({ status: xhr.status, data: body as T, notices });
+          return;
+        }
+        reject(failure(path, xhr.status, body, xhr.getResponseHeader('retry-after')));
+      };
+      xhr.send(form);
+    });
   }
 
   return {
     request,
     get: (path, signal) => request(path, { method: 'GET', signal }),
     post: (path, body, signal) => request(path, { method: 'POST', body, signal }),
+    upload,
   };
 }
