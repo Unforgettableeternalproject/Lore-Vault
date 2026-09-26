@@ -830,7 +830,6 @@ details.lv-check > .lv-check__head { cursor: pointer; }
 .lv-kv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 16px; margin: 0; font-size: 13px; }
 .lv-kv dt { font-family: var(--font-mono); font-size: 10px; letter-spacing: .12em; color: var(--ink-mute); padding-top: 2px; }
 .lv-kv dd { margin: 0; overflow-wrap: anywhere; }
-.lv-kv__btn { margin-left: 12px; }
 /* 寬鬆版 key-value（連線設定）：固定標籤欄寬、拉開行距與欄距；手機改上下堆疊 */
 .lv-kv--roomy { grid-template-columns: minmax(96px, 150px) minmax(0, 1fr); gap: 14px 32px; font-size: 14px; line-height: 1.6; }
 .lv-kv--roomy dt { font-size: 11px; padding-top: 3px; }
