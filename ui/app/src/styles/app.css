@@ -380,7 +380,20 @@ button { font: inherit; }
 .lv-select { font-family: var(--font-sans); font-size: var(--lv-fs-body); max-width: 100%; min-width: 0; }
 
 /* 側欄 vault 列表 */
-.lv-vaults__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.lv-vaults__list {
+  list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px;
+  /* 約 9 項高（含「本 space 全部」），其餘在清單內捲動，下方寫入位置留在首屏 */
+  max-height: calc(9 * 34px); overflow-y: auto; overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+.lv-vaults__toggle {
+  display: inline-flex; align-items: center; gap: 6px; padding: 2px 0; background: none; border: none; cursor: pointer;
+  font: inherit; letter-spacing: inherit; color: inherit;
+}
+.lv-vaults__toggle:hover { color: var(--ink); }
+.lv-vaults__caret { width: 12px; font-family: var(--font-sans); font-size: 12px; }
+.lv-vaults__total { margin-left: 4px; color: var(--ink-mute); letter-spacing: 0; }
+.lv-vaults__current { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-soft); letter-spacing: 0; font-family: var(--font-sans); }
 .lv-vaults__item {
   width: 100%; display: flex; justify-content: space-between; gap: 8px; align-items: baseline;
   padding: 7px 10px; background: none; border: none; border-left: 2px solid transparent;
@@ -556,11 +569,35 @@ a.lv-table__title:hover { color: var(--lv-zone-text); }
 .lv-table__summary { display: flex; gap: 8px; align-items: baseline; font-size: var(--lv-fs-body); color: var(--ink-soft); min-width: 0; }
 .lv-table__sub { font-size: var(--lv-fs-meta); color: var(--ink-mute); }
 .is-right { text-align: right; }
-.lv-pager {
-  display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;
-  margin-top: 20px; font-family: var(--font-mono); font-size: var(--lv-fs-meta); color: var(--ink-mute);
+/* 篩選區塊：所有條件收在一張卡片內，每列可換行，不和列表擠在同一行 */
+.lv-filter-panel {
+  margin: 24px 0; padding: 16px 18px; display: flex; flex-direction: column; gap: 14px;
+  border: 1px solid var(--line-strong); border-radius: var(--lv-radius-control); background: var(--bg-soft);
 }
-.lv-pager__btns { display: flex; gap: 6px; }
+.lv-filter-panel__row { display: flex; flex-wrap: wrap; gap: 14px 24px; align-items: center; }
+.lv-filter-panel__scope { display: flex; gap: 8px; align-items: center; flex: 1 1 280px; min-width: 0; }
+.lv-filter-panel__scope .lv-input { flex: 1 1 200px; min-width: 0; }
+.lv-filter-panel__summary { margin: 0; }
+.lv-daterange { border: none; margin: 0; padding: 0; display: flex; align-items: center; gap: 8px; min-width: 0; }
+.lv-daterange legend { float: left; margin-right: 8px; padding: 0; }
+.lv-daterange__row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.lv-daterange__input { padding: 6px 8px; font-family: var(--font-sans); font-size: var(--lv-fs-body); color-scheme: inherit; }
+.lv-daterange__warn { margin: 6px 0 0; flex-basis: 100%; }
+
+/* 頁碼分頁（components/Pager） */
+.lv-pager2 {
+  display: flex; justify-content: space-between; align-items: center; gap: 12px 20px; flex-wrap: wrap;
+  margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--line);
+  font-family: var(--font-mono); font-size: var(--lv-fs-meta); color: var(--ink-soft);
+}
+.lv-pager2__left, .lv-pager2__right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.lv-pager2__select { width: auto; padding: 4px 8px; font-size: var(--lv-fs-meta); }
+.lv-pager2__pages { list-style: none; margin: 0; padding: 0; display: flex; gap: 4px; align-items: center; }
+.lv-pager2__btn { min-width: 34px; min-height: 32px; display: inline-flex; align-items: center; justify-content: center; padding: 4px 8px; }
+.lv-pager2__btn.is-current { background: var(--zone-tint); border-color: var(--zone-stroke); color: var(--ink-title); }
+.lv-pager2__gap { padding: 0 4px; color: var(--ink-mute); }
+.lv-pager2__jump { display: flex; align-items: center; gap: 6px; margin-left: 8px; }
+.lv-pager2__jump-input { width: 64px; padding: 4px 6px; font-size: var(--lv-fs-meta); }
 .btn-terminal:disabled { opacity: .35; cursor: not-allowed; }
 
 /* ── 筆記詳情 ─────────────────────────────────────────── */
@@ -833,7 +870,20 @@ button.lv-wikilink { background: none; border: none; border-bottom: 1px dashed v
 .lv-health-count--warn.is-nonzero { border-color: var(--uep-gold); background: color-mix(in srgb, var(--uep-gold) 8%, transparent); }
 .lv-health-count--warn.is-nonzero .lv-health-count__n { color: var(--lv-gold-text); }
 .lv-health-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 400px); gap: 32px; }
-.lv-health-groups { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+.lv-health-grid { align-items: start; }
+/* 檢查清單固定頁高、內部捲動：分類多時不必整頁往下翻，右側狀態欄保持可見 */
+.lv-health-groups {
+  display: flex; flex-direction: column; gap: 18px; min-width: 0;
+  max-height: calc(100vh - var(--topbar-h) - 48px); overflow-y: auto; overscroll-behavior: contain;
+  position: sticky; top: calc(var(--topbar-h) + 24px); padding-right: 6px;
+}
+.lv-health-groups:focus-visible { outline: 2px solid var(--lv-focus); outline-offset: 4px; }
+details.lv-check-group > summary { list-style: none; }
+details.lv-check-group > summary::-webkit-details-marker { display: none; }
+details.lv-check-group > summary::before { content: '▾'; margin-right: 8px; font-family: var(--font-sans); }
+details.lv-check-group:not([open]) > summary::before { content: '▸'; }
+details.lv-check-group > summary { justify-content: flex-start; }
+details.lv-check-group > summary .lv-check-group__note { margin-left: auto; }
 .lv-health-side { display: flex; flex-direction: column; gap: 28px; }
 .lv-check-group { border: 1px solid var(--line); }
 .lv-check-group--fail { border-color: color-mix(in srgb, var(--status-error) 60%, transparent); }
@@ -865,6 +915,10 @@ details.lv-check > .lv-check__head { cursor: pointer; }
 .lv-kv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 16px; margin: 0; font-size: var(--lv-fs-body); }
 .lv-kv dt { font-family: var(--font-mono); font-size: var(--lv-fs-meta); letter-spacing: .12em; color: var(--ink-mute); padding-top: 2px; }
 .lv-kv dd { margin: 0; overflow-wrap: anywhere; }
+.lv-model-state--ok { color: var(--lv-success-text); }
+.lv-model-state--warn { color: var(--lv-gold-text); }
+.lv-model-state--unknown { color: var(--ink-soft); }
+.lv-model-state .lv-status__raw { color: var(--ink-soft); }
 /* 側欄的 key-value：標籤在上、值在下，窄欄不擠壓換行 */
 .lv-kv--stack { grid-template-columns: minmax(0, 1fr); gap: 2px; }
 .lv-kv--stack dd + dt { margin-top: 12px; }
@@ -890,7 +944,6 @@ details.lv-check > .lv-check__head { cursor: pointer; }
 .lv-memory-episodes .lv-machine, .lv-episode-group .lv-machine { grid-template-columns: minmax(0, 1fr) auto auto; color: var(--ink-soft); }
 
 .lv-memory-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 300px); gap: 32px; margin-top: 16px; }
-.lv-filters--tight { margin: 0 0 16px; gap: 16px; }
 .lv-filters__group { display: flex; align-items: center; gap: 8px; }
 .lv-concepts { list-style: none; margin: 12px 0 0; padding: 0; }
 .lv-concept { display: grid; grid-template-columns: minmax(0, 1fr) 110px; gap: 16px; padding: 14px 4px; border-bottom: 1px solid var(--line); }
@@ -1000,6 +1053,7 @@ details.lv-check > .lv-check__head { cursor: pointer; }
 
 /* 頂列工具與抽屜（桌面：抽屜相關元素不顯示） */
 .lv-header__tools { display: flex; align-items: center; gap: 8px; }
+.lv-header__tools .lv-icon-btn { width: 40px; height: 40px; min-width: 40px; padding: 0; justify-content: center; }
 .lv-menu-btn, .lv-scrim, .lv-sidebar__tools { display: none; }
 .lv-brand__text { min-width: 0; }
 
@@ -1028,6 +1082,8 @@ details.lv-check > .lv-check__head { cursor: pointer; }
   .lv-table__head, .lv-table__row { gap: 10px; }
   .lv-doc__grid { grid-template-columns: minmax(140px, 180px) minmax(0, 1fr); gap: 24px; }
   .lv-health-grid, .lv-memory-grid { grid-template-columns: minmax(0, 1fr); }
+  /* 單欄時改回整頁捲動（內層捲動在窄螢幕難操作） */
+  .lv-health-groups { max-height: none; overflow: visible; position: static; padding-right: 0; }
   .lv-detail { gap: 32px; grid-template-columns: minmax(0, 1fr) minmax(220px, 280px); }
   .lv-new { gap: 28px; }
 }
@@ -1083,6 +1139,9 @@ details.lv-check > .lv-check__head { cursor: pointer; }
   .lv-sidebar__tools { display: flex; gap: 8px; }
   .lv-sidebar__tools .lv-icon-btn { width: 44px; height: 44px; padding: 0; }
   .lv-write-target { margin-top: 0; }
+  /* 抽屜本身可捲動：手機不再做內層捲動 */
+  .lv-vaults__list { max-height: none; overflow: visible; }
+  .lv-vaults__toggle { min-height: 44px; }
 
   .lv-main { padding: 20px var(--gutter-mobile) 64px; }
   .lv-title { font-size: 32px; margin-bottom: 18px; }
@@ -1136,5 +1195,11 @@ details.lv-check > .lv-check__head { cursor: pointer; }
   .lv-vpick__box { width: auto; }
   .lv-vpick__input { min-height: 44px; font-size: 16px; }
   .lv-vpick__opt { min-height: 44px; }
+  .lv-pager2 { flex-direction: column; align-items: stretch; }
+  .lv-pager2__right { justify-content: center; }
+  .lv-pager2__btn { min-height: 44px; min-width: 44px; }
+  .lv-pager2__jump { margin-left: 0; }
+  .lv-daterange { flex-wrap: wrap; }
+  .lv-filter-panel { padding: 14px; }
   .lv-search__input { font-size: 16px; }
 }

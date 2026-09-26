@@ -358,6 +358,13 @@ describe('系統健康', () => {
     const groups = document.querySelectorAll('[data-category]');
     expect(groups[0]!.getAttribute('data-category')).toBe('notes');
     expect(groups[1]!.getAttribute('data-category')).toBe('enrich');
+    // 分類可收合：有 fail／warn 的展開、全部通過的收合
+    expect((groups[0] as HTMLDetailsElement).open).toBe(true);
+    expect((groups[1] as HTMLDetailsElement).open).toBe(true);
+    const storage = document.querySelector('[data-category="storage"]') as HTMLDetailsElement;
+    expect(storage.tagName).toBe('DETAILS');
+    expect(storage.open).toBe(false);
+    expect(storage.querySelector('summary')!.textContent).toContain('1 PASS');
     const fail = screen.getByTestId('check-notes.fts') as HTMLDetailsElement;
     expect(fail.open).toBe(true);
     expect(fail.textContent).toContain('缺 n9');
@@ -365,6 +372,9 @@ describe('系統健康', () => {
     expect((screen.getByTestId('check-enrich.stale') as HTMLDetailsElement).open).toBe(false);
     expect(screen.getByTestId('health-backup').textContent).toContain('backup_dir');
     expect(screen.getByTestId('health-warmup').textContent).toContain('暖機失敗');
+    // 舊版服務沒有 model_loaded：顯示無法確認，不說離線
+    expect(screen.getByTestId('health-model').textContent).toContain('無法確認');
+    expect(screen.getByTestId('health-recall').textContent).toContain('沒有降級紀錄');
     expect(reportHealth).toHaveBeenCalledWith(expect.objectContaining({ ok: false, fail: 1, warn: 1 }));
 
     const machines = await screen.findByTestId('machines');
@@ -392,9 +402,13 @@ describe('系統健康', () => {
 describe('記憶層', () => {
   it('非 dev space：顯示只屬於 dev 的說明，不查 concept', () => {
     const { api, calls } = makeApi({});
-    renderWithApp(<Memory />, api, { space: 'personal', vaults: [] });
-    expect(screen.getByTestId('memory-dev-only').textContent).toContain('只屬於 dev');
+    const { switchSpace } = renderWithApp(<Memory />, api, { space: 'personal', vaults: [] });
+    const empty = screen.getByTestId('memory-dev-only');
+    expect(empty.textContent).toContain('只屬於 dev');
+    expect(empty.className).toContain('lv-empty-state');
     expect(calls).toHaveLength(0);
+    fireEvent.click(screen.getByRole('button', { name: '切換到 DEV 檢視' }));
+    expect(switchSpace).toHaveBeenCalledWith('dev', '/ui/memory');
   });
 
   it('dev：依 kind／scope 篩選查 concept_query，只顯示 statement 與 metadata', async () => {
@@ -416,6 +430,7 @@ describe('記憶層', () => {
             },
           ],
           next_cursor: 'c2',
+          total: 75,
         }),
       '/v1/episode_summary': () => json({ space: 'dev', vault: '*', total: 5, last_recorded: null, by_machine: [], by_vault: [] }),
     });
@@ -428,8 +443,23 @@ describe('記憶層', () => {
     await waitFor(() => expect(callsTo('/v1/concept_query').at(-1)!.body).toMatchObject({ kind: 'user-stance' }));
     fireEvent.click(screen.getByRole('button', { name: '跨專案' }));
     await waitFor(() => expect(callsTo('/v1/concept_query').at(-1)!.body).toMatchObject({ scope_state: 'global', kind: 'user-stance' }));
-    fireEvent.click(screen.getByRole('button', { name: '下一頁 →' }));
-    await waitFor(() => expect(callsTo('/v1/concept_query').at(-1)!.body).toMatchObject({ cursor: 'c2' }));
+    // 分頁元件：每頁 30、共 75 則 → 3 頁；下一頁送 offset 30，改每頁筆數回第一頁
+    expect(callsTo('/v1/concept_query').at(-1)!.body).toMatchObject({ limit: 30, offset: 0, with_total: true });
+    fireEvent.click(screen.getByRole('button', { name: '下一頁' }));
+    await waitFor(() => expect(callsTo('/v1/concept_query').at(-1)!.body).toMatchObject({ offset: 30 }));
+    fireEvent.click(screen.getByRole('button', { name: '第 3 頁' }));
+    await waitFor(() => expect(callsTo('/v1/concept_query').at(-1)!.body).toMatchObject({ offset: 60 }));
+    fireEvent.change(screen.getByRole('combobox', { name: '每頁筆數' }), { target: { value: '10' } });
+    await waitFor(() => expect(callsTo('/v1/concept_query').at(-1)!.body).toMatchObject({ limit: 10, offset: 0 }));
+    // 日期區間：起日本地 00:00、訖日本地 23:59:59.999（含端點）
+    fireEvent.input(screen.getByLabelText('起日'), { target: { value: '2026-09-01' } });
+    fireEvent.input(screen.getByLabelText('訖日'), { target: { value: '2026-09-02' } });
+    await waitFor(() =>
+      expect(callsTo('/v1/concept_query').at(-1)!.body).toMatchObject({
+        since: new Date(2026, 8, 1, 0, 0, 0, 0).toISOString(),
+        until: new Date(2026, 8, 2, 23, 59, 59, 999).toISOString(),
+      }),
+    );
     expect(await screen.findByTestId('episode-total')).toBeTruthy();
   });
 });

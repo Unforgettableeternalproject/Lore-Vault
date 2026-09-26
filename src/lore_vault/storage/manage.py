@@ -29,6 +29,7 @@ from . import documents as store
 from .checks import MAX_DETAILS, Reconciliation
 from .db import transaction
 from .errors import NotFound, StorageError, UnknownVault, VaultRequired
+from .timeutil import normalize_utc
 from .vaults import (
     ALL_VAULTS,
     check_key_prefix,
@@ -472,14 +473,88 @@ def query_concepts(
     kind: str | None = None,
     limit: int = 50,
     cursor: tuple[str, str] | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    offset: int = 0,
 ) -> tuple[list[dict[str, Any]], tuple[str, str] | None]:
     """依 (updated, id) 由新到舊分頁。只回 metadata 與 statement（白名單欄位）。
 
     `scope`：不分大小寫比對 repo scope；`scope_state`：repo／global／missing。
+    `since`／`until`：updated 區間（含端點）；`offset`：頁碼分頁，與 `cursor` 擇一。
     """
-    scope_range = resolve_read(conn, vault, space=space)
     if not 0 < limit <= 200:
         raise ValueError(f"limit 必須在 1～200，得到 {limit}")
+    if offset < 0:
+        raise ValueError(f"offset 不可為負，得到 {offset}")
+    if offset and cursor is not None:
+        raise ValueError("offset 與 cursor 只能擇一")
+    conditions, args = _concept_filters(
+        conn,
+        vault,
+        space=space,
+        scope=scope,
+        scope_state=scope_state,
+        kind=kind,
+        since=since,
+        until=until,
+    )
+    if cursor is not None:
+        conditions.append("(updated, id) < (?, ?)")
+        args.extend(cursor)
+    rows = conn.execute(
+        f"""
+        SELECT id, vault, kind, scope_state, scope, data, updated FROM concepts
+        WHERE {" AND ".join(conditions)}
+        ORDER BY updated DESC, id DESC LIMIT ? OFFSET ?
+        """,
+        (*args, limit + 1, offset),
+    ).fetchall()
+    page = rows[:limit]
+    items = [_concept_item(r) for r in page]
+    next_cursor = (page[-1]["updated"], page[-1]["id"]) if len(rows) > limit else None
+    return items, next_cursor
+
+
+def count_concepts(
+    conn: sqlite3.Connection,
+    vault: object,
+    *,
+    space: object,
+    scope: str | None = None,
+    scope_state: str | None = None,
+    kind: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+) -> int:
+    """與 `query_concepts` 相同篩選條件下的總筆數。"""
+    conditions, args = _concept_filters(
+        conn,
+        vault,
+        space=space,
+        scope=scope,
+        scope_state=scope_state,
+        kind=kind,
+        since=since,
+        until=until,
+    )
+    row = conn.execute(
+        f"SELECT count(*) FROM concepts WHERE {' AND '.join(conditions)}", args
+    ).fetchone()
+    return int(row[0])
+
+
+def _concept_filters(
+    conn: sqlite3.Connection,
+    vault: object,
+    *,
+    space: object,
+    scope: str | None,
+    scope_state: str | None,
+    kind: str | None,
+    since: str | None,
+    until: str | None,
+) -> tuple[list[str], list[Any]]:
+    scope_range = resolve_read(conn, vault, space=space)
     if scope_state is not None and scope_state not in SCOPE_STATES:
         raise ValueError(f"scope_state 必須是 {sorted(SCOPE_STATES)} 之一")
     clause, params = vault_clause(scope_range, "vault")
@@ -494,21 +569,13 @@ def query_concepts(
     if kind is not None:
         conditions.append("kind = ?")
         args.append(kind)
-    if cursor is not None:
-        conditions.append("(updated, id) < (?, ?)")
-        args.extend(cursor)
-    rows = conn.execute(
-        f"""
-        SELECT id, vault, kind, scope_state, scope, data, updated FROM concepts
-        WHERE {" AND ".join(conditions)}
-        ORDER BY updated DESC, id DESC LIMIT ?
-        """,
-        (*args, limit + 1),
-    ).fetchall()
-    page = rows[:limit]
-    items = [_concept_item(r) for r in page]
-    next_cursor = (page[-1]["updated"], page[-1]["id"]) if len(rows) > limit else None
-    return items, next_cursor
+    if since is not None:
+        conditions.append("updated >= ?")
+        args.append(normalize_utc(since))
+    if until is not None:
+        conditions.append("updated <= ?")
+        args.append(normalize_utc(until))
+    return conditions, args
 
 
 def _concept_item(row: sqlite3.Row) -> dict[str, Any]:

@@ -115,6 +115,11 @@ class GetRequest(_ScopedReq):
 class ListRequest(_ScopedReq):
     vault: str | None = None
     since: str | None = None
+    # updated 上界（含端點）；與 since 一起做日期區間
+    until: str | None = None
+    # 頁碼分頁：跳過前面幾筆（與 cursor 擇一）；with_total 另回總筆數
+    offset: int | None = Field(default=None, ge=0)
+    with_total: bool = False
     topics: list[str] | None = None
     cursor: str | None = None
     limit: int = DEFAULT_LIST_LIMIT
@@ -272,6 +277,9 @@ def list_(request: Request, req: ListRequest) -> dict[str, Any]:
             limit=req.limit,
             kinds=req.kinds,
             budget=req.budget,
+            until=req.until,
+            offset=req.offset,
+            with_total=req.with_total,
         )
     return result.to_dict()
 
@@ -394,7 +402,12 @@ def status_(
         "space": space,
         "vault": vault_info,
         # 暖機失敗不算不健康：只代表剛啟動時 recall／查重可能降級
-        "embedding": {"warmup": state.warmup.status()},
+        # model_loaded：Ollama 目前是否載入模型（/api/ps；無法判斷為 null）。
+        # 未載入不是離線：下一次查詢會冷啟動（用 cold_query_timeout），只是較慢
+        "embedding": {
+            "warmup": state.warmup.status(),
+            "model_loaded": state.embedding_model_loaded(),
+        },
         "enrich": {
             "worker": worker,
             "backlog": {

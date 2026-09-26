@@ -4,8 +4,9 @@
 import { useEffect, useState } from 'preact/hooks';
 
 import { Banner, EmptyState, ErrorState, Loading } from '../components/ui';
+import type { Notice } from '../lib/api';
 import { useApp } from '../lib/context';
-import { describeError, formatTime, isAbort, stripInternalRefs } from '../lib/format';
+import { describeDegradedReason, describeError, describeModelLoaded, formatTime, isAbort, stripInternalRefs } from '../lib/format';
 import {
   EPISODE_STALE_HOURS,
   STATUS_LABEL,
@@ -117,7 +118,14 @@ export function Health() {
   );
 }
 
+function recallReason(notice: Notice): string | null {
+  const detail = notice.detail as { reason?: unknown } | undefined;
+  return typeof detail?.reason === 'string' ? detail.reason : null;
+}
+
 function StatusView({ status }: { status: StatusResult }) {
+  const { recallDegraded } = useApp();
+  const model = describeModelLoaded(status.embedding.model_loaded);
   const doctor = status.doctor;
   const { server, client } = splitClientChecks(doctor.checks);
   // 客戶端檢查在服務端必然略過：不算進「SKIP」，免得看起來像設定缺漏
@@ -160,14 +168,10 @@ function StatusView({ status }: { status: StatusResult }) {
       </div>
 
       <div class="lv-health-grid">
-        <div class="lv-health-groups">
+        {/* 檢查清單在固定高度的區塊內捲動（窄螢幕改回整頁捲動）；可用 Tab 聚焦後以方向鍵捲動 */}
+        <div class="lv-health-groups" role="region" aria-label="檢查項目" tabIndex={0} data-testid="health-groups">
           {groups.map((g) => (
-            <section key={g.category} class={`lv-check-group lv-check-group--${g.worst}`} data-category={g.category}>
-              <h2 class="lv-check-group__title">{g.category}</h2>
-              {g.checks.map((c) => (
-                <CheckRow key={c.name} check={c} />
-              ))}
-            </section>
+            <CheckGroup key={g.category} category={g.category} worst={g.worst} checks={g.checks} />
           ))}
           {client.length > 0 && <ClientChecks checks={client} />}
         </div>
@@ -191,9 +195,26 @@ function StatusView({ status }: { status: StatusResult }) {
                 <BackupView check={backup} />
               </dd>
               <dt>語意模型</dt>
+              <dd data-testid="health-model" class={`lv-model-state lv-model-state--${model.tone}`}>
+                {model.label}
+                <span class="lv-status__raw">{model.note}</span>
+              </dd>
+              <dt>啟動暖機</dt>
               <dd data-testid="health-warmup" class={status.embedding.warmup.status === 'failed' ? 'lv-text-error' : undefined}>
                 {WARMUP_LABEL[status.embedding.warmup.status] ?? status.embedding.warmup.status}
                 {status.embedding.warmup.error && <span class="lv-status__raw">{status.embedding.warmup.error}</span>}
+                <span class="lv-status__raw">只在服務啟動時做一次；模型閒置後會被卸載</span>
+              </dd>
+              <dt>最近一次檢索</dt>
+              <dd data-testid="health-recall">
+                {recallDegraded ? (
+                  <span class="lv-text-warn">
+                    只用了關鍵字比對
+                    <span class="lv-status__raw">{describeDegradedReason(recallReason(recallDegraded))}</span>
+                  </span>
+                ) : (
+                  <span>本次登入沒有降級紀錄</span>
+                )}
               </dd>
               <dt>schema</dt>
               <dd>v{status.schema.version}</dd>
@@ -202,6 +223,29 @@ function StatusView({ status }: { status: StatusResult }) {
         </aside>
       </div>
     </>
+  );
+}
+
+/** 一個檢查分類：可收合；有 fail／warn 的預設展開，全部通過（或略過）的預設收合。 */
+function CheckGroup({ category, worst, checks }: { category: string; worst: string; checks: DoctorCheck[] }) {
+  const counts = checks.reduce<Record<string, number>>((acc, c) => {
+    acc[c.status] = (acc[c.status] ?? 0) + 1;
+    return acc;
+  }, {});
+  const summary = (['fail', 'warn', 'skipped', 'pass'] as const)
+    .filter((k) => counts[k])
+    .map((k) => `${counts[k]} ${STATUS_LABEL[k]}`)
+    .join(' · ');
+  return (
+    <details class={`lv-check-group lv-check-group--${worst}`} data-category={category} open={worst === 'fail' || worst === 'warn'}>
+      <summary class="lv-check-group__title lv-check-group__summary">
+        <span>{category}</span>
+        <span class="lv-check-group__note">{summary}</span>
+      </summary>
+      {checks.map((c) => (
+        <CheckRow key={c.name} check={c} />
+      ))}
+    </details>
   );
 }
 

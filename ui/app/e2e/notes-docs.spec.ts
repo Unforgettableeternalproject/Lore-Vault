@@ -43,7 +43,8 @@ test('寫筆記 → 檢索命中 → 開啟詳情', async ({ page }) => {
   await expect(hit).toBeVisible();
   await expect(hit.locator('.lv-src')).toHaveText('首段'); // enrich worker 關閉：摘要尚未產生
   await expect(hit.getByTestId('result-author')).toHaveText('Xavier (Bernie)');
-  await expect(page.getByRole('button', { name: '語意檢索離線' })).toBeVisible();
+  // 降級原因依環境是連線被拒（離線）或逾時；兩種都要在頂列標示
+  await expect(page.getByTestId('header-recall-badge')).toHaveText(/語意檢索(離線|逾時)/);
 
   await hit.click();
   await expect(page.getByRole('heading', { name: 'zephyrquartz 注入預算調整' })).toBeVisible();

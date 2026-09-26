@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import type { NoteListItem } from '../lib/types';
 import { json, makeApi, renderWithApp, TEST_LIMITS, type Handler } from '../test/harness';
+import { DEFAULT_PAGE_SIZE } from '../components/Pager';
 import { LIST_SUMMARY_CHARS, Notes } from './Notes';
 
 afterEach(cleanup);
@@ -67,8 +68,10 @@ describe('筆記列表', () => {
     const banner = await screen.findByTestId('list-truncated');
     expect(banner.textContent).toContain('1 則的摘要沒有列出');
     const first = callsTo('/v1/list')[0]!.body;
-    expect(first.limit).toBe(TEST_LIMITS.list_default_limit);
-    expect(first.budget).toBe(TEST_LIMITS.list_default_limit * LIST_SUMMARY_CHARS);
+    // 預設每頁 30 則（分頁元件），以 offset／with_total 取頁
+    expect(first.limit).toBe(DEFAULT_PAGE_SIZE);
+    expect(first).toMatchObject({ offset: 0, with_total: true });
+    expect(first.budget).toBe(Math.max(TEST_LIMITS.list_default_budget, DEFAULT_PAGE_SIZE * LIST_SUMMARY_CHARS));
     expect(screen.getByText('摘要省略').getAttribute('data-source')).toBe('omitted');
 
     fireEvent.click(screen.getByRole('button', { name: '顯示更多摘要' }));

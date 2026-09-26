@@ -78,6 +78,9 @@ class EmbeddingConfig:
     # 請求路徑（HTTP API 的 recall 與 write 查重）的 embedding 逾時（秒）。
     # 與背景補算的 `timeout` 分開：請求端不能被 Ollama 拖住，逾時即降級。
     query_timeout: float = 3.0
+    # 模型未載入（Ollama `/api/ps` 沒有這個模型）時，請求路徑改用的較長逾時（秒）：
+    # 冷啟動載入可能超過 `query_timeout`，用短逾時會讓閒置後的第一次查詢必定降級。
+    cold_query_timeout: float = 20.0
     # 每分鐘呼叫上限；0 = 不限
     rate_per_minute: int = 0
     # Ollama `keep_alive`：請求後模型留在記憶體多久（Go duration，如 "30m"；
@@ -371,6 +374,7 @@ def _validate(config: Config) -> None:
         "embedding.dim": config.embedding.dim,
         "embedding.timeout": config.embedding.timeout,
         "embedding.query_timeout": config.embedding.query_timeout,
+        "embedding.cold_query_timeout": config.embedding.cold_query_timeout,
         "summary.max_completion_tokens": config.summary.max_completion_tokens,
         "summary.timeout": config.summary.timeout,
         "worker.max_attempts": config.worker.max_attempts,

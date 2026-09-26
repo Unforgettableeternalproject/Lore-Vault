@@ -7,12 +7,18 @@ import shutil
 import sqlite3
 import tempfile
 import threading
+import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from lore_vault.enrich.clients import EnrichTimeout, OllamaEmbedder, urllib_transport
+from lore_vault.enrich.clients import (
+    EnrichTimeout,
+    OllamaEmbedder,
+    ollama_model_loaded,
+    urllib_transport,
+)
 from lore_vault.enrich.command import build_worker
 from lore_vault.enrich.worker import EnrichWorker
 from lore_vault.recall.embedder import Embedder
@@ -25,22 +31,66 @@ from .background import BackgroundEnricher
 from .settings import ApiSettings
 from .warmup import EmbeddingWarmup
 
+# `/api/ps` 探測的逾時（秒）：探測本身不能拖慢請求
+PROBE_TIMEOUT = 1.0
+# 最近一次成功呼叫後的這段時間內視為模型仍在記憶體，不再探測（遠小於 keep_alive）
+HOT_WINDOW = 60.0
+
 
 class QueryEmbedder:
-    """請求路徑用的 Ollama embedder：短逾時（`embedding.query_timeout`），
-    逾時轉成 `TimeoutError`，讓 recall／查重標成 `embedder_timeout` 降級。"""
+    """請求路徑用的 Ollama embedder，逾時轉成 `TimeoutError`，讓 recall／查重標成
+    `embedder_timeout` 降級。
 
-    def __init__(self, inner: OllamaEmbedder) -> None:
+    逾時依模型是否已載入決定：已載入用短逾時（`embedding.query_timeout`）；
+    Ollama `/api/ps` 回報模型未載入（冷啟動）時改用 `embedding.cold_query_timeout`，
+    閒置被卸載後的第一次查詢才不會必定降級。最近一次成功呼叫在 `HOT_WINDOW` 內不探測；
+    探測失敗（None）維持短逾時——Ollama 狀況不明時不把請求拖長。
+    """
+
+    def __init__(
+        self,
+        inner: OllamaEmbedder,
+        *,
+        cold: OllamaEmbedder | None = None,
+        probe: Callable[[], bool | None] | None = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._inner = inner
+        self._cold = cold
+        self._probe = probe
+        self._clock = clock
+        self._last_ok: float | None = None
+        self._lock = threading.Lock()
 
     def __repr__(self) -> str:
-        return f"QueryEmbedder({self._inner!r}, timeout={self._inner.timeout})"
+        cold = self._cold.timeout if self._cold is not None else None
+        return (
+            f"QueryEmbedder({self._inner!r}, timeout={self._inner.timeout}, "
+            f"cold_timeout={cold})"
+        )
+
+    def model_loaded(self) -> bool | None:
+        """模型目前是否載入（`/api/ps`）；無法判斷回 None。"""
+        return self._probe() if self._probe is not None else None
+
+    def _pick(self) -> OllamaEmbedder:
+        if self._cold is None or self._probe is None:
+            return self._inner
+        with self._lock:
+            last = self._last_ok
+        if last is not None and self._clock() - last < HOT_WINDOW:
+            return self._inner
+        return self._cold if self._probe() is False else self._inner
 
     def embed(self, text: str) -> Sequence[float]:
+        embedder = self._pick()
         try:
-            return self._inner.embed(text)
+            vector = embedder.embed(text)
         except EnrichTimeout as exc:
             raise TimeoutError(str(exc)) from None
+        with self._lock:
+            self._last_ok = self._clock()
+        return vector
 
 
 def _transport(settings: ApiSettings):
@@ -49,11 +99,18 @@ def _transport(settings: ApiSettings):
 
 def default_query_embedder(settings: ApiSettings) -> Embedder:
     cfg = settings.config.embedding
+    transport = _transport(settings)
     return QueryEmbedder(
         OllamaEmbedder(
-            dataclasses.replace(cfg, timeout=cfg.query_timeout),
-            transport=_transport(settings),
-        )
+            dataclasses.replace(cfg, timeout=cfg.query_timeout), transport=transport
+        ),
+        cold=OllamaEmbedder(
+            dataclasses.replace(cfg, timeout=cfg.cold_query_timeout),
+            transport=transport,
+        ),
+        probe=lambda: ollama_model_loaded(
+            cfg.base_url, cfg.model, transport=transport, timeout=PROBE_TIMEOUT
+        ),
     )
 
 
@@ -110,6 +167,10 @@ class AppState:
         self._snapshot_cache: SnapshotCache | None = None
         self._snapshot_tmp: Path | None = None
         self._snapshot_lock = threading.Lock()
+
+    def embedding_model_loaded(self) -> bool | None:
+        probe = getattr(self.query_embedder, "model_loaded", None)
+        return probe() if callable(probe) else None
 
     def _default_worker(
         self, conn: sqlite3.Connection, should_stop: Callable[[], bool]

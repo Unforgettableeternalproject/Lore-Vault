@@ -394,26 +394,49 @@ def reset_for_retry(
     return _row_to_document(row)
 
 
-def list_documents_since(
+def _since_filters(
     conn: sqlite3.Connection,
     vault: str,
     *,
     space: str,
-    since: str | None = None,
-    limit: int = 50,
-    cursor: tuple[str, str] | None = None,
-) -> tuple[list[Document], tuple[str, str] | None]:
-    """`list` 工具用：依 (updated, id) 由新到舊、`updated >= since`，分頁同
-    `list_documents`。"""
+    since: str | None,
+    until: str | None,
+) -> tuple[list[str], list[Any]]:
     scope = resolve_read(conn, vault, space=space)
-    if limit <= 0:
-        raise ValueError(f"limit 必須大於 0，得到 {limit}")
     clause, params = vault_clause(scope, "vault")
     conditions = [clause]
     args: list[Any] = [*params]
     if since is not None:
         conditions.append("updated >= ?")
         args.append(since)
+    if until is not None:
+        conditions.append("updated <= ?")
+        args.append(until)
+    return conditions, args
+
+
+def list_documents_since(
+    conn: sqlite3.Connection,
+    vault: str,
+    *,
+    space: str,
+    since: str | None = None,
+    until: str | None = None,
+    limit: int = 50,
+    cursor: tuple[str, str] | None = None,
+    offset: int = 0,
+) -> tuple[list[Document], tuple[str, str] | None]:
+    """`list` 工具用：依 (updated, id) 由新到舊、`since <= updated <= until`（含端點），
+    分頁同 `list_documents`；`offset` 為頁碼分頁用，與 `cursor` 擇一。"""
+    if limit <= 0:
+        raise ValueError(f"limit 必須大於 0，得到 {limit}")
+    if offset < 0:
+        raise ValueError(f"offset 不可為負，得到 {offset}")
+    if offset and cursor is not None:
+        raise ValueError("offset 與 cursor 只能擇一")
+    conditions, args = _since_filters(
+        conn, vault, space=space, since=since, until=until
+    )
     if cursor is not None:
         conditions.append("(updated, id) < (?, ?)")
         args.extend(cursor)
@@ -421,13 +444,31 @@ def list_documents_since(
         f"""
         SELECT * FROM documents WHERE {" AND ".join(conditions)}
         ORDER BY updated DESC, id DESC
-        LIMIT ?
+        LIMIT ? OFFSET ?
         """,
-        (*args, limit + 1),
+        (*args, limit + 1, offset),
     ).fetchall()
     page = [_row_to_document(r) for r in rows[:limit]]
     next_cursor = (page[-1].updated, page[-1].id) if len(rows) > limit else None
     return page, next_cursor
+
+
+def count_documents_since(
+    conn: sqlite3.Connection,
+    vault: str,
+    *,
+    space: str,
+    since: str | None = None,
+    until: str | None = None,
+) -> int:
+    """與 `list_documents_since` 相同篩選條件下的總筆數。"""
+    conditions, args = _since_filters(
+        conn, vault, space=space, since=since, until=until
+    )
+    row = conn.execute(
+        f"SELECT count(*) FROM documents WHERE {' AND '.join(conditions)}", args
+    ).fetchone()
+    return int(row[0])
 
 
 def get_documents(

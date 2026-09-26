@@ -7,9 +7,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks'
 import { Dialog, EmptyState } from '../components/ui';
 import type { ApiClient, Notice } from '../lib/api';
 import { ALL, AppContext, type AppEnv, type HealthBadge, type ToastKind, type VaultsState } from '../lib/context';
-import { describeError } from '../lib/format';
+import { describeError, recallDegradedBadge } from '../lib/format';
 import { healthBadge } from '../lib/health';
-import { loadSpace, saveSpace, type Theme } from '../lib/prefs';
+import { loadSpace, loadVaultsCollapsed, saveSpace, saveVaultsCollapsed, type Theme } from '../lib/prefs';
 import { SCREENS, routePath, useRoute, type ScreenId } from '../lib/router';
 import { createShortcutHandler, SHORTCUTS } from '../lib/shortcuts';
 import { SPACES, type SpaceId } from '../lib/spaces';
@@ -61,6 +61,14 @@ export function Shell({ api, principal, author, limits, theme, onToggleTheme, de
   // 窄螢幕的側欄抽屜與快捷鍵說明
   const [navOpen, setNavOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  // 側欄 vault 區段：可收合（記住狀態），展開時限高捲動，讓下方寫入位置留在首屏
+  const [vaultsCollapsed, setVaultsCollapsed] = useState(loadVaultsCollapsed);
+  const vaultList = useRef<HTMLUListElement>(null);
+  const toggleVaults = () =>
+    setVaultsCollapsed((c) => {
+      saveVaultsCollapsed(!c);
+      return !c;
+    });
   const menuBtn = useRef<HTMLButtonElement>(null);
   const sidebar = useRef<HTMLElement>(null);
 
@@ -166,11 +174,27 @@ export function Shell({ api, principal, author, limits, theme, onToggleTheme, de
       toast,
       health,
       reportHealth: setHealth,
+      recallDegraded: degraded,
       switchSpace,
     }),
     // navigate／switchSpace 每次 render 都是新函式，但行為不變；不列入以免畫面重掛
-    [api, principal, author, limits, space, vaults, vault, toast, health],
+    [api, principal, author, limits, space, vaults, vault, toast, health, degraded],
   );
+
+  // 目前選的 vault 捲進可視範圍（限高清單，選到下面的項目時不必自己捲）。
+  // 只調整清單自己的 scrollTop：scrollIntoView 會把瀏覽器的鍵盤起點移到該項目，頁面載入後第一個 Tab 就不是「跳到主內容」
+  useEffect(() => {
+    const list = vaultList.current;
+    if (vaultsCollapsed || !list) return;
+    const active = list.querySelector<HTMLElement>('.lv-vaults__item.is-active');
+    if (!active) return;
+    const top = active.offsetTop - list.offsetTop;
+    const bottom = top + active.offsetHeight;
+    if (top < list.scrollTop) list.scrollTop = top;
+    else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight;
+  }, [vault, vaultsCollapsed, vaults.items.length]);
+
+  const degradedBadge = degraded ? recallDegradedBadge(degradedReason(degraded)) : null;
 
   const vaultLabel =
     vault === ALL ? '本 space 全部' : (vaults.items.find((v) => v.key === vault)?.display ?? vault);
@@ -228,14 +252,15 @@ export function Shell({ api, principal, author, limits, theme, onToggleTheme, de
               {health.error ? '健檢無法取得' : `健檢 ${health.fail} 項失敗`}
             </button>
           )}
-          {degraded && (
+          {degradedBadge && (
             <button
               type="button"
               class="lv-degraded-badge"
+              data-testid="header-recall-badge"
               onClick={() => navigate(routePath('health'))}
-              title={describeDegraded(degraded)}
+              title={degradedBadge.title}
             >
-              語意檢索離線
+              {degradedBadge.label}
             </button>
           )}
           <div class="lv-header__tools">
@@ -257,8 +282,14 @@ export function Shell({ api, principal, author, limits, theme, onToggleTheme, de
             >
               <span aria-hidden="true">{theme === 'dark' ? '☀' : '☾'}</span>
             </button>
-            <button type="button" class="btn-outline btn-outline--sm" onClick={onLogout}>
-              登出
+            <button
+              type="button"
+              class="btn-outline btn-outline--sm lv-icon-btn"
+              onClick={onLogout}
+              aria-label="登出"
+              title="登出"
+            >
+              <LogoutIcon />
             </button>
           </div>
         </header>
@@ -301,8 +332,27 @@ export function Shell({ api, principal, author, limits, theme, onToggleTheme, de
             </nav>
             <div class="lv-vaults">
               <div class="lv-vaults__head">
-                <span id="lv-vaults-label">VAULTS · {space.en}</span>
+                <button
+                  type="button"
+                  class="lv-vaults__toggle"
+                  id="lv-vaults-label"
+                  aria-expanded={!vaultsCollapsed}
+                  aria-controls="lv-vaults-body"
+                  onClick={toggleVaults}
+                >
+                  <span class="lv-vaults__caret" aria-hidden="true">
+                    {vaultsCollapsed ? '▸' : '▾'}
+                  </span>
+                  VAULTS · {space.en}
+                  {vaults.items.length > 0 && <span class="lv-vaults__total">{vaults.items.length}</span>}
+                </button>
+                {vaultsCollapsed && vault !== ALL && (
+                  <span class="lv-vaults__current" title={vault}>
+                    {vaultLabel}
+                  </span>
+                )}
               </div>
+              <div id="lv-vaults-body" hidden={vaultsCollapsed}>
               {vaults.loading && <p class="lv-vaults__empty">載入中…</p>}
               {vaults.error && (
                 <p class="lv-vaults__empty lv-vaults__error" role="alert">
@@ -316,7 +366,7 @@ export function Shell({ api, principal, author, limits, theme, onToggleTheme, de
                 <EmptyState size="sm" title="還沒有 vault" />
               )}
               {vaults.items.length > 0 && (
-                <ul class="lv-vaults__list" aria-labelledby="lv-vaults-label">
+                <ul class="lv-vaults__list" aria-labelledby="lv-vaults-label" ref={vaultList}>
                   <li>
                     <button
                       type="button"
@@ -346,6 +396,7 @@ export function Shell({ api, principal, author, limits, theme, onToggleTheme, de
                   ))}
                 </ul>
               )}
+              </div>
             </div>
             <div class="lv-write-target">
               <div class="lv-write-target__label">目前寫入位置</div>
@@ -499,7 +550,7 @@ function LogoutIcon() {
   );
 }
 
-function describeDegraded(notice: Notice): string {
+function degradedReason(notice: Notice): string | null {
   const detail = notice.detail as { reason?: unknown } | undefined;
-  return typeof detail?.reason === 'string' ? `降級：${detail.reason}` : '降級：只走關鍵字檢索';
+  return typeof detail?.reason === 'string' ? detail.reason : null;
 }

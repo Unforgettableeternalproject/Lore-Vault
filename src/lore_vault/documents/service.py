@@ -283,6 +283,20 @@ def document_summary(doc: Document, superseded_by: str | None) -> dict[str, Any]
     }
 
 
+def count_since(
+    conn: sqlite3.Connection,
+    vault: str,
+    *,
+    space: str,
+    since: str | None,
+    until: str | None = None,
+) -> int:
+    """與 `list_page` 相同篩選條件下的文件總數。"""
+    return store.count_documents_since(
+        conn, vault, space=space, since=since, until=until
+    )
+
+
 def list_page(
     conn: sqlite3.Connection,
     vault: str,
@@ -291,10 +305,19 @@ def list_page(
     since: str | None,
     limit: int,
     cursor: tuple[str, str] | None,
+    until: str | None = None,
+    offset: int = 0,
 ) -> tuple[list[tuple[str, str, dict[str, Any]]], tuple[str, str] | None]:
     """文件的一頁 list 項目：[(updated, id, 項目)]、下一頁 cursor。"""
     docs, next_cursor = store.list_documents_since(
-        conn, vault, space=space, since=since, limit=limit, cursor=cursor
+        conn,
+        vault,
+        space=space,
+        since=since,
+        until=until,
+        limit=limit,
+        cursor=cursor,
+        offset=offset,
     )
     replaced = store.superseded_by(conn, [d.id for d in docs])
     return [

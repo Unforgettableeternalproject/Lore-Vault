@@ -170,7 +170,10 @@ export function Dialog({
     document.addEventListener('keydown', onKey);
     return () => {
       document.removeEventListener('keydown', onKey);
-      previous?.focus?.();
+      // 焦點還給開啟前的元素；由快捷鍵從頁面空白處開啟（焦點在 body）時改交給主內容，
+      // 不讓焦點與鍵盤起點落在已移除的對話框位置（下一個 Tab 會跳出頁面）
+      if (previous && previous !== document.body && previous.isConnected) previous.focus?.();
+      else document.getElementById('lv-main')?.focus();
     };
     // onClose 變動不重綁：對話框存在期間行為固定
   }, []);

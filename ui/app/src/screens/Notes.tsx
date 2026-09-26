@@ -7,6 +7,7 @@
 import { useEffect, useState } from 'preact/hooks';
 
 import { Badge, Banner, EmptyState, ErrorState, Loading, SourceTag } from '../components/ui';
+import { DEFAULT_PAGE_SIZE, Pager } from '../components/Pager';
 import { VaultPicker } from '../components/VaultPicker';
 import { useApp, vaultName } from '../lib/context';
 import { authorLabel, daysAgoIso, describeError, formatTime, isAbort } from '../lib/format';
@@ -34,13 +35,13 @@ function truncatedTitle(page: ListResult<NoteListItem>): string {
 
 export function Notes() {
   const { api, space, vault, vaults, navigate, limits } = useApp();
-  const PAGE = Math.min(limits.list_default_limit, limits.list_max_limit);
-  const baseBudget = Math.max(limits.list_default_budget, PAGE * LIST_SUMMARY_CHARS);
+  // 頁碼分頁（與文件、記憶層同一個分頁元件）；每頁筆數不超過服務上限
+  const [pageSize, setPageSize] = useState<number>(Math.min(DEFAULT_PAGE_SIZE, limits.list_max_limit));
+  const [pageNo, setPageNo] = useState(1);
+  const baseBudget = Math.max(limits.list_default_budget, pageSize * LIST_SUMMARY_CHARS);
   const [budget, setBudget] = useState(baseBudget);
   const [tag, setTag] = useState<string | null>(null);
   const [time, setTime] = useState<TimeId>('all');
-  // cursor 堆疊：[0] 為第一頁（null）
-  const [cursors, setCursors] = useState<(string | null)[]>([null]);
   const [page, setPage] = useState<ListResult<NoteListItem> | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [loading, setLoading] = useState(true);
@@ -48,11 +49,11 @@ export function Notes() {
   const [topics, setTopics] = useState<TopicsResult['topics'] | null>(null);
   const [topicsError, setTopicsError] = useState<string | null>(null);
 
-  // 篩選變了回第一頁、摘要預算重置
+  // 篩選或每頁筆數變了回第一頁、摘要預算重置
   useEffect(() => {
-    setCursors([null]);
+    setPageNo(1);
     setBudget(baseBudget);
-  }, [vault, tag, time]);
+  }, [vault, tag, time, pageSize]);
 
   // 標籤選項：範圍內全部標籤（不是只看已載入的那一頁）
   useEffect(() => {
@@ -69,8 +70,6 @@ export function Notes() {
     return () => ctrl.abort();
   }, [api, space.id, vault]);
 
-  const cursor = cursors[cursors.length - 1] ?? null;
-
   useEffect(() => {
     const ctrl = new AbortController();
     setLoading(true);
@@ -83,9 +82,10 @@ export function Notes() {
           space: space.id,
           vault,
           kinds: ['note'],
-          limit: PAGE,
+          limit: Math.min(pageSize, limits.list_max_limit),
+          offset: (pageNo - 1) * pageSize,
+          with_total: true,
           budget,
-          ...(cursor ? { cursor } : {}),
           ...(tag ? { topics: [tag] } : {}),
           ...(days ? { since: daysAgoIso(days) } : {}),
         },
@@ -101,9 +101,8 @@ export function Notes() {
         setLoading(false);
       });
     return () => ctrl.abort();
-  }, [api, space.id, vault, tag, time, cursor, budget, tick]);
+  }, [api, space.id, vault, tag, time, pageNo, pageSize, budget, tick]);
 
-  const pageNo = cursors.length;
   const items = page?.items ?? [];
   const maxBudget = baseBudget * BUDGET_GROWTH_CAP;
   // 目前選的標籤不在清單裡（例如剛被改名）時仍要顯示，才能取消
@@ -305,24 +304,18 @@ export function Notes() {
               }
             />
           )}
-          <div class="lv-pager">
-            <span>
-              第 {pageNo} 頁 · 本頁 {items.length} 則{loading ? ' · 更新中…' : ''}
-            </span>
-            <div class="lv-pager__btns">
-              <button type="button" class="btn-terminal" disabled={pageNo <= 1 || loading} onClick={() => setCursors((c) => c.slice(0, -1))}>
-                ← 上頁
-              </button>
-              <button
-                type="button"
-                class="btn-terminal"
-                disabled={!page.next_cursor || loading}
-                onClick={() => page.next_cursor && setCursors((c) => [...c, page.next_cursor])}
-              >
-                下頁 →
-              </button>
-            </div>
-          </div>
+          {(page.total ?? items.length) > 0 && (
+            <Pager
+              page={pageNo}
+              pageSize={pageSize}
+              total={page.total ?? items.length}
+              loading={loading}
+              unit="則"
+              label="筆記分頁"
+              onPage={setPageNo}
+              onPageSize={setPageSize}
+            />
+          )}
         </>
       )}
     </section>

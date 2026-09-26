@@ -3,7 +3,7 @@
 import { createContext } from 'preact';
 import { useContext } from 'preact/hooks';
 
-import type { ApiClient } from './api';
+import type { ApiClient, Notice } from './api';
 import type { Navigate } from './router';
 import type { SpaceId, SpaceMeta } from './spaces';
 import type { SessionLimits, VaultSummary } from './types';
@@ -45,6 +45,8 @@ export interface AppEnv {
   health: HealthBadge | null;
   /** 系統健康頁重新整理後同步頂列徽章 */
   reportHealth: (badge: HealthBadge) => void;
+  /** 最近一次檢索的降級標記（頂列徽章同一份）；沒有降級為 null */
+  recallDegraded: Notice | null;
   /** 切換目前 space（重置 vault 篩選），可同時導向指定路徑 */
   switchSpace: (space: SpaceId, path?: string) => void;
 }
