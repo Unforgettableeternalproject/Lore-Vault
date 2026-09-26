@@ -870,7 +870,20 @@ button.lv-wikilink { background: none; border: none; border-bottom: 1px dashed v
 .lv-health-count--warn.is-nonzero { border-color: var(--uep-gold); background: color-mix(in srgb, var(--uep-gold) 8%, transparent); }
 .lv-health-count--warn.is-nonzero .lv-health-count__n { color: var(--lv-gold-text); }
 .lv-health-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 400px); gap: 32px; }
-.lv-health-groups { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+.lv-health-grid { align-items: start; }
+/* 檢查清單固定頁高、內部捲動：分類多時不必整頁往下翻，右側狀態欄保持可見 */
+.lv-health-groups {
+  display: flex; flex-direction: column; gap: 18px; min-width: 0;
+  max-height: calc(100vh - var(--topbar-h) - 48px); overflow-y: auto; overscroll-behavior: contain;
+  position: sticky; top: calc(var(--topbar-h) + 24px); padding-right: 6px;
+}
+.lv-health-groups:focus-visible { outline: 2px solid var(--lv-focus); outline-offset: 4px; }
+details.lv-check-group > summary { list-style: none; }
+details.lv-check-group > summary::-webkit-details-marker { display: none; }
+details.lv-check-group > summary::before { content: '▾'; margin-right: 8px; font-family: var(--font-sans); }
+details.lv-check-group:not([open]) > summary::before { content: '▸'; }
+details.lv-check-group > summary { justify-content: flex-start; }
+details.lv-check-group > summary .lv-check-group__note { margin-left: auto; }
 .lv-health-side { display: flex; flex-direction: column; gap: 28px; }
 .lv-check-group { border: 1px solid var(--line); }
 .lv-check-group--fail { border-color: color-mix(in srgb, var(--status-error) 60%, transparent); }
@@ -1069,6 +1082,8 @@ details.lv-check > .lv-check__head { cursor: pointer; }
   .lv-table__head, .lv-table__row { gap: 10px; }
   .lv-doc__grid { grid-template-columns: minmax(140px, 180px) minmax(0, 1fr); gap: 24px; }
   .lv-health-grid, .lv-memory-grid { grid-template-columns: minmax(0, 1fr); }
+  /* 單欄時改回整頁捲動（內層捲動在窄螢幕難操作） */
+  .lv-health-groups { max-height: none; overflow: visible; position: static; padding-right: 0; }
   .lv-detail { gap: 32px; grid-template-columns: minmax(0, 1fr) minmax(220px, 280px); }
   .lv-new { gap: 28px; }
 }

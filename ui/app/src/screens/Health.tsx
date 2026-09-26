@@ -168,14 +168,10 @@ function StatusView({ status }: { status: StatusResult }) {
       </div>
 
       <div class="lv-health-grid">
-        <div class="lv-health-groups">
+        {/* 檢查清單在固定高度的區塊內捲動（窄螢幕改回整頁捲動）；可用 Tab 聚焦後以方向鍵捲動 */}
+        <div class="lv-health-groups" role="region" aria-label="檢查項目" tabIndex={0} data-testid="health-groups">
           {groups.map((g) => (
-            <section key={g.category} class={`lv-check-group lv-check-group--${g.worst}`} data-category={g.category}>
-              <h2 class="lv-check-group__title">{g.category}</h2>
-              {g.checks.map((c) => (
-                <CheckRow key={c.name} check={c} />
-              ))}
-            </section>
+            <CheckGroup key={g.category} category={g.category} worst={g.worst} checks={g.checks} />
           ))}
           {client.length > 0 && <ClientChecks checks={client} />}
         </div>
@@ -227,6 +223,29 @@ function StatusView({ status }: { status: StatusResult }) {
         </aside>
       </div>
     </>
+  );
+}
+
+/** 一個檢查分類：可收合；有 fail／warn 的預設展開，全部通過（或略過）的預設收合。 */
+function CheckGroup({ category, worst, checks }: { category: string; worst: string; checks: DoctorCheck[] }) {
+  const counts = checks.reduce<Record<string, number>>((acc, c) => {
+    acc[c.status] = (acc[c.status] ?? 0) + 1;
+    return acc;
+  }, {});
+  const summary = (['fail', 'warn', 'skipped', 'pass'] as const)
+    .filter((k) => counts[k])
+    .map((k) => `${counts[k]} ${STATUS_LABEL[k]}`)
+    .join(' · ');
+  return (
+    <details class={`lv-check-group lv-check-group--${worst}`} data-category={category} open={worst === 'fail' || worst === 'warn'}>
+      <summary class="lv-check-group__title lv-check-group__summary">
+        <span>{category}</span>
+        <span class="lv-check-group__note">{summary}</span>
+      </summary>
+      {checks.map((c) => (
+        <CheckRow key={c.name} check={c} />
+      ))}
+    </details>
   );
 }
 

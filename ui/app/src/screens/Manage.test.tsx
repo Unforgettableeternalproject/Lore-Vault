@@ -358,6 +358,13 @@ describe('系統健康', () => {
     const groups = document.querySelectorAll('[data-category]');
     expect(groups[0]!.getAttribute('data-category')).toBe('notes');
     expect(groups[1]!.getAttribute('data-category')).toBe('enrich');
+    // 分類可收合：有 fail／warn 的展開、全部通過的收合
+    expect((groups[0] as HTMLDetailsElement).open).toBe(true);
+    expect((groups[1] as HTMLDetailsElement).open).toBe(true);
+    const storage = document.querySelector('[data-category="storage"]') as HTMLDetailsElement;
+    expect(storage.tagName).toBe('DETAILS');
+    expect(storage.open).toBe(false);
+    expect(storage.querySelector('summary')!.textContent).toContain('1 PASS');
     const fail = screen.getByTestId('check-notes.fts') as HTMLDetailsElement;
     expect(fail.open).toBe(true);
     expect(fail.textContent).toContain('缺 n9');
