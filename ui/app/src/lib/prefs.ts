@@ -40,6 +40,5 @@ export function saveSpace(space: SpaceId): void {
   write(SPACE_KEY, space);
 }
 
-// ── 署名（A22 author）──
-// UI 寫入 note 一律帶的作者名。A22 的用意是分清誰做了什麼，所以不提供關閉開關。
-export const UI_AUTHOR = 'Xavier (Bernie)';
+// 署名（A22 author）不是偏好：一律用登入帳號的顯示名稱（session display_name，A23），
+// 由 AppEnv.author 提供，不提供關閉開關。

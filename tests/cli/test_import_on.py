@@ -355,10 +355,10 @@ def _attribution(conn) -> list[tuple]:
 def test_rerun_is_idempotent(fake, tmp_path, conn):
     export, mapping = _prepare(fake, tmp_path)
     mod.run_import(conn, export, _reviewed(mapping))
-    # 作者契約（A22）：舊 PM 匯入的 note 一律標 legacy、principal 為 xavier
+    # 作者契約（A22）：舊 PM 匯入的 note 一律標 legacy、principal 為 UEPBernie
     first = _attribution(conn)
     assert len(first) == 6
-    assert {r[1:5] for r in first} == {("legacy", "xavier", "legacy", "xavier")}
+    assert {r[1:5] for r in first} == {("legacy", "UEPBernie", "legacy", "UEPBernie")}
     report = mod.run_import(conn, export, mapping)
     assert _attribution(conn) == first
     assert report["notes"]["inserted"] == 0
@@ -406,7 +406,7 @@ def test_rerun_applies_source_change_when_not_modified_locally(fake, tmp_path, c
     assert (note.author, note.updated_by, note.updated_by_principal) == (
         "legacy",
         "legacy",
-        "xavier",
+        "UEPBernie",
     )
     assert _reconcile(conn).status is Status.PASS
 
@@ -455,7 +455,7 @@ def test_reconcile_passes_after_import_and_reports_extras(fake, tmp_path, conn):
             body="",
             created=ts,
             updated=ts,
-            principal="xavier",
+            principal="UEPBernie",
         ),
         space="dev",
     )

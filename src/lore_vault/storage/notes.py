@@ -211,6 +211,32 @@ def list_notes(
     return notes, next_cursor
 
 
+def superseded_by(conn: sqlite3.Connection, notes: Sequence[Note]) -> dict[str, str]:
+    """反向查詢更正關係：note id → 取代它的 note id（只看同一 vault）。
+
+    多則 note 指向同一則時取 `updated` 最新者（同時間取 id 較大者）。`notes` 必須是
+    已經過範圍檢查取得的 note（以各自的 vault 為界，不會帶出別的 vault）。
+    """
+    by_vault: dict[str, list[str]] = {}
+    for note in notes:
+        by_vault.setdefault(note.vault, []).append(note.id)
+    found: dict[str, str] = {}
+    for vault_key, ids in by_vault.items():
+        unique = list(dict.fromkeys(ids))
+        placeholders = ",".join("?" * len(unique))
+        rows = conn.execute(
+            f"""
+            SELECT id, supersedes FROM notes
+            WHERE vault = ? AND supersedes IN ({placeholders}) AND id != supersedes
+            ORDER BY updated DESC, id DESC
+            """,
+            (vault_key, *unique),
+        )
+        for newer, older in rows:
+            found.setdefault(older, newer)
+    return found
+
+
 def count_notes(conn: sqlite3.Connection, vault: str, *, space: str) -> int:
     scope = resolve_read(conn, vault, space=space)
     clause, params = vault_clause(scope, "vault")

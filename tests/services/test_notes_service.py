@@ -60,9 +60,12 @@ def test_write_stores_note_without_waiting_for_summary_or_embedding(vaults, embe
         # 作者契約（A22）：未填 author 就是 None，不代填；principal 由呼叫端傳入
         "author": None,
         "principal": "xavier",
+        "links": [],
+        "unresolved_links": [],
         "duplicates": [],
         "dedup_degraded": True,  # 沒給 embedder
         "dedup_reason": "embedder_unavailable",
+        "dry_run": False,
     }
 
 
@@ -257,6 +260,8 @@ def test_update_body_clears_summary_and_embedding(vaults, add_note):
         "author": None,
         "updated_by": None,
         "updated_by_principal": "xavier",
+        "links": [],
+        "unresolved_links": [],
         "summary_stale": True,
         "embedding_stale": True,
     }

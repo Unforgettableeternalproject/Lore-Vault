@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from lore_vault.schema import canonical_key
@@ -568,6 +569,31 @@ def episode_summary(
     }
 
 
+# ── 標籤清單 ──
+
+
+def topic_counts(
+    conn: sqlite3.Connection, vault: object, *, space: object
+) -> tuple[str | None, list[dict[str, Any]]]:
+    """範圍內 note 的 topic 與使用筆數（依筆數由多到少、同數依名稱）。
+
+    `vault="*"` 為 space 內全部 vault（只解除 vault 這一層）；vault 在別的 space
+    與不存在相同（`UnknownVault`）。回傳 (解析後的 vault key 或 None, 清單)。
+    """
+    scope = resolve_read(conn, vault, space=space)
+    clause, params = vault_clause(scope, "notes.vault")
+    rows = conn.execute(
+        f"""
+        SELECT t.value AS topic, count(*) AS n
+        FROM notes, json_each(notes.topics) AS t
+        WHERE {clause}
+        GROUP BY t.value ORDER BY n DESC, t.value
+        """,
+        params,
+    ).fetchall()
+    return scope.key, [{"topic": r["topic"], "count": int(r["n"])} for r in rows]
+
+
 # ── doctor 對帳 ──
 
 
@@ -698,6 +724,69 @@ def tombstone_snapshots(conn: sqlite3.Connection) -> Reconciliation:
         counts,
         tuple(bad[:MAX_DETAILS]),
     )
+
+
+def tombstone_stats(
+    conn: sqlite3.Connection,
+    *,
+    now: datetime,
+    warn_age_days: float = 0.0,
+    warn_bytes: int = 0,
+) -> Reconciliation:
+    """資訊項：墓碑筆數、note 快照總位元組（UTF-8）、最舊一筆的年齡。
+
+    墓碑與快照永久保留、只能由 `cli.admin purge-tombstones` 明確清除（不做自動清除）。
+    門檻為 0 代表不警告（預設）；`warn_age_days`＞0 時最舊一筆超過即 warn，
+    `warn_bytes`＞0 時快照總位元組超過即 warn。永遠不 fail。
+    """
+    notes = documents = snapshot_bytes = 0
+    stamps: list[str] = []
+    if _has_table(conn, "note_tombstones"):
+        size = (
+            "length(CAST(snapshot AS BLOB))"
+            if _has_column(conn, "note_tombstones", "snapshot")
+            else "0"
+        )
+        row = conn.execute(
+            f"SELECT count(*), coalesce(sum({size}), 0), min(deleted_at) "
+            "FROM note_tombstones"
+        ).fetchone()
+        notes, snapshot_bytes = int(row[0]), int(row[1])
+        if row[2] is not None:
+            stamps.append(row[2])
+    if _has_table(conn, "document_tombstones"):
+        row = conn.execute(
+            "SELECT count(*), min(deleted_at) FROM document_tombstones"
+        ).fetchone()
+        documents = int(row[0])
+        if row[1] is not None:
+            stamps.append(row[1])
+    oldest_age = 0
+    if stamps:
+        oldest = datetime.fromisoformat(min(stamps))
+        oldest_age = max(0, int((now - oldest).total_seconds()))
+    counts = {
+        "note_tombstones": notes,
+        "document_tombstones": documents,
+        "snapshot_bytes": snapshot_bytes,
+        "oldest_age_seconds": oldest_age,
+    }
+    summary = (
+        f"墓碑 note {notes}／文件 {documents} 筆，快照 {snapshot_bytes} 位元組"
+        + (f"，最舊 {oldest_age / 86400:.1f} 天" if stamps else "")
+    )
+    reasons: list[str] = []
+    if warn_age_days > 0 and stamps and oldest_age > warn_age_days * 86400:
+        reasons.append(f"最舊墓碑超過 {warn_age_days:g} 天")
+    if warn_bytes > 0 and snapshot_bytes > warn_bytes:
+        reasons.append(f"快照總量超過 {warn_bytes} 位元組")
+    if reasons:
+        return Reconciliation(
+            "warn",
+            f"{summary}；{'、'.join(reasons)}（可用 cli.admin purge-tombstones 清除）",
+            counts,
+        )
+    return Reconciliation("pass", summary, counts)
 
 
 # ── 共用 ──

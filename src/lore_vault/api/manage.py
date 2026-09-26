@@ -14,9 +14,15 @@ token = base64url(JSON payload) + "." + base64url(HMAC-SHA256)。payload 綁定�
 請求參數（含 space 與 reason）、規劃內容的 sha256（`digest`）與到期時間；祕密為每個
 app 程序隨機產生（服務重啟後舊 token 失效）。驗證失敗 400 `invalid_confirm_token`、
 過期 400 `confirm_token_expired`。執行時在同一個寫入交易（BEGIN IMMEDIATE）內重新
-規劃、比對 digest，不符 409 `plan_changed`（附目前的規劃，需重新確認），相符才執行，
-沒有 check-then-act 的窗口；儲存層自身的筆數核對（`PlanChanged`）是第二道防線。
+規劃、比對 digest，不符 409 `plan_changed`（附目前的規劃，以及綁定新規劃的
+`confirm_token`／`expires_at`；仍需使用者再確認一次、以新 token 重送，服務端不會自動
+執行），相符才執行，沒有 check-then-act 的窗口；儲存層自身的筆數核對（`PlanChanged`）
+是第二道防線（不附 plan／token）。舊 token 綁的是舊規劃的 digest：只要資料維持在新狀態，
+重送舊 token 一律 409、不執行（token 無狀態，資料若恢復成舊規劃的樣子，
+舊 token 才又相符）。
 執行後目標已不存在，同一個 token 重送會 404，不會重複執行。
+
+另有唯讀的 `topics`（標籤與使用筆數，UI 篩選用；不提供 MCP 工具）。
 """
 
 from __future__ import annotations
@@ -163,8 +169,13 @@ def _two_phase(
         with transaction(conn):
             shown, fingerprint = plan(conn)
             if plan_digest(fingerprint) != expected:
+                # 綁定新規劃的 token：仍要使用者看過新規劃再送一次，不在這裡執行
+                issued, expires = signer.issue(op, args, plan_digest(fingerprint))
                 raise ConfirmPlanChanged(
-                    "規劃後資料已變動，請確認新的規劃後重新送出", shown
+                    "規劃後資料已變動，請確認新的規劃後以新的 confirm_token 重新送出",
+                    shown,
+                    confirm_token=issued,
+                    expires_at=format_utc(datetime.fromtimestamp(expires, UTC)),
                 )
             extra = execute(conn)
     return {"executed": True, "plan": shown, **extra}
@@ -264,6 +275,10 @@ class ConceptQueryRequest(_ScopedReq):
 
 
 class EpisodeSummaryRequest(_ScopedReq):
+    vault: str | None = None
+
+
+class TopicsRequest(_ScopedReq):
     vault: str | None = None
 
 
@@ -576,3 +591,14 @@ def episode_summary(request: Request, req: EpisodeSummaryRequest) -> dict[str, A
     with _state(request).connection() as conn:
         summary = store.episode_summary(conn, req.vault, space=req.space)
     return {"space": req.space, "vault": req.vault, **summary}
+
+
+# ── 標籤清單 ──
+
+
+@router.post("/topics")
+def topics(request: Request, req: TopicsRequest) -> dict[str, Any]:
+    """範圍內 note 的 topic 與使用筆數；`vault="*"` 為目前 space 內全部 vault。"""
+    with _state(request).connection() as conn:
+        key, items = store.topic_counts(conn, req.vault, space=req.space)
+    return {"space": req.space, "vault": key or req.vault, "topics": items}

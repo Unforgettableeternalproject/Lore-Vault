@@ -1,13 +1,14 @@
-"""UI 的本地身分驗證（A21）：服務端 session、登入限流、用戶端 IP 判定。
+"""UI 的本地身分驗證（A21／A23）：服務端 session、登入序列化、用戶端 IP 判定。
 
-- 登入金鑰就是 `LORE_VAULT_API_TOKEN`（不另設密碼，少一組要輪替的密鑰）
+- 登入用 DB 內的 UI 帳號密碼（A23，規則與鎖定見 `storage.ui_login`）；
+  session 的 principal = username，另記顯示名稱（前端署名用）
 - session 只存在服務程序記憶體：重啟即全部失效（使用者重新登入即可），
   不寫資料庫、不留可被帶走的憑證。以 sha256(session id) 當鍵，記憶體裡沒有原值
 - 期限：絕對期限（登入後固定時長）與閒置期限（最後一次認證請求起算），先到先失效
-- 限流：同一來源 IP 與全域各自計算時間窗內的失敗次數；達上限後指數退避，
-  退避期間連正確金鑰都回 429（否則猜測仍在進行）。成功只清除該 IP 的紀錄
+- 登入嘗試在本程序內序列化（`login_lock`）：全域失敗計數才不會被並行請求搶過
 - CSRF：cookie 路徑一律要求 `X-Lore-Vault-UI: 1` 標頭（跨來源請求帶自訂標頭必須
   先過 CORS preflight，本服務不回 CORS 標頭，所以瀏覽器送不出來），外加 SameSite=Strict
+- `client_ip` 判定的來源只用於登入紀錄與 log（A23 起不再依 IP 限流）
 """
 
 from __future__ import annotations
@@ -16,9 +17,8 @@ import hashlib
 import ipaddress
 import secrets
 import threading
-from collections import deque
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from starlette.types import Scope
 
@@ -88,7 +88,7 @@ def _as_ip(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
 
 
 def client_ip(scope: Scope, trusted: Iterable[IpNetwork]) -> str:
-    """限流用的來源 key。
+    """登入紀錄用的來源 IP。
 
     直接連線來源在受信任代理清單內、且恰好一個可解析的 `CF-Connecting-IP` 時才採信它；
     其餘情況一律用直接連線來源（非 IP 字串如 TestClient 的 "testclient" 當不透明 key，
@@ -113,8 +113,9 @@ def client_ip(scope: Scope, trusted: Iterable[IpNetwork]) -> str:
 class _Session:
     created: float
     last_seen: float
-    # 登入時所用憑證對應的 principal（A22）
+    # 登入帳號（= principal，A22）與顯示名稱（前端署名，A23）
     principal: str
+    display_name: str
 
 
 @dataclass(frozen=True)
@@ -123,6 +124,7 @@ class SessionInfo:
     absolute_expires: float
     idle_expires: float
     principal: str
+    display_name: str
 
 
 def _digest(session_id: str) -> str:
@@ -151,9 +153,9 @@ class SessionStore:
     def absolute_seconds(self) -> float:
         return self._absolute
 
-    def create(self, principal: str) -> str:
-        if not principal:
-            raise ValueError("session 必須記錄 principal")
+    def create(self, principal: str, display_name: str) -> str:
+        if not principal or not display_name:
+            raise ValueError("session 必須記錄 principal 與顯示名稱")
         session_id = secrets.token_urlsafe(32)
         now = self._clock()
         with self._lock:
@@ -162,7 +164,10 @@ class SessionStore:
                 oldest = min(self._sessions, key=lambda k: self._sessions[k].created)
                 del self._sessions[oldest]
             self._sessions[_digest(session_id)] = _Session(
-                created=now, last_seen=now, principal=principal
+                created=now,
+                last_seen=now,
+                principal=principal,
+                display_name=display_name,
             )
         return session_id
 
@@ -202,75 +207,12 @@ class SessionStore:
             absolute_expires=absolute,
             idle_expires=min(session.last_seen + self._idle, absolute),
             principal=session.principal,
+            display_name=session.display_name,
         )
 
     def _prune(self, now: float) -> None:
         for key in [k for k, s in self._sessions.items() if self._expired(s, now)]:
             del self._sessions[key]
-
-
-# ── 登入限流 ────────────────────────────────────────────────────────
-
-
-class LoginLimiter:
-    """時間窗內的失敗次數上限 + 指數退避，分「每個來源」與「全域」兩層。"""
-
-    GLOBAL = "\x00global"
-
-    def __init__(
-        self,
-        *,
-        window: float,
-        max_per_ip: int,
-        max_global: int,
-        lockout: float,
-        clock: Clock,
-    ) -> None:
-        self._window = window
-        self._limits = {"ip": max_per_ip, "global": max_global}
-        self._lockout = lockout
-        self._clock = clock
-        self._failures: dict[str, deque[float]] = {}
-        self._lock = threading.Lock()
-
-    def retry_after(self, ip: str) -> float:
-        """目前是否在退避中；回傳還要等幾秒（0 = 可以嘗試）。"""
-        now = self._clock()
-        with self._lock:
-            return max(
-                self._wait(ip, self._limits["ip"], now),
-                self._wait(self.GLOBAL, self._limits["global"], now),
-            )
-
-    def record_failure(self, ip: str) -> None:
-        now = self._clock()
-        with self._lock:
-            for key in (ip, self.GLOBAL):
-                self._failures.setdefault(key, deque()).append(now)
-                self._prune(key, now)
-
-    def record_success(self, ip: str) -> None:
-        with self._lock:
-            self._failures.pop(ip, None)
-
-    def _prune(self, key: str, now: float) -> deque[float]:
-        entries = self._failures.get(key)
-        if entries is None:
-            return deque()
-        while entries and entries[0] <= now - self._window:
-            entries.popleft()
-        if not entries:
-            del self._failures[key]
-        return entries
-
-    def _wait(self, key: str, limit: int, now: float) -> float:
-        entries = self._prune(key, now)
-        count = len(entries)
-        if count < limit:
-            return 0.0
-        # 剛達上限鎖 base，之後每多一次失敗加倍；不超過時間窗
-        lock = min(self._lockout * 2 ** (count - limit), self._window)
-        return max(0.0, entries[-1] + lock - now)
 
 
 # ── 組裝 ────────────────────────────────────────────────────────────
@@ -281,9 +223,12 @@ class UiAuth:
     """app 內共用的 UI 認證元件。"""
 
     sessions: SessionStore
-    limiter: LoginLimiter
     trusted_proxies: tuple[IpNetwork, ...]
     cookie_secure: bool
+    clock: Clock
+    login_log_retention_days: float
+    # 同一時間只跑一個登入嘗試（全域失敗計數的嚴格順序）
+    login_lock: threading.Lock = field(default_factory=threading.Lock)
 
     @property
     def cookie_name(self) -> str:
@@ -298,13 +243,8 @@ class UiAuth:
                 max_sessions=config.max_sessions,
                 clock=clock,
             ),
-            limiter=LoginLimiter(
-                window=config.login_failure_window_seconds,
-                max_per_ip=config.login_max_failures_per_ip,
-                max_global=config.login_max_failures_global,
-                lockout=config.login_lockout_seconds,
-                clock=clock,
-            ),
             trusted_proxies=parse_trusted_proxies(config.trusted_proxies),
             cookie_secure=config.cookie_secure,
+            clock=clock,
+            login_log_retention_days=config.login_log_retention_days,
         )

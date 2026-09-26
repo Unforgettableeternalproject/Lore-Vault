@@ -28,6 +28,10 @@ export interface HealthBadge {
 
 export interface AppEnv {
   api: ApiClient;
+  /** 登入帳號（session principal，A22／A23） */
+  principal: string;
+  /** 登入者的顯示名稱（session display_name）：UI 寫入 note 一律以它署名（A22 author） */
+  author: string;
   space: SpaceMeta;
   vaults: VaultsState;
   /** 目前篩選的 vault key；`*` = 本 space 全部 */

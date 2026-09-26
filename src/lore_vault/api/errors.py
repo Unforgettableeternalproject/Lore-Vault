@@ -66,11 +66,23 @@ class ConfirmTokenExpired(ValueError):
 
 
 class ConfirmPlanChanged(Exception):
-    """規劃後資料已變動：token 綁定的規劃內容與執行當下重新規劃的結果不同。"""
+    """規劃後資料已變動：token 綁定的規劃內容與執行當下重新規劃的結果不同。
 
-    def __init__(self, message: str, plan: dict[str, Any]) -> None:
+    附目前的規劃與綁定它的新 token（需使用者再確認一次才以新 token 重送）。
+    """
+
+    def __init__(
+        self,
+        message: str,
+        plan: dict[str, Any],
+        *,
+        confirm_token: str,
+        expires_at: str,
+    ) -> None:
         super().__init__(message)
         self.plan = plan
+        self.confirm_token = confirm_token
+        self.expires_at = expires_at
 
 
 def error_body(code: str, message: str, **extra: Any) -> dict[str, Any]:
@@ -165,7 +177,14 @@ def install_error_handlers(app: FastAPI) -> None:
 
     async def confirm_plan_changed(request: Request, exc: Exception) -> JSONResponse:
         assert isinstance(exc, ConfirmPlanChanged)
-        return _json(409, "plan_changed", exc, plan=exc.plan)
+        return _json(
+            409,
+            "plan_changed",
+            exc,
+            plan=exc.plan,
+            confirm_token=exc.confirm_token,
+            expires_at=exc.expires_at,
+        )
 
     async def alias_conflict(request: Request, exc: Exception) -> JSONResponse:
         # 佔用者在別的 space 時 existing 為 null（不透露存在性以外的資訊）

@@ -31,13 +31,11 @@ from lore_vault.storage.db import transaction
 from lore_vault.storage.document_index import (
     chunk_id,
     chunks_by_key,
-    chunks_of,
     parse_chunk_id,
 )
 from lore_vault.storage.documents import Document
 from lore_vault.storage.vaults import resolve_write
 
-from .chunking import join_chunks
 from .extract import TOO_LARGE, ExtractionError, detect_format
 
 DEFAULT_MIME = "application/octet-stream"
@@ -159,10 +157,73 @@ def _documents_in_scope(
     return {d.id: d for d in store.get_documents(conn, vault, list(ids), space=space)}
 
 
+SECTION_SEPARATOR = "\n\n"
+
+
+def document_text_chars(conn: sqlite3.Connection, document_id: str) -> int:
+    """整份文件文字（同 `join_chunks`：去重疊、段落間空一行）的字數，不讀取內容。
+
+    範圍檢查由呼叫端先做（document 已在範圍內）。
+    """
+    total = 0
+    started = False
+    for length, overlap in conn.execute(
+        "SELECT length(text), overlap FROM document_chunks "
+        "WHERE document_id = ? ORDER BY idx",
+        (document_id,),
+    ):
+        if overlap:
+            total += max(0, int(length) - int(overlap))
+        else:
+            if started:
+                total += len(SECTION_SEPARATOR)
+            total += int(length)
+        started = True
+    return total
+
+
+def document_text(
+    conn: sqlite3.Connection, document_id: str, max_chars: int
+) -> tuple[str, int]:
+    """依 idx 逐段串回文件文字，最多 `max_chars` 字（預算用完就停，不先串全文）。
+
+    回傳 (文字, 全文字數)。串接規則同 `chunking.join_chunks`。
+    """
+    total = document_text_chars(conn, document_id)
+    if max_chars <= 0:
+        return "", total
+    out: list[str] = []
+    used = 0
+    started = False
+    rows = conn.execute(
+        "SELECT text, overlap FROM document_chunks WHERE document_id = ? ORDER BY idx",
+        (document_id,),
+    )
+    for text, overlap in rows:
+        if overlap:
+            piece = text[overlap:]
+        else:
+            piece = (SECTION_SEPARATOR if started else "") + text
+        started = True
+        room = max_chars - used
+        if len(piece) >= room:
+            out.append(piece[:room])
+            used = max_chars
+            break
+        out.append(piece)
+        used += len(piece)
+    rows.close()
+    return "".join(out), total
+
+
 def resolve_refs(
     conn: sqlite3.Connection, vault: str, refs: Sequence[str], *, space: str
 ) -> dict[str, dict[str, Any]]:
-    """文件／chunk id → 未套預算的項目（含全文 `text`）；範圍外或不存在的不回。"""
+    """文件／chunk id → 未套預算的項目；範圍外或不存在的不回。
+
+    chunk 項目含該段全文 `text` 與 `overlap`（開頭與前一段重疊的字數；段落起頭為 0）；
+    文件項目只有 metadata——全文由呼叫端依預算以 `document_text` 逐段取，不先串全文。
+    """
     doc_ids = {r for r in refs if r.startswith(store.DOCUMENT_ID_PREFIX)}
     chunk_keys = {r: key for r in refs if (key := parse_chunk_id(r)) is not None}
     documents = _documents_in_scope(
@@ -185,6 +246,7 @@ def resolve_refs(
                 "vault": doc.vault,
                 "title": doc.filename,
                 "locator": chunk.locator,
+                "overlap": chunk.overlap,
                 "text": chunk.text,
                 "superseded_by": replaced.get(doc.id),
                 "updated": doc.updated,
@@ -193,11 +255,7 @@ def resolve_refs(
         doc = documents.get(ref)
         if doc is None:
             continue
-        text = join_chunks((c.text, c.overlap) for c in chunks_of(conn, doc.id))
-        result[ref] = {
-            **document_summary(doc, replaced.get(doc.id)),
-            "text": text,
-        }
+        result[ref] = document_summary(doc, replaced.get(doc.id))
     return result
 
 

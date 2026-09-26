@@ -1,7 +1,7 @@
-// E2E 共用：CSP 違規收集、登入、以 bearer 直接建立測試用 vault。
+// E2E 共用：CSP 違規收集、以測試帳號登入、以 bearer 直接建立測試用 vault。
 import { expect, type APIRequestContext, type Page } from '@playwright/test';
 
-import { E2E_TOKEN } from './constants';
+import { E2E_PASSWORD, E2E_TOKEN, E2E_USER } from './constants';
 
 export async function watchPage(page: Page) {
   await page.addInitScript(() => {
@@ -28,7 +28,8 @@ export async function watchPage(page: Page) {
 
 export async function login(page: Page) {
   await page.goto('/ui/');
-  await page.getByLabel('存取金鑰').fill(E2E_TOKEN);
+  await page.getByLabel('帳號').fill(E2E_USER);
+  await page.getByLabel('密碼').fill(E2E_PASSWORD);
   await page.getByRole('button', { name: '登入' }).click();
   await expect(page.getByRole('navigation', { name: '主導覽' })).toBeVisible();
 }

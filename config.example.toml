@@ -103,7 +103,8 @@ extract_timeout = 60.0
 extract_memory_mb = 1024
 
 [ui]
-# 使用者 UI（A21）。登入金鑰就是 LORE_VAULT_API_TOKEN，不另設密碼。
+# 使用者 UI（A21）。登入用 DB 內的 UI 帳號密碼（A23）：`python -m lore_vault.cli.admin
+# ui-set-password --user <名稱>` 設定；全域失敗 3 次即鎖定、需 `ui-unlock --yes` 人工解鎖（規則固定）
 # Vite 建置產物目錄（含 index.html）；未設定 = 不提供 /ui 靜態檔（/ui/api/* 仍可用）
 # static_dir = "C:/path/to/Lore-Vault/ui/app/dist"
 # session cookie 帶 Secure（名稱為 __Host-lv_session）；只有用非 localhost 的 http 開發時才關閉
@@ -113,10 +114,7 @@ session_absolute_hours = 12.0
 session_idle_minutes = 60.0
 # 同時存在的 session 上限（超過淘汰最舊）
 max_sessions = 32
-# 登入限流：時間窗（秒）內每個來源 IP／全域的失敗上限；達上限後退避 lockout * 2^n 秒（不超過時間窗），期間回 429
-login_failure_window_seconds = 900.0
-login_max_failures_per_ip = 5
-login_max_failures_global = 20
-login_lockout_seconds = 60.0
-# 受信任代理（逗號分隔 IP／CIDR）：直接連線來源在清單內時才採信 CF-Connecting-IP；空 = 一律用直接連線來源
+# 登入紀錄保留天數（過期的在服務啟動與每次登入嘗試時清除）
+login_log_retention_days = 90.0
+# 受信任代理（逗號分隔 IP／CIDR）：直接連線來源在清單內時才採信 CF-Connecting-IP（登入紀錄的來源）；空 = 一律用直接連線來源
 trusted_proxies = ""

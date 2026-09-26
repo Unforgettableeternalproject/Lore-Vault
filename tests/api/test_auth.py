@@ -132,6 +132,7 @@ def test_openapi_is_served_behind_auth(anon):
         "/v1/document_retry",
         "/v1/concept_query",
         "/v1/episode_summary",
+        "/v1/topics",
     } == paths
 
 

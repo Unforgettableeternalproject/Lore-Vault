@@ -114,7 +114,8 @@ class Vault(Record):
 # - updated_by／updated_by_principal：最後一次寫入（建立或修改）的自報名與 principal
 # - 舊 PM 匯入的 note 標 AUTHOR_LEGACY；API／MCP 寫入者不可自稱 legacy
 AUTHOR_LEGACY = "legacy"
-DEFAULT_PRINCIPAL = "xavier"
+# 與 Eternity 帳號一致（A23；v13 遷移把舊的 xavier 改寫成這個）
+DEFAULT_PRINCIPAL = "UEPBernie"
 AUTHOR_MAX_CHARS = 64
 _AUTHOR_FORBIDDEN_WS = frozenset(chr(c) for c in (9, 10, 13))  # tab, LF, CR
 

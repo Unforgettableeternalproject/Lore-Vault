@@ -33,8 +33,8 @@ uuid hex 相撞）：可追溯、重跑天然冪等，連結也能在寫入前�
 管理指令刪除過的 note 有墓碑（`note_tombstones`）：重跑匯入時跳過，不匯回，
 報告列在 `deleted_skipped`；來源 note 全部已刪除的 vault 也不重建。
 作者（A22）：新寫入與依來源更新的 note 一律 `author`／`updated_by` = `legacy`、
-principal = `xavier`（本工具直接寫庫，沿用唯一的憑證主體）；重跑冪等（未變動的
-note 不改寫）。既有 note 被「採用」（adopted）時不改其作者。
+principal = `UEPBernie`（`DEFAULT_PRINCIPAL`；本工具直接寫庫，沿用唯一的憑證主體）；
+重跑冪等（未變動的 note 不改寫）。既有 note 被「採用」（adopted）時不改其作者。
 """
 
 from __future__ import annotations
@@ -56,6 +56,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from lore_vault.binding import folder_key, lookup_key, resolve_binding
+from lore_vault.notes import links as links_rules
 from lore_vault.schema import (
     AUTHOR_LEGACY,
     DEFAULT_PRINCIPAL,
@@ -87,8 +88,6 @@ GLOBAL_KEY = "global"
 PM_PREFIX = "[PM]"
 
 _BIND = re.compile(r"\[bind:\s*([^\]\s]+)\s*\]", re.IGNORECASE)
-# 標題本身可能含一層方括號（如 `[Decision] X` → `[[[Decision] X]]`）
-_LINK = re.compile(r"\[\[((?:[^\[\]\n]|\[[^\[\]\n]*\])+?)\]\]")
 _WHITESPACE = re.compile(r"\s+")
 _FRACTION = re.compile(r"(\.\d{6})\d+")
 _ERROR_EXCERPT = 160
@@ -544,17 +543,9 @@ def to_utc_ms(value: Any) -> tuple[str, str | None]:
 # ── T-35 連結 ────────────────────────────────────────────────────────
 
 
-def link_targets(body: str) -> list[str]:
-    return _LINK.findall(body)
-
-
-def _target_candidates(raw: str) -> list[str]:
-    """先比對原文，再比對去掉 `|別名`、`#段落` 的形式。"""
-    forms = [norm_title(raw)]
-    stripped = norm_title(raw.split("|", 1)[0].split("#", 1)[0])
-    if stripped and stripped not in forms:
-        forms.append(stripped)
-    return forms
+# 抽取與比對規則與服務端寫入共用（`lore_vault.notes.links`）
+link_targets = links_rules.link_targets
+_target_candidates = links_rules.target_candidates
 
 
 @dataclass(frozen=True)

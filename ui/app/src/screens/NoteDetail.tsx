@@ -9,7 +9,6 @@ import { useApp } from '../lib/context';
 import { diffLines, hasConflictMarkers, mergeDraft } from '../lib/diff';
 import { authorLabel, describeError, formatTime, isAbort } from '../lib/format';
 import { Markdown } from '../lib/markdown';
-import { UI_AUTHOR } from '../lib/prefs';
 import { routePath } from '../lib/router';
 import type { ConflictCurrent, GetResult, NoteFull, NoteUndeleteResult, UpdateResult } from '../lib/types';
 
@@ -53,7 +52,7 @@ function changes(draft: Draft, against: NoteFull): Record<string, unknown> {
 }
 
 export function NoteDetail({ id }: { id: string }) {
-  const { api, space, navigate, toast, refreshVaults } = useApp();
+  const { api, space, navigate, toast, refreshVaults, author } = useApp();
   const [note, setNote] = useState<NoteFull | null>(null);
   const [lookup, setLookup] = useState<{ missing: string[]; unavailable: string[] }>({ missing: [], unavailable: [] });
   const [error, setError] = useState<unknown>(null);
@@ -150,7 +149,7 @@ export function NoteDetail({ id }: { id: string }) {
       id,
       expected_updated: expected,
       ...payload,
-      author: UI_AUTHOR,
+      author,
     });
     return data;
   };
@@ -614,9 +613,10 @@ export function NoteDetail({ id }: { id: string }) {
 
 /** 寫入署名說明：UI 寫入一律帶 author（A22），不提供關閉。 */
 export function AuthorLine() {
+  const { author } = useApp();
   return (
     <p class="lv-hint lv-hint--inline" data-testid="author-line">
-      以 <span class="lv-mono">{UI_AUTHOR}</span> 署名寫入（A22：分清誰做了什麼）
+      以 <span class="lv-mono">{author}</span> 署名寫入（A22：分清誰做了什麼）
     </p>
   );
 }

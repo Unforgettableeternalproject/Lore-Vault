@@ -25,6 +25,10 @@ export function apiError(status: number, code: string, extra: Record<string, unk
   return { status, body: { error: { code, message: `${code} message`, ...extra } } };
 }
 
+/** 元件測試的登入者（對應 session 的 principal／display_name） */
+export const TEST_PRINCIPAL = 'UEPBernie';
+export const TEST_AUTHOR = 'Xavier (Bernie)';
+
 export const VAULTS: VaultSummary[] = [
   { key: 'github.com/org/lore-vault', display: 'Lore Vault', kind: 'repo', space: 'dev', aliases: [], note_count: 3, document_count: 1 },
 ];
@@ -68,6 +72,8 @@ export function renderWithApp(ui: ComponentChildren, api: ApiClient, overrides: 
     : api;
   const env: AppEnv = {
     api: client,
+    principal: TEST_PRINCIPAL,
+    author: TEST_AUTHOR,
     space: SPACES[overrides.space ?? 'dev'],
     vaults: { items: overrides.vaults ?? VAULTS, loading: false, error: null },
     vault: overrides.vault ?? '*',

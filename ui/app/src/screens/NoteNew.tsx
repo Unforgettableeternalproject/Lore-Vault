@@ -6,7 +6,6 @@ import { useEffect, useState } from 'preact/hooks';
 import { Banner, TwoPhaseDelete } from '../components/ui';
 import { ALL, useApp } from '../lib/context';
 import { describeDegradedReason, describeError, formatTime } from '../lib/format';
-import { UI_AUTHOR } from '../lib/prefs';
 import { routePath } from '../lib/router';
 import type { GetResult, NoteFull, WriteResult } from '../lib/types';
 import { AuthorLine, parseTopics } from './NoteDetail';
@@ -14,7 +13,7 @@ import { AuthorLine, parseTopics } from './NoteDetail';
 const REASON_LABEL: Record<string, string> = { title: '標題相同', lexical: '字詞相近', vector: '語意相近' };
 
 export function NoteNew({ supersedes }: { supersedes: string | null }) {
-  const { api, space, vault: filterVault, vaults, navigate, toast, refreshVaults } = useApp();
+  const { api, space, vault: filterVault, vaults, navigate, toast, refreshVaults, author } = useApp();
   const [vault, setVault] = useState(filterVault !== ALL ? filterVault : '');
   const [title, setTitle] = useState('');
   const [topics, setTopics] = useState('');
@@ -62,7 +61,7 @@ export function NoteNew({ supersedes }: { supersedes: string | null }) {
         body,
         topics: parseTopics(topics),
         ...(supersedes && oldNote ? { supersedes } : {}),
-        author: UI_AUTHOR,
+        author,
       });
       refreshVaults();
       if (data.duplicates.length === 0 && !data.dedup_degraded) {

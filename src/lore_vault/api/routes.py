@@ -33,7 +33,12 @@ from lore_vault import notes as notes_service
 from lore_vault.doctor import DoctorContext, default_registry
 from lore_vault.doctor.builtin import DEFAULT_BACKLOG_MAX_AGE
 from lore_vault.documents import service as document_service
-from lore_vault.notes.service import DEFAULT_GET_BUDGET, DEFAULT_LIST_LIMIT
+from lore_vault.notes.service import (
+    DEFAULT_GET_BUDGET,
+    DEFAULT_LIST_BUDGET,
+    DEFAULT_LIST_LIMIT,
+    FIELDS_FULL,
+)
 from lore_vault.recall import recall as recall_service
 from lore_vault.recall.service import DEFAULT_BUDGET as RECALL_DEFAULT_BUDGET
 from lore_vault.recall.service import DEFAULT_LIMIT as RECALL_DEFAULT_LIMIT
@@ -103,6 +108,8 @@ class GetRequest(_ScopedReq):
     vault: str | None = None
     ids: list[str]
     budget: int = DEFAULT_GET_BUDGET
+    # full（預設，含全文）／meta（只回 metadata，不組裝全文、不佔預算）
+    fields: str = FIELDS_FULL
 
 
 class ListRequest(_ScopedReq):
@@ -112,6 +119,8 @@ class ListRequest(_ScopedReq):
     cursor: str | None = None
     limit: int = DEFAULT_LIST_LIMIT
     kinds: list[str] | None = None
+    # 本頁 note 摘要字數總和上限（title 不計；超過的 summary 為 null）
+    budget: int = DEFAULT_LIST_BUDGET
 
 
 class WriteRequest(_ScopedReq):
@@ -123,6 +132,8 @@ class WriteRequest(_ScopedReq):
     topics: list[str] = Field(default_factory=list)
     links: list[str] = Field(default_factory=list)
     supersedes: str | None = None
+    # 只跑驗證、範圍、查重與連結解析，不寫入（回 200）
+    dry_run: bool = False
 
 
 class UpdateRequest(_ScopedReq):
@@ -242,6 +253,7 @@ def get(request: Request, req: GetRequest) -> dict[str, Any]:
             req.ids,
             space=req.space,  # type: ignore[arg-type]
             budget=req.budget,
+            fields=req.fields,
         )
     return result.to_dict()
 
@@ -258,12 +270,15 @@ def list_(request: Request, req: ListRequest) -> dict[str, Any]:
             cursor=req.cursor,
             limit=req.limit,
             kinds=req.kinds,
+            budget=req.budget,
         )
     return result.to_dict()
 
 
 @router.post("/write", status_code=status.HTTP_201_CREATED)
-def write(request: Request, req: WriteRequest) -> dict[str, Any]:
+def write(request: Request, req: WriteRequest, response: Response) -> dict[str, Any]:
+    """新增 note（201）。`dry_run: true` 只查重與解析連結、不寫入（200）：
+    與正式寫入同一個函式，驗證、vault／space 範圍、supersedes 檢查完全相同。"""
     state = _state(request)
     with state.connection() as conn:
         result = notes_service.write(
@@ -279,8 +294,12 @@ def write(request: Request, req: WriteRequest) -> dict[str, Any]:
             supersedes=req.supersedes,
             embedder=state.query_embedder,
             dim=state.dim,
+            dry_run=req.dry_run,
         )
-    state.wake_worker()
+    if req.dry_run:
+        response.status_code = status.HTTP_200_OK
+    else:
+        state.wake_worker()
     return result.to_dict()
 
 
@@ -343,6 +362,13 @@ def status_(
                     "blob_dir": state.settings.config.documents.blob_dir,
                     "documents_stuck_seconds": (
                         state.settings.config.documents.stuck_seconds
+                    ),
+                    # 0 = 不警告（tombstones.summary 只當資訊項）
+                    "tombstones_warn_age_days": (
+                        state.settings.config.database.tombstone_warn_age_days
+                    ),
+                    "tombstones_warn_bytes": (
+                        state.settings.config.database.tombstone_warn_bytes
                     ),
                 },
                 resources={"db": conn},

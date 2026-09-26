@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { ApiError, createApiClient, extractNotices, UI_HEADER } from './api';
-import { checkSession, describeLoginError, login } from './session';
+import { checkSession, describeLoginError, LOCKED_MESSAGE, login, loginState } from './session';
 
 type Handler = (url: string, init: RequestInit) => Response | Promise<Response>;
 
@@ -113,9 +113,8 @@ describe('錯誤處理', () => {
     const { api } = setup(() =>
       json(429, { error: { code: 'too_many_attempts', message: 'x' } }, { 'Retry-After': '60' }),
     );
-    const err = await caught(api.post('/ui/api/login', { key: 'k' }));
+    const err = await caught(api.post('/v1/status'));
     expect(err.retryAfter).toBe(60);
-    expect(describeLoginError(err)).toBe('嘗試次數過多，請於 60 秒後再試');
   });
 
   it('403 csrf_required 照常丟出、不當成未登入', async () => {
@@ -134,14 +133,37 @@ describe('401 流程', () => {
     expect(onUnauthorized).toHaveBeenCalledTimes(1);
   });
 
-  it('登入端點的 401（金鑰錯）不觸發 onUnauthorized', async () => {
-    const { api, onUnauthorized } = setup(() =>
-      json(401, { error: { code: 'invalid_credentials', message: '存取金鑰不正確' } }),
+  it('登入端點的 401（帳密錯）不觸發 onUnauthorized，並顯示剩餘次數', async () => {
+    const { api, calls, onUnauthorized } = setup(() =>
+      json(401, { error: { code: 'invalid_credentials', message: 'x', remaining: 2, max_failures: 3, locked: false } }),
     );
-    const err = await caught(login(api, 'wrong'));
+    const err = await caught(login(api, 'UEPBernie', 'wrong'));
+    expect(JSON.parse(calls[0]!.init.body as string)).toEqual({ username: 'UEPBernie', password: 'wrong' });
     expect(err.code).toBe('invalid_credentials');
-    expect(describeLoginError(err)).toBe('存取金鑰不正確');
+    expect(describeLoginError(err)).toBe('帳號或密碼錯誤，剩餘 2 次；失敗 3 次將鎖定，需人工解鎖');
     expect(onUnauthorized).not.toHaveBeenCalled();
+  });
+
+  it('鎖定（423）與無帳號（409）的文案', async () => {
+    const locked = setup(() =>
+      json(423, { error: { code: 'locked', message: 'x', remaining: 0, max_failures: 3, locked: true } }),
+    );
+    const err = await caught(login(locked.api, 'UEPBernie', 'right-password'));
+    expect(describeLoginError(err)).toBe(LOCKED_MESSAGE);
+    expect(LOCKED_MESSAGE).toContain('人工解鎖');
+
+    const none = setup(() => json(409, { error: { code: 'no_account', message: 'x', remaining: 3 } }));
+    const noAccount = await caught(login(none.api, 'a', 'b'));
+    expect(describeLoginError(noAccount)).toContain('尚未設定帳號');
+  });
+
+  it('loginState 讀取登入頁的公開狀態', async () => {
+    const { api, calls } = setup(() =>
+      json(200, { account_configured: false, locked: false, remaining: 3, max_failures: 3, setup_command: 'cmd' }),
+    );
+    await expect(loginState(api)).resolves.toMatchObject({ account_configured: false, setup_command: 'cmd' });
+    expect(calls[0]!.url).toBe('/ui/api/login');
+    expect(calls[0]!.init.method).toBe('GET');
   });
 
   it('checkSession：401 回 null，其他錯誤照常丟出', async () => {

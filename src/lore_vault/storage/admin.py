@@ -23,6 +23,14 @@
   與原內容還原（FTS 同交易重建，向量交給背景補算）；v12 前沒有快照的舊墓碑維持
   `undelete_note` 的舊行為（只移除墓碑，下次匯入即可匯回）。
 
+墓碑清除（`purge_tombstones`，`cli.admin purge-tombstones`）：永久刪除刪除時間早於門檻的
+note 墓碑（連同內容快照）與文件墓碑。清除後無法還原（undelete 得 404），也不再擋重跑匯入
+（被刪的匯入 note 會匯回來）。為了讓匯入對帳維持一致，同一交易內一併移除這些 note 的對帳
+清單列（`import_sources`）並把該來源、該 vault 的來源筆數（`import_vault_counts`）減一——
+對帳把它們當成「從未匯入過」；重跑匯入時 `record_manifest` 會整批重建清單與筆數。
+文件墓碑的原始檔 blob 本來就不算引用（只看 documents），清除後由 `gc-blobs` 回收。
+不做自動清除。
+
 換 space（A20）：只允許 `lore`↔`personal`，dev 與非 dev 兩個方向都拒絕。換 space 同時把
 key 與別名改成新前綴，引用 vault key 的欄位全部在同一交易內改寫（舊 key 不留別名）。
 引用欄位由 schema 動態列出（`vault_reference_columns`：欄名為 `vault` 或外鍵指向
@@ -37,6 +45,7 @@ import json
 import sqlite3
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any
 
 from lore_vault.schema import SPACE_DEV, Note, canonical_key
@@ -45,7 +54,7 @@ from . import document_index
 from .db import transaction
 from .errors import NotFound, StorageError, UnknownVault, VaultConflict
 from .notes import insert_note, note_from_row
-from .timeutil import utc_now
+from .timeutil import format_utc, parse_utc, utc_now
 from .vaults import check_key_prefix, resolve_write, validate_space
 
 DEFAULT_NOTE_REASON = "admin delete-note"
@@ -1000,3 +1009,186 @@ def _verify_renamed(conn: sqlite3.Connection, plan: SpaceChangePlan) -> None:
     if violations:
         tables = sorted({r[0] for r in violations})
         raise PlanChanged(f"改名後外鍵不一致：{tables}")
+
+
+# ── 墓碑清除 ──
+
+PURGE_KIND_NOTE = "note"
+PURGE_KIND_DOCUMENT = "document"
+PURGE_KINDS = (PURGE_KIND_NOTE, PURGE_KIND_DOCUMENT)
+_PURGE_BATCH = 500
+
+
+@dataclass(frozen=True)
+class TombstonePurgePlan:
+    """將清除的墓碑（只有筆數、位元組與時間，不含標題與內文）。"""
+
+    cutoff: str
+    kinds: tuple[str, ...]
+    note_ids: tuple[str, ...]
+    document_ids: tuple[str, ...]
+    # note 墓碑內容快照的總位元組（UTF-8）
+    snapshot_bytes: int
+    oldest: str | None
+    newest: str | None
+    # 會一併移除的匯入對帳清單列：(source, source_id, vault)
+    manifest_rows: tuple[tuple[str, str, str], ...] = ()
+
+    def counts(self) -> dict[str, int]:
+        return {
+            "note_tombstones": len(self.note_ids),
+            "document_tombstones": len(self.document_ids),
+            "import_manifest_rows": len(self.manifest_rows),
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "cutoff": self.cutoff,
+            "kinds": list(self.kinds),
+            "counts": self.counts(),
+            "snapshot_bytes": self.snapshot_bytes,
+            "oldest_deleted_at": self.oldest,
+            "newest_deleted_at": self.newest,
+        }
+
+
+def _purge_kinds(kinds: Sequence[str] | None) -> tuple[str, ...]:
+    if kinds is None:
+        return PURGE_KINDS
+    if isinstance(kinds, str):
+        raise TypeError("kinds 必須是清單，不可傳單一字串")
+    wanted = tuple(dict.fromkeys(kinds))
+    unknown = sorted(set(wanted) - set(PURGE_KINDS))
+    if not wanted or unknown:
+        raise ValueError(f"kinds 必須是 {list(PURGE_KINDS)} 的非空子集，得到 {kinds}")
+    return wanted
+
+
+def purge_cutoff(older_than_days: float, *, now: str | None = None) -> str:
+    """刪除時間早於此字串（同 `utc_now` 格式，可直接比大小）的墓碑會被清除。"""
+    if isinstance(older_than_days, bool) or not isinstance(
+        older_than_days, int | float
+    ):
+        raise TypeError("older_than_days 必須是數字")
+    if not older_than_days >= 0 or older_than_days == float("inf"):
+        raise ValueError(f"older_than_days 必須是非負有限數，得到 {older_than_days}")
+    moment = parse_utc(now if now is not None else utc_now())
+    return format_utc(moment - timedelta(days=older_than_days))
+
+
+def plan_tombstone_purge(
+    conn: sqlite3.Connection,
+    older_than_days: float,
+    *,
+    kinds: Sequence[str] | None = None,
+    now: str | None = None,
+) -> TombstonePurgePlan:
+    """規劃（唯讀）：列出 `deleted_at` 早於 now − N 天的墓碑。"""
+    wanted = _purge_kinds(kinds)
+    cutoff = purge_cutoff(older_than_days, now=now)
+    note_ids: list[str] = []
+    doc_ids: list[str] = []
+    stamps: list[str] = []
+    snapshot_bytes = 0
+    manifest: dict[tuple[str, str, str], None] = {}
+    if PURGE_KIND_NOTE in wanted and _has_table(conn, "note_tombstones"):
+        has_snapshot = _has_column(conn, "note_tombstones", "snapshot")
+        size = "length(CAST(snapshot AS BLOB))" if has_snapshot else "0"
+        rows = conn.execute(
+            f"""
+            SELECT note_id, deleted_at, coalesce({size}, 0), source, source_id
+            FROM note_tombstones WHERE deleted_at < ? ORDER BY deleted_at, note_id
+            """,
+            (cutoff,),
+        ).fetchall()
+        has_manifest = _has_table(conn, "import_sources")
+        for note_id, deleted_at, nbytes, source, source_id in rows:
+            note_ids.append(note_id)
+            stamps.append(deleted_at)
+            snapshot_bytes += int(nbytes)
+            if not has_manifest:
+                continue
+            for row in conn.execute(
+                """
+                SELECT source, source_id, vault FROM import_sources
+                WHERE note_id = ? OR (source = ? AND source_id = ?)
+                ORDER BY source, source_id
+                """,
+                (note_id, source, source_id),
+            ):
+                manifest[(row[0], row[1], row[2])] = None
+    if PURGE_KIND_DOCUMENT in wanted and _has_table(conn, "document_tombstones"):
+        for doc_id, deleted_at in conn.execute(
+            """
+            SELECT document_id, deleted_at FROM document_tombstones
+            WHERE deleted_at < ? ORDER BY deleted_at, document_id
+            """,
+            (cutoff,),
+        ):
+            doc_ids.append(doc_id)
+            stamps.append(deleted_at)
+    return TombstonePurgePlan(
+        cutoff=cutoff,
+        kinds=wanted,
+        note_ids=tuple(note_ids),
+        document_ids=tuple(doc_ids),
+        snapshot_bytes=snapshot_bytes,
+        oldest=min(stamps) if stamps else None,
+        newest=max(stamps) if stamps else None,
+        manifest_rows=tuple(manifest),
+    )
+
+
+def _delete_ids(
+    conn: sqlite3.Connection, table: str, column: str, ids: Sequence[str]
+) -> int:
+    deleted = 0
+    for start in range(0, len(ids), _PURGE_BATCH):
+        batch = tuple(ids[start : start + _PURGE_BATCH])
+        placeholders = ",".join("?" * len(batch))
+        deleted += conn.execute(
+            f"DELETE FROM {table} WHERE {column} IN ({placeholders})", batch
+        ).rowcount
+    return deleted
+
+
+def purge_tombstones(
+    conn: sqlite3.Connection,
+    older_than_days: float,
+    *,
+    kinds: Sequence[str] | None = None,
+    now: str | None = None,
+) -> tuple[TombstonePurgePlan, dict[str, int]]:
+    """永久清除墓碑（單一交易內重新規劃再刪，核對筆數，不符整段 rollback）。
+
+    note 墓碑連同內容快照一起刪；匯入過的 note 另移除其對帳清單列並把來源筆數減一
+    （見模組說明）。回傳 (規劃, 實際刪除筆數)。
+    """
+    with transaction(conn):
+        plan = plan_tombstone_purge(conn, older_than_days, kinds=kinds, now=now)
+        done = {
+            "note_tombstones": _delete_ids(
+                conn, "note_tombstones", "note_id", plan.note_ids
+            ),
+            "document_tombstones": _delete_ids(
+                conn, "document_tombstones", "document_id", plan.document_ids
+            ),
+            "import_manifest_rows": 0,
+        }
+        for source, source_id, vault in plan.manifest_rows:
+            done["import_manifest_rows"] += conn.execute(
+                "DELETE FROM import_sources WHERE source = ? AND source_id = ?",
+                (source, source_id),
+            ).rowcount
+            conn.execute(
+                """
+                UPDATE import_vault_counts SET source_count = source_count - 1
+                WHERE source = ? AND vault = ? AND source_count > 0
+                """,
+                (source, vault),
+            )
+        if done != plan.counts():
+            raise PlanChanged(
+                f"實際清除筆數與規劃不符：規劃 {plan.counts()}、實際 {done}"
+            )
+    return plan, done

@@ -4,9 +4,10 @@ principal 是服務依「請求用了哪一組憑證」判定的主體，寫進 
 `updated_by_principal`；**不可由請求指定**（請求 body 帶 `principal` 會被
 `extra="forbid"` 以 422 拒絕）。
 
-- 現階段只有一組憑證（`LORE_VAULT_API_TOKEN`），對應 `DEFAULT_PRINCIPAL`（xavier）
+- 現階段只有一組憑證（`LORE_VAULT_API_TOKEN`），對應 `DEFAULT_PRINCIPAL`（UEPBernie）
 - 設計成對照表：日後共享時一 token 一 principal，只要多加項目
-- Bearer 與 UI 登入共用同一張表；UI session 記住登入時用的憑證對應的 principal
+- 只用於 Bearer 路徑；UI 登入（A23）的 principal 是 DB 內 UI 帳號的 username，
+  目前同為 UEPBernie
 - 認證中介層把判定結果放進 ASGI scope 的 `state`，路由以 `principal_of` 取用；
   缺少時拋錯（fail closed），不預設成任何人
 """

@@ -5,6 +5,8 @@
 關閉時（uvicorn 收到 SIGTERM／SIGINT → lifespan 結束）停止 worker 並等它結束。
 token 缺少或不合格時 `create_app` 直接拋 `ConfigError`，服務不會啟動。
 
+啟動時另清除過期的 UI 登入紀錄（A23）。
+
 UI（A21）：`/ui/api/*` 登入端點一律掛上；`ui.static_dir` 有設定時在 `/ui` 提供
 Vite 建置後的靜態檔（SPA fallback 到 index.html）。
 """
@@ -15,9 +17,12 @@ import logging
 import time
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+
+from lore_vault.storage import ui_login
 
 from .auth import BearerAuthMiddleware
 from .errors import install_error_handlers
@@ -50,6 +55,17 @@ def _configure_logging() -> None:
     root.propagate = False
 
 
+def _purge_login_log(state: AppState, ui_auth: UiAuth) -> None:
+    """啟動時清除過期的 UI 登入紀錄（A23；每次登入嘗試也會順手清）。"""
+    now = datetime.fromtimestamp(ui_auth.clock(), UTC)
+    with state.connection() as conn:
+        removed = ui_login.purge_log(
+            conn, now=now, retention_days=ui_auth.login_log_retention_days
+        )
+    if removed:
+        logging.getLogger("lore_vault.api.ui").info("清除過期登入紀錄 %d 筆", removed)
+
+
 def create_app(
     settings: ApiSettings | None = None,
     *,
@@ -61,7 +77,7 @@ def create_app(
         _configure_logging()
         settings = load_settings(environ=environ)
     validate_token(settings.token)
-    # 憑證 → principal（A22）：目前唯一的 token 對應 xavier
+    # 憑證 → principal（A22）：目前唯一的 token 對應 UEPBernie
     principals = Principals.single(settings.token)
     ui_auth = UiAuth.from_config(settings.config.ui, settings.clock or time.time)
     ui_static = (
@@ -74,6 +90,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         state.migrate()
+        _purge_login_log(state, ui_auth)
         state.warmup.start()
         if state.enricher is not None:
             state.enricher.start()
@@ -104,7 +121,7 @@ def create_app(
     app.include_router(spike_router)
     app.include_router(manage_router)
     # /ui/api/* 必須在 /ui 靜態掛載之前註冊（Starlette 依註冊順序比對）
-    app.include_router(build_ui_router(principals))
+    app.include_router(build_ui_router())
     if ui_static is not None:
         app.mount("/ui", ui_static, name="ui")
 

@@ -20,6 +20,18 @@
   引用的孤兒 blob（判定與 doctor `documents.orphan_blobs` 共用）與中斷遺留的暫存檔。
   只刪 mtime 超過 N 小時（預設 1）的孤兒；刪前持 DB 寫鎖再確認無引用、檔案未變動；
   不符佈局的檔案只報告不碰；刪完移除空的子目錄。dry-run 只列雜湊前 12 碼與位元組
+- `purge-tombstones --older-than-days N [--kinds note,document] [--yes]`：永久清除刪除
+  時間早於 N 天前的墓碑（note 墓碑連同內容快照）。**清除後無法還原**
+  （undelete 回 404），也**不再擋重跑匯入**（被刪的匯入 note 會匯回來；
+  其對帳清單列一併移除、來源筆數減一，見 `storage.admin`）。文件原始檔 blob
+  不在這裡刪，之後由 `gc-blobs` 回收。
+  dry-run 只列筆數、快照位元組與最舊／最新刪除時間。不做自動清除
+- `ui-set-password --user NAME [--display TEXT]`：建立 UI 帳號或更新密碼（A23）。
+  密碼**只**以 getpass 互動輸入兩次（至少 12 字元），不接受參數、環境變數或 pipe
+  （stdin 不是終端機就拒絕；容器內用 `docker exec -it`）。不動鎖定狀態
+- `ui-lock-status`：鎖定狀態、目前失敗次數、剩餘次數與帳號清單（不含雜湊）
+- `ui-login-log [--limit N]`：最近的登入紀錄（新到舊；不含密碼）
+- `ui-unlock [--yes]`：人工解鎖並歸零失敗計數，寫一筆 unlock 紀錄（預設 dry-run）
 
 刪除會為每則被刪的 note 寫墓碑（`note_tombstones`）：重跑匯入不會匯回，
 匯入對帳把它算成「刻意刪除」而非漏匯。
@@ -36,15 +48,17 @@ exit code：0 成功（含 dry-run）；1 找不到、需要 --force、schema �
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import sqlite3
 import sys
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TextIO
 
 from lore_vault.schema import SPACES
-from lore_vault.storage import admin
+from lore_vault.storage import admin, ui_login
 from lore_vault.storage import blobs as storage_blobs
 from lore_vault.storage.db import connect
 from lore_vault.storage.errors import StorageError
@@ -61,6 +75,111 @@ def _non_negative_hours(value: str) -> float:
     if not hours >= 0 or hours == float("inf"):
         raise argparse.ArgumentTypeError(f"必須是非負有限數：{value}")
     return hours
+
+
+def _non_negative_days(value: str) -> float:
+    return _non_negative_hours(value)
+
+
+def _purge_kinds(value: str) -> list[str]:
+    kinds = [k.strip() for k in value.split(",") if k.strip()]
+    unknown = sorted(set(kinds) - set(admin.PURGE_KINDS))
+    if not kinds or unknown:
+        raise argparse.ArgumentTypeError(
+            f"kinds 必須是 {','.join(admin.PURGE_KINDS)} 的非空子集，得到 {value!r}"
+        )
+    return kinds
+
+
+PURGE_WARNING = (
+    "清除後無法還原（undelete 會回 404 not_found）；被清除的匯入 note 不再擋重跑匯入，"
+    "重跑 import_on 會把它匯回來（其對帳清單列一併移除、來源筆數減一）；"
+    "文件原始檔 blob 不在此刪除，之後以 gc-blobs 回收"
+)
+
+
+def _purge(conn: sqlite3.Connection, args: argparse.Namespace) -> dict[str, object]:
+    if args.yes:
+        plan, done = admin.purge_tombstones(
+            conn, args.older_than_days, kinds=args.kinds
+        )
+        return {
+            "mode": "purged",
+            **plan.to_dict(),
+            "purged": done,
+            "warning": PURGE_WARNING,
+        }
+    plan = admin.plan_tombstone_purge(conn, args.older_than_days, kinds=args.kinds)
+    return {
+        "mode": "dry_run",
+        **plan.to_dict(),
+        "warning": PURGE_WARNING,
+        "hint": "確認無誤後加 --yes 執行（不可逆）",
+    }
+
+
+def _positive_int(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"必須是正整數，得到 {value!r}") from None
+    if number <= 0:
+        raise argparse.ArgumentTypeError(f"必須是正整數，得到 {value!r}")
+    return number
+
+
+def _stdin_is_tty() -> bool:
+    return sys.stdin.isatty()
+
+
+def _read_new_password() -> str:
+    """互動輸入兩次；不是終端機（pipe、agent 代跑）一律拒絕。"""
+    if not _stdin_is_tty():
+        raise ui_login.AccountError(
+            "密碼只能在互動終端機輸入（容器內用 docker exec -it）；"
+            "不接受 pipe、參數或環境變數"
+        )
+    first = getpass.getpass("新密碼：")
+    ui_login.validate_password(first)
+    second = getpass.getpass("再輸入一次：")
+    if first != second:
+        raise ui_login.AccountError("兩次輸入的密碼不一致")
+    return first
+
+
+def _ui_command(
+    conn: sqlite3.Connection, args: argparse.Namespace
+) -> dict[str, object]:
+    now = datetime.now(UTC)
+    if args.command == "ui-set-password":
+        ui_login.validate_username(args.user)
+        if args.display is not None:
+            ui_login.validate_display(args.display)
+        password = _read_new_password()
+        account, created = ui_login.set_password(
+            conn, args.user, password, now=now, display=args.display
+        )
+        return {"mode": "created" if created else "updated", **account.to_dict()}
+    if args.command == "ui-lock-status":
+        return {
+            **ui_login.lock_status(conn, now).to_dict(),
+            "accounts": [a.to_dict() for a in ui_login.list_accounts(conn)],
+        }
+    if args.command == "ui-login-log":
+        return {"items": ui_login.login_log(conn, limit=args.limit)}
+    # ui-unlock
+    if args.yes:
+        return {"mode": "unlocked", **ui_login.unlock(conn, now=now)}
+    return {
+        "mode": "dry_run",
+        **ui_login.lock_status(conn, now).to_dict(),
+        "hint": "確認無誤後加 --yes 解鎖（同時歸零失敗計數並寫一筆 unlock 紀錄）",
+    }
+
+
+UI_COMMANDS = frozenset(
+    {"ui-set-password", "ui-lock-status", "ui-login-log", "ui-unlock"}
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -121,11 +240,47 @@ def _parser() -> argparse.ArgumentParser:
     )
     p_gc.add_argument("--yes", action="store_true", help="真的刪除（預設 dry-run）")
 
+    p_purge = sub.add_parser(
+        "purge-tombstones", help="永久清除舊墓碑（清除後無法還原、不再擋重新匯入）"
+    )
+    p_purge.add_argument(
+        "--older-than-days",
+        required=True,
+        type=_non_negative_days,
+        help="只清除刪除時間早於 N 天前的墓碑（0 = 全部）",
+    )
+    p_purge.add_argument(
+        "--kinds",
+        type=_purge_kinds,
+        default=None,
+        help="逗號分隔：note、document（預設兩者）",
+    )
+    p_purge.add_argument("--yes", action="store_true", help="真的清除（預設 dry-run）")
+
     p_undel = sub.add_parser(
         "undelete-note", help="取消刪除（有快照則還原內容，舊墓碑只移除墓碑）"
     )
     p_undel.add_argument("--id", required=True, dest="note_id", help="note id")
     p_undel.add_argument("--yes", action="store_true", help="真的移除（預設 dry-run）")
+    p_pw = sub.add_parser(
+        "ui-set-password",
+        help="建立 UI 帳號或更新密碼（密碼只以互動方式輸入）",
+    )
+    p_pw.add_argument(
+        "--user",
+        required=True,
+        help="帳號（即 principal，如 UEPBernie；比對不分大小寫）",
+    )
+    p_pw.add_argument(
+        "--display", default=None, help="顯示名稱（前端署名，如 'Xavier (Bernie)'）"
+    )
+    sub.add_parser("ui-lock-status", help="UI 登入鎖定狀態與帳號清單")
+    p_log = sub.add_parser("ui-login-log", help="最近的 UI 登入紀錄")
+    p_log.add_argument(
+        "--limit", type=_positive_int, default=50, help="筆數（預設 50）"
+    )
+    p_unlock = sub.add_parser("ui-unlock", help="人工解鎖 UI 登入並歸零失敗計數")
+    p_unlock.add_argument("--yes", action="store_true", help="真的解鎖（預設 dry-run）")
     return parser
 
 
@@ -211,6 +366,10 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> 
                 file=sys.stderr,
             )
             return 1
+        if args.command in UI_COMMANDS:
+            ui_result = _ui_command(conn, args)
+            out.write(json.dumps(ui_result, ensure_ascii=False, indent=2) + "\n")
+            return 0
         if args.command == "undelete-note":
             if args.yes:
                 restored = admin.restore_note(conn, args.note_id)
@@ -221,6 +380,10 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> 
             if not args.yes:
                 result["hint"] = "確認無誤後加 --yes 執行"
             out.write(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+            return 0
+        if args.command == "purge-tombstones":
+            purged = _purge(conn, args)
+            out.write(json.dumps(purged, ensure_ascii=False, indent=2) + "\n")
             return 0
         if args.command == "gc-blobs":
             gc = _gc_blobs(conn, args)
@@ -279,7 +442,7 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> 
                 result["hint"] = "確認無誤後加 --yes 執行"
         out.write(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
         return 0
-    except (ConfigError, StorageError) as exc:
+    except (ConfigError, StorageError, ui_login.AccountError) as exc:
         print(f"錯誤：{exc}", file=sys.stderr)
         return 1
     finally:

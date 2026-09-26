@@ -62,6 +62,10 @@ class Secret:
 class DatabaseConfig:
     # 資料目錄尚未定案（D5），不給預設路徑；使用端缺值時明確報錯
     path: str | None = None
+    # doctor `tombstones.summary`（資訊項）的警告門檻；0 = 不警告（預設）。
+    # 墓碑與內容快照永久保留，只由 `cli.admin purge-tombstones` 明確清除
+    tombstone_warn_age_days: float = 0.0
+    tombstone_warn_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -183,9 +187,10 @@ class DocumentsConfig:
 
 @dataclass(frozen=True)
 class UiConfig:
-    """使用者 UI（A21）：靜態檔位置與本地身分驗證（session cookie、登入限流）。
+    """使用者 UI（A21）：靜態檔位置與本地身分驗證（session cookie、帳號密碼登入）。
 
-    登入用的存取金鑰就是 `LORE_VAULT_API_TOKEN`，不另設密碼。
+    登入改用 DB 內的 UI 帳號密碼（A23，`storage.ui_login`）：全域失敗 3 次即鎖定、
+    需人工解鎖；規則固定，不做設定項。
     """
 
     # Vite 建置產物（index.html 所在目錄）；未設定 = 不提供 /ui 靜態檔
@@ -200,16 +205,10 @@ class UiConfig:
     session_idle_minutes: float = 60.0
     # 同時存在的 session 上限；超過時淘汰最舊的
     max_sessions: int = 32
-    # 登入失敗計數的時間窗（秒）
-    login_failure_window_seconds: float = 900.0
-    # 同一來源 IP 在時間窗內的失敗上限；達到後進入退避（429）
-    login_max_failures_per_ip: int = 5
-    # 所有來源合計的失敗上限（擋分散來源的猜測；也會暫時擋住擁有者）
-    login_max_failures_global: int = 20
-    # 退避基準（秒）：達上限後第 n 次失敗鎖 base * 2^n，最長不超過時間窗
-    login_lockout_seconds: float = 60.0
+    # 登入紀錄（`ui_login_log`）保留天數；過期的在服務啟動與每次登入嘗試時清除
+    login_log_retention_days: float = 90.0
     # 受信任代理（逗號分隔的 IP 或 CIDR）。只有直接連線來源在清單內時才採信
-    # `CF-Connecting-IP` 當作用戶端 IP；空 = 一律用直接連線來源
+    # `CF-Connecting-IP` 當作用戶端 IP（登入紀錄的來源）；空 = 一律用直接連線來源
     trusted_proxies: str = ""
 
 
@@ -389,10 +388,7 @@ def _validate(config: Config) -> None:
         "ui.session_absolute_hours": config.ui.session_absolute_hours,
         "ui.session_idle_minutes": config.ui.session_idle_minutes,
         "ui.max_sessions": config.ui.max_sessions,
-        "ui.login_failure_window_seconds": config.ui.login_failure_window_seconds,
-        "ui.login_max_failures_per_ip": config.ui.login_max_failures_per_ip,
-        "ui.login_max_failures_global": config.ui.login_max_failures_global,
-        "ui.login_lockout_seconds": config.ui.login_lockout_seconds,
+        "ui.login_log_retention_days": config.ui.login_log_retention_days,
     }
     for name, value in positive.items():
         if value <= 0:
@@ -405,6 +401,8 @@ def _validate(config: Config) -> None:
         "documents.min_chars": config.documents.min_chars,
         "documents.chunk_overlap_tokens": config.documents.chunk_overlap_tokens,
         "documents.extract_memory_mb": config.documents.extract_memory_mb,
+        "database.tombstone_warn_age_days": config.database.tombstone_warn_age_days,
+        "database.tombstone_warn_bytes": config.database.tombstone_warn_bytes,
     }
     for name, value in non_negative.items():
         if value < 0:

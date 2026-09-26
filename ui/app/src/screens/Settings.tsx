@@ -1,11 +1,11 @@
-// 連線設定（T-85）：同源部署，沒有「服務位址」與金鑰欄位（A21：金鑰只在登入頁輸入、session 存在服務端）。
-// 顯示目前連線的服務、session principal 與期限、測試連線、登出；UI 偏好為深淺色與署名（一律開啟）。
+// 連線設定（T-85）：同源部署，沒有「服務位址」與密碼欄位（A23：帳號密碼只在登入頁輸入、session 存在服務端）。
+// 顯示目前連線的服務、登入帳號與顯示名稱、session 期限、測試連線、登出；UI 偏好為深淺色與署名（一律開啟）。
 import { useEffect, useState } from 'preact/hooks';
 
 import { ErrorState, Loading } from '../components/ui';
 import { useApp } from '../lib/context';
 import { describeError, formatTime, isAbort } from '../lib/format';
-import { UI_AUTHOR, type Theme } from '../lib/prefs';
+import type { Theme } from '../lib/prefs';
 import { checkSession, type SessionInfo } from '../lib/session';
 import type { StatusResult } from '../lib/types';
 
@@ -16,7 +16,7 @@ interface TestRow {
 }
 
 export function Settings({ theme, onToggleTheme, onLogout }: { theme: Theme; onToggleTheme: () => void; onLogout: () => void }) {
-  const { api } = useApp();
+  const { api, author } = useApp();
   const [session, setSession] = useState<SessionInfo | null>(null);
   const [sessionError, setSessionError] = useState<unknown>(null);
   const [loading, setLoading] = useState(true);
@@ -84,17 +84,19 @@ export function Settings({ theme, onToggleTheme, onLogout }: { theme: Theme; onT
         <dl class="lv-kv" data-testid="settings-session">
           <dt>服務</dt>
           <dd class="lv-mono">{window.location.origin}</dd>
-          <dt>principal</dt>
+          <dt>帳號</dt>
           <dd class="lv-mono" data-testid="settings-principal">
             {session?.principal ?? (loading ? '…' : '服務未回報')}
           </dd>
+          <dt>顯示名稱</dt>
+          <dd data-testid="settings-display">{session?.display_name ?? (loading ? '…' : '服務未回報')}</dd>
           <dt>session 到期</dt>
           <dd>{session ? formatTime(session.expires_at) : '—'}</dd>
           <dt>閒置到期</dt>
           <dd>{session ? formatTime(session.idle_expires_at) : '—'}</dd>
         </dl>
         <p class="lv-hint lv-hint--inline">
-          UI 與服務同源部署；存取金鑰只在登入時送出一次，瀏覽器只持有 HttpOnly session cookie。服務重啟後 session 失效，需重新登入。
+          UI 與服務同源部署；密碼只在登入時送出一次，瀏覽器只持有 HttpOnly session cookie。服務重啟後 session 失效，需重新登入。帳號密碼在主機以 cli.admin ui-set-password 設定。
         </p>
         <div class="lv-actions">
           <button type="button" class="btn-outline btn-outline--gold" disabled={testing} onClick={() => void runTest()}>
@@ -133,8 +135,8 @@ export function Settings({ theme, onToggleTheme, onLogout }: { theme: Theme; onT
           </dd>
           <dt>寫入署名</dt>
           <dd data-testid="settings-author">
-            <span class="lv-mono">{UI_AUTHOR}</span>
-            <span class="lv-muted lv-small"> · 一律開啟（A22：共享後要分清誰做了什麼）</span>
+            <span class="lv-mono">{author}</span>
+            <span class="lv-muted lv-small"> · 登入帳號的顯示名稱，一律開啟（A22：共享後要分清誰做了什麼）</span>
           </dd>
         </dl>
       </section>

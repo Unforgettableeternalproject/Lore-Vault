@@ -25,6 +25,9 @@ import { SpaceSwitcher } from './SpaceSwitcher';
 
 interface Props {
   api: ApiClient;
+  /** 登入帳號與顯示名稱（取自 /ui/api/session） */
+  principal: string;
+  author: string;
   theme: Theme;
   onToggleTheme: () => void;
   degraded: Notice | null;
@@ -39,7 +42,7 @@ interface ToastItem {
 
 const TOAST_ICON: Record<ToastKind, string> = { success: '✓', error: '✕', warning: '!', info: 'i' };
 
-export function Shell({ api, theme, onToggleTheme, degraded, onLogout }: Props) {
+export function Shell({ api, principal, author, theme, onToggleTheme, degraded, onLogout }: Props) {
   const [route, navigate] = useRoute();
   const [spaceId, setSpaceId] = useState<SpaceId>(loadSpace);
   const [vault, setVault] = useState<string>(ALL);
@@ -99,6 +102,8 @@ export function Shell({ api, theme, onToggleTheme, degraded, onLogout }: Props) 
   const env: AppEnv = useMemo(
     () => ({
       api,
+      principal,
+      author,
       space,
       vaults,
       vault,
@@ -111,7 +116,7 @@ export function Shell({ api, theme, onToggleTheme, degraded, onLogout }: Props) 
       switchSpace,
     }),
     // navigate／switchSpace 每次 render 都是新函式，但行為不變；不列入以免畫面重掛
-    [api, space, vaults, vault, toast, health],
+    [api, principal, author, space, vaults, vault, toast, health],
   );
 
   const vaultLabel =

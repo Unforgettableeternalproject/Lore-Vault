@@ -3,9 +3,8 @@ import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/pr
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { MARK_START } from '../lib/diff';
-import { UI_AUTHOR } from '../lib/prefs';
 import type { NoteFull } from '../lib/types';
-import { apiError, json, makeApi, renderWithApp, type Handler } from '../test/harness';
+import { apiError, json, makeApi, renderWithApp, TEST_AUTHOR, type Handler } from '../test/harness';
 import { NoteDetail } from './NoteDetail';
 import { NoteNew } from './NoteNew';
 
@@ -153,7 +152,7 @@ describe('編輯與版本衝突', () => {
     const retry = callsTo('/v1/update')[1]!.body;
     expect(retry.expected_updated).toBe(theirs.updated);
     expect(retry.body).toBe('第一行\n我的第二行');
-    expect(retry.author).toBe(UI_AUTHOR);
+    expect(retry.author).toBe(TEST_AUTHOR);
     await waitFor(() => expect(screen.queryByTestId('version-conflict')).toBeNull());
     expect(toast).toHaveBeenCalledWith(expect.stringContaining('摘要將在背景重新產生'), 'success');
   });
@@ -195,12 +194,12 @@ describe('編輯與版本衝突', () => {
       '/v1/update': () => ({ status: 422, body: { detail: [{ type: 'extra_forbidden', loc: ['body', 'author'], msg: 'Extra inputs are not permitted' }] } }),
     });
     expect(screen.queryByRole('checkbox')).toBeNull();
-    expect(screen.getByTestId('author-line').textContent).toContain(UI_AUTHOR);
+    expect(screen.getByTestId('author-line').textContent).toContain(TEST_AUTHOR);
     fireEvent.click(screen.getByRole('button', { name: '儲存' }));
     expect((await screen.findByRole('alert')).textContent).toContain('A22');
     fireEvent.click(screen.getByRole('button', { name: '儲存' }));
     await waitFor(() => expect(callsTo('/v1/update')).toHaveLength(2));
-    expect(callsTo('/v1/update').every((c) => c.body.author === UI_AUTHOR)).toBe(true);
+    expect(callsTo('/v1/update').every((c) => c.body.author === TEST_AUTHOR)).toBe(true);
   });
 
   it('沒有變更不送出', async () => {
@@ -330,7 +329,7 @@ describe('新增筆記', () => {
     expect(dupes.textContent).toContain('標題相同、字詞相近');
     expect(dupes.textContent).toContain('0.91');
     expect(screen.getByTestId('dedup-degraded').textContent).toContain('embedder_unavailable');
-    expect(callsTo('/v1/write')[0]!.body).toMatchObject({ space: 'dev', vault: VAULT, title: '注入預算 800 字', author: UI_AUTHOR });
+    expect(callsTo('/v1/write')[0]!.body).toMatchObject({ space: 'dev', vault: VAULT, title: '注入預算 800 字', author: TEST_AUTHOR });
     fireEvent.click(screen.getByRole('button', { name: '開啟這則改寫 →' }));
     expect(navigate).toHaveBeenCalledWith('/ui/notes/n1');
   });

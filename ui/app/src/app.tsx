@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from 'preact/hooks';
 
 import { createApiClient, type Notice } from './lib/api';
 import { loadTheme, saveTheme, type Theme } from './lib/prefs';
-import { checkSession, logout } from './lib/session';
+import { checkSession, logout, type SessionInfo } from './lib/session';
 import { Login } from './screens/Login';
 import { Shell } from './shell/Shell';
 
@@ -11,6 +11,7 @@ type AuthState = 'checking' | 'anonymous' | 'authenticated' | 'error';
 
 export function App() {
   const [auth, setAuth] = useState<AuthState>('checking');
+  const [session, setSession] = useState<SessionInfo | null>(null);
   const [expired, setExpired] = useState(false);
   const [theme, setTheme] = useState<Theme>(loadTheme);
   // 依端點記錄最近一次回應是否降級；任一為真就在 header 常駐徽章
@@ -41,10 +42,17 @@ export function App() {
     saveTheme(theme);
   }, [theme]);
 
-  useEffect(() => {
+  // 取 session（登入帳號與顯示名稱）；登入成功後也走這裡，署名一律用服務回報的顯示名稱
+  const refreshSession = () =>
     checkSession(api)
-      .then((info) => setAuth(info ? 'authenticated' : 'anonymous'))
+      .then((info) => {
+        setSession(info);
+        setAuth(info ? 'authenticated' : 'anonymous');
+      })
       .catch(() => setAuth('error'));
+
+  useEffect(() => {
+    void refreshSession();
   }, [api]);
 
   const toggleTheme = () => setTheme((t) => (t === 'dark' ? 'light' : 'dark'));
@@ -70,7 +78,8 @@ export function App() {
         expired={expired}
         onLoggedIn={() => {
           setExpired(false);
-          setAuth('authenticated');
+          setAuth('checking');
+          void refreshSession();
         }}
       />
     );
@@ -78,6 +87,8 @@ export function App() {
   return (
     <Shell
       api={api}
+      principal={session?.principal ?? ''}
+      author={session?.display_name ?? session?.principal ?? ''}
       theme={theme}
       onToggleTheme={toggleTheme}
       degraded={degraded}

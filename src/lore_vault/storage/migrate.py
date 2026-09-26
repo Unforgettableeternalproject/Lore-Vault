@@ -492,6 +492,77 @@ def _v12(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+# UI 帳號密碼登入與全域鎖定（v13，A23；規則見 `storage.ui_login`）：
+# - ui_accounts：username 即 session 的 principal；儲存保留大小寫、比對不分大小寫
+#   （COLLATE NOCASE，也讓大小寫不同的同名帳號無法並存）。密碼只存 scrypt 雜湊，
+#   salt 與參數（n／r／p／dklen）寫在列中，日後調整參數不影響舊雜湊的驗證
+# - ui_login_state：單列（id = 1）的全域失敗計數與鎖定狀態；服務重啟不歸零、不解鎖
+# - ui_login_log：每次嘗試一列（不含密碼）；result 另含人工解鎖的 'unlock'
+# - principal 改名：唯一的主體由 'xavier' 改為 'UEPBernie'（與 Eternity 帳號一致）。
+#   notes 的 principal／updated_by_principal 與 note 墓碑快照 JSON 內的同名欄位一併
+#   改寫；不動 notes.updated（樂觀鎖版本）
+_V13_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE ui_accounts (
+        username      TEXT PRIMARY KEY COLLATE NOCASE
+                      CHECK (length(username) BETWEEN 1 AND 64
+                             AND username = trim(username)),
+        display       TEXT NOT NULL CHECK (length(trim(display)) > 0),
+        password_hash BLOB NOT NULL,
+        salt          BLOB NOT NULL,
+        scrypt_n      INTEGER NOT NULL CHECK (scrypt_n > 1),
+        scrypt_r      INTEGER NOT NULL CHECK (scrypt_r > 0),
+        scrypt_p      INTEGER NOT NULL CHECK (scrypt_p > 0),
+        dklen         INTEGER NOT NULL CHECK (dklen >= 16),
+        created       TEXT NOT NULL,
+        updated       TEXT NOT NULL
+    ) STRICT
+    """,
+    """
+    CREATE TABLE ui_login_state (
+        id          INTEGER PRIMARY KEY CHECK (id = 1),
+        failures    INTEGER NOT NULL DEFAULT 0 CHECK (failures >= 0),
+        failure_day TEXT,
+        locked_at   TEXT,
+        updated     TEXT
+    ) STRICT
+    """,
+    "INSERT INTO ui_login_state (id, failures) VALUES (1, 0)",
+    """
+    CREATE TABLE ui_login_log (
+        seq      INTEGER PRIMARY KEY,
+        at       TEXT NOT NULL,
+        ip       TEXT NOT NULL,
+        username TEXT,
+        result   TEXT NOT NULL CHECK (result IN
+                 ('success', 'bad_credentials', 'locked', 'no_account', 'unlock'))
+    ) STRICT
+    """,
+    "CREATE INDEX ui_login_log_at ON ui_login_log(at)",
+    "UPDATE notes SET principal = 'UEPBernie' WHERE principal = 'xavier'",
+    """
+    UPDATE notes SET updated_by_principal = 'UEPBernie'
+    WHERE updated_by_principal = 'xavier'
+    """,
+    """
+    UPDATE note_tombstones
+    SET snapshot = json_set(snapshot, '$.principal', 'UEPBernie')
+    WHERE snapshot IS NOT NULL AND json_extract(snapshot, '$.principal') = 'xavier'
+    """,
+    """
+    UPDATE note_tombstones
+    SET snapshot = json_set(snapshot, '$.updated_by_principal', 'UEPBernie')
+    WHERE snapshot IS NOT NULL
+      AND json_extract(snapshot, '$.updated_by_principal') = 'xavier'
+    """,
+)
+
+
+def _v13(conn: sqlite3.Connection) -> None:
+    for statement in _V13_STATEMENTS:
+        conn.execute(statement)
+
+
 # 有序遷移：索引 i 的函式把版本從 i 升到 i+1。只能往後加，不可改動已發佈的項目。
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _v1,
@@ -506,6 +577,7 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _v10,
     _v11,
     _v12,
+    _v13,
 )
 
 SCHEMA_VERSION = len(MIGRATIONS)
