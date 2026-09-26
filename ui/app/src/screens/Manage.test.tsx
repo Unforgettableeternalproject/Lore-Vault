@@ -365,6 +365,9 @@ describe('系統健康', () => {
     expect((screen.getByTestId('check-enrich.stale') as HTMLDetailsElement).open).toBe(false);
     expect(screen.getByTestId('health-backup').textContent).toContain('backup_dir');
     expect(screen.getByTestId('health-warmup').textContent).toContain('暖機失敗');
+    // 舊版服務沒有 model_loaded：顯示無法確認，不說離線
+    expect(screen.getByTestId('health-model').textContent).toContain('無法確認');
+    expect(screen.getByTestId('health-recall').textContent).toContain('沒有降級紀錄');
     expect(reportHealth).toHaveBeenCalledWith(expect.objectContaining({ ok: false, fail: 1, warn: 1 }));
 
     const machines = await screen.findByTestId('machines');

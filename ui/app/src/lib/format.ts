@@ -143,6 +143,39 @@ const DEGRADED_REASON: Record<string, string> = {
   embedder_invalid_vector: '語意模型回傳的向量不合法',
 };
 
+/**
+ * 最近一次檢索降級時頂列徽章的說法：依原因分開，逾時（多半是模型冷啟動）不說成離線。
+ */
+export function recallDegradedBadge(reason: string | null | undefined): { label: string; title: string } {
+  switch (reason) {
+    case 'embedder_timeout':
+      return {
+        label: '語意檢索逾時',
+        title: '最近一次檢索時語意模型逾時（可能正在載入），那次只用了關鍵字比對；再查一次通常就會恢復。點此看系統健康。',
+      };
+    case 'embedder_unavailable':
+      return { label: '語意檢索離線', title: '最近一次檢索連不上語意模型，只用了關鍵字比對。點此看系統健康。' };
+    default:
+      return {
+        label: '語意檢索異常',
+        title: `最近一次檢索的語意模型回應異常（${describeDegradedReason(reason)}），只用了關鍵字比對。點此看系統健康。`,
+      };
+  }
+}
+
+/** 系統健康的語意模型狀態：依 /api/ps 探測結果區分已載入／未載入（首次查詢較慢）／無法判斷。 */
+export function describeModelLoaded(loaded: boolean | null | undefined): { label: string; note: string; tone: 'ok' | 'warn' | 'unknown' } {
+  if (loaded === true) return { label: '已載入', note: '可立即查詢', tone: 'ok' };
+  if (loaded === false) {
+    return {
+      label: '可連線，模型未載入',
+      note: '下一次查詢會先載入模型，較慢（最長等待冷啟動逾時），不會因此降級',
+      tone: 'warn',
+    };
+  }
+  return { label: '無法確認', note: '服務無法查詢模型是否載入（可能連不上 Ollama）', tone: 'unknown' };
+}
+
 export function describeDegradedReason(reason: string | null | undefined): string {
   if (!reason) return '語意檢索不可用';
   return DEGRADED_REASON[reason] ? `${DEGRADED_REASON[reason]}（${reason}）` : reason;

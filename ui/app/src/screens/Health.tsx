@@ -4,8 +4,9 @@
 import { useEffect, useState } from 'preact/hooks';
 
 import { Banner, EmptyState, ErrorState, Loading } from '../components/ui';
+import type { Notice } from '../lib/api';
 import { useApp } from '../lib/context';
-import { describeError, formatTime, isAbort, stripInternalRefs } from '../lib/format';
+import { describeDegradedReason, describeError, describeModelLoaded, formatTime, isAbort, stripInternalRefs } from '../lib/format';
 import {
   EPISODE_STALE_HOURS,
   STATUS_LABEL,
@@ -117,7 +118,14 @@ export function Health() {
   );
 }
 
+function recallReason(notice: Notice): string | null {
+  const detail = notice.detail as { reason?: unknown } | undefined;
+  return typeof detail?.reason === 'string' ? detail.reason : null;
+}
+
 function StatusView({ status }: { status: StatusResult }) {
+  const { recallDegraded } = useApp();
+  const model = describeModelLoaded(status.embedding.model_loaded);
   const doctor = status.doctor;
   const { server, client } = splitClientChecks(doctor.checks);
   // 客戶端檢查在服務端必然略過：不算進「SKIP」，免得看起來像設定缺漏
@@ -191,9 +199,26 @@ function StatusView({ status }: { status: StatusResult }) {
                 <BackupView check={backup} />
               </dd>
               <dt>語意模型</dt>
+              <dd data-testid="health-model" class={`lv-model-state lv-model-state--${model.tone}`}>
+                {model.label}
+                <span class="lv-status__raw">{model.note}</span>
+              </dd>
+              <dt>啟動暖機</dt>
               <dd data-testid="health-warmup" class={status.embedding.warmup.status === 'failed' ? 'lv-text-error' : undefined}>
                 {WARMUP_LABEL[status.embedding.warmup.status] ?? status.embedding.warmup.status}
                 {status.embedding.warmup.error && <span class="lv-status__raw">{status.embedding.warmup.error}</span>}
+                <span class="lv-status__raw">只在服務啟動時做一次；模型閒置後會被卸載</span>
+              </dd>
+              <dt>最近一次檢索</dt>
+              <dd data-testid="health-recall">
+                {recallDegraded ? (
+                  <span class="lv-text-warn">
+                    只用了關鍵字比對
+                    <span class="lv-status__raw">{describeDegradedReason(recallReason(recallDegraded))}</span>
+                  </span>
+                ) : (
+                  <span>本次登入沒有降級紀錄</span>
+                )}
               </dd>
               <dt>schema</dt>
               <dd>v{status.schema.version}</dd>

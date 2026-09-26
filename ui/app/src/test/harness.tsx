@@ -88,6 +88,7 @@ export function renderWithApp(ui: ComponentChildren, api: ApiClient, overrides: 
     toast,
     health: null,
     reportHealth,
+    recallDegraded: null,
     switchSpace,
   };
   const result = render(<AppContext.Provider value={env}>{ui}</AppContext.Provider>);

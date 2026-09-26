@@ -414,7 +414,8 @@ export interface StatusResult {
   checked_at: string;
   schema: { version: number; expected: number };
   space: string | null;
-  embedding: { warmup: WarmupStatus };
+  /** model_loaded：Ollama 目前是否載入模型（/api/ps）；null＝無法判斷；舊版服務沒有這個欄位 */
+  embedding: { warmup: WarmupStatus; model_loaded?: boolean | null };
   enrich: { worker: WorkerStatus; backlog: BacklogStatus };
   documents: { enabled: boolean; worker: WorkerStatus; backlog: BacklogStatus };
   doctor: DoctorReport;

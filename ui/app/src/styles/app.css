@@ -865,6 +865,10 @@ details.lv-check > .lv-check__head { cursor: pointer; }
 .lv-kv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 16px; margin: 0; font-size: var(--lv-fs-body); }
 .lv-kv dt { font-family: var(--font-mono); font-size: var(--lv-fs-meta); letter-spacing: .12em; color: var(--ink-mute); padding-top: 2px; }
 .lv-kv dd { margin: 0; overflow-wrap: anywhere; }
+.lv-model-state--ok { color: var(--lv-success-text); }
+.lv-model-state--warn { color: var(--lv-gold-text); }
+.lv-model-state--unknown { color: var(--ink-soft); }
+.lv-model-state .lv-status__raw { color: var(--ink-soft); }
 /* 側欄的 key-value：標籤在上、值在下，窄欄不擠壓換行 */
 .lv-kv--stack { grid-template-columns: minmax(0, 1fr); gap: 2px; }
 .lv-kv--stack dd + dt { margin-top: 12px; }
@@ -1000,6 +1004,7 @@ details.lv-check > .lv-check__head { cursor: pointer; }
 
 /* 頂列工具與抽屜（桌面：抽屜相關元素不顯示） */
 .lv-header__tools { display: flex; align-items: center; gap: 8px; }
+.lv-header__tools .lv-icon-btn { width: 40px; height: 40px; min-width: 40px; padding: 0; justify-content: center; }
 .lv-menu-btn, .lv-scrim, .lv-sidebar__tools { display: none; }
 .lv-brand__text { min-width: 0; }
 

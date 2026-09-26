@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks'
 import { Dialog, EmptyState } from '../components/ui';
 import type { ApiClient, Notice } from '../lib/api';
 import { ALL, AppContext, type AppEnv, type HealthBadge, type ToastKind, type VaultsState } from '../lib/context';
-import { describeError } from '../lib/format';
+import { describeError, recallDegradedBadge } from '../lib/format';
 import { healthBadge } from '../lib/health';
 import { loadSpace, saveSpace, type Theme } from '../lib/prefs';
 import { SCREENS, routePath, useRoute, type ScreenId } from '../lib/router';
@@ -166,11 +166,14 @@ export function Shell({ api, principal, author, limits, theme, onToggleTheme, de
       toast,
       health,
       reportHealth: setHealth,
+      recallDegraded: degraded,
       switchSpace,
     }),
     // navigate／switchSpace 每次 render 都是新函式，但行為不變；不列入以免畫面重掛
-    [api, principal, author, limits, space, vaults, vault, toast, health],
+    [api, principal, author, limits, space, vaults, vault, toast, health, degraded],
   );
+
+  const degradedBadge = degraded ? recallDegradedBadge(degradedReason(degraded)) : null;
 
   const vaultLabel =
     vault === ALL ? '本 space 全部' : (vaults.items.find((v) => v.key === vault)?.display ?? vault);
@@ -228,14 +231,15 @@ export function Shell({ api, principal, author, limits, theme, onToggleTheme, de
               {health.error ? '健檢無法取得' : `健檢 ${health.fail} 項失敗`}
             </button>
           )}
-          {degraded && (
+          {degradedBadge && (
             <button
               type="button"
               class="lv-degraded-badge"
+              data-testid="header-recall-badge"
               onClick={() => navigate(routePath('health'))}
-              title={describeDegraded(degraded)}
+              title={degradedBadge.title}
             >
-              語意檢索離線
+              {degradedBadge.label}
             </button>
           )}
           <div class="lv-header__tools">
@@ -257,8 +261,14 @@ export function Shell({ api, principal, author, limits, theme, onToggleTheme, de
             >
               <span aria-hidden="true">{theme === 'dark' ? '☀' : '☾'}</span>
             </button>
-            <button type="button" class="btn-outline btn-outline--sm" onClick={onLogout}>
-              登出
+            <button
+              type="button"
+              class="btn-outline btn-outline--sm lv-icon-btn"
+              onClick={onLogout}
+              aria-label="登出"
+              title="登出"
+            >
+              <LogoutIcon />
             </button>
           </div>
         </header>
@@ -499,7 +509,7 @@ function LogoutIcon() {
   );
 }
 
-function describeDegraded(notice: Notice): string {
+function degradedReason(notice: Notice): string | null {
   const detail = notice.detail as { reason?: unknown } | undefined;
-  return typeof detail?.reason === 'string' ? `降級：${detail.reason}` : '降級：只走關鍵字檢索';
+  return typeof detail?.reason === 'string' ? detail.reason : null;
 }
