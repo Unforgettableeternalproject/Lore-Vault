@@ -115,7 +115,12 @@ uv run uvicorn --factory lore_vault.api.app:create_app --host 127.0.0.1 --port 8
   `/v1/status` 的 `ok` 同時反映 doctor 與 worker 是否起得來（`fatal_error`）。
 - recall 與 write 查重的 embedding 用短逾時 `embedding.query_timeout`（預設 3 秒），
   逾時即降級為只走 lexical 並標 `degraded`；背景補算仍用 `embedding.timeout`。
-- 冷啟動：Ollama 載入 bge-m3 約 2 秒，逼近 `query_timeout`。兩道處理：
+- 冷啟動：Ollama 載入 bge-m3 約 2 秒，實際閒置卸載後常超過 `query_timeout`。三道處理：
+  - 請求路徑先問 Ollama `/api/ps`（逾時 1 秒）模型是否已載入：未載入時該次 embedding 改用
+    `embedding.cold_query_timeout`（預設 20 秒，環境變數 `LORE_VAULT_EMBEDDING_COLD_QUERY_TIMEOUT`），
+    冷啟動不再因 3 秒逾時而降級；已載入維持 `query_timeout`；探測失敗（連不上、逾時、格式不對）
+    維持 `query_timeout`，不把請求拖長。最近一次成功呼叫後 60 秒內視為已載入、不再探測。
+    `/v1/status` 的 `embedding.model_loaded`（true／false／null＝無法判斷）回報同一探測結果
   - 每個 `/api/embed` 請求帶 `keep_alive`（`embedding.keep_alive`，預設 `"30m"`；純整數為秒數、
     負值＝常駐、空字串＝不送），閒置 30 分鐘內模型不會被卸載
   - 啟動時（lifespan，遷移之後）背景執行緒做一次暖機 embed（`api.embedding_warmup`，預設開），

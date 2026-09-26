@@ -394,7 +394,12 @@ def status_(
         "space": space,
         "vault": vault_info,
         # 暖機失敗不算不健康：只代表剛啟動時 recall／查重可能降級
-        "embedding": {"warmup": state.warmup.status()},
+        # model_loaded：Ollama 目前是否載入模型（/api/ps；無法判斷為 null）。
+        # 未載入不是離線：下一次查詢會冷啟動（用 cold_query_timeout），只是較慢
+        "embedding": {
+            "warmup": state.warmup.status(),
+            "model_loaded": state.embedding_model_loaded(),
+        },
         "enrich": {
             "worker": worker,
             "backlog": {

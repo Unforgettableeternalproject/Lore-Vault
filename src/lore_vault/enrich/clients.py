@@ -66,13 +66,17 @@ class HttpResponse:
     headers: Mapping[str, str] = field(default_factory=dict)
 
 
-Transport = Callable[[str, bytes, Mapping[str, str], float], HttpResponse]
+# body 為 None 時是 GET（例如 Ollama `/api/ps`），否則 POST JSON
+Transport = Callable[[str, bytes | None, Mapping[str, str], float], HttpResponse]
 
 
 def urllib_transport(
-    url: str, body: bytes, headers: Mapping[str, str], timeout: float
+    url: str, body: bytes | None, headers: Mapping[str, str], timeout: float
 ) -> HttpResponse:
-    """預設傳輸：POST JSON。HTTP 錯誤狀態照樣回傳，由用戶端判斷。"""
+    """預設傳輸：有 body 為 POST JSON、None 為 GET。
+
+    HTTP 錯誤狀態照樣回傳，由用戶端判斷。
+    """
     request = urllib.request.Request(url, data=body, headers=dict(headers))
     try:
         with urllib.request.urlopen(request, timeout=timeout) as resp:
@@ -190,6 +194,33 @@ class OllamaEmbedder:
             size = len(vector) if isinstance(vector, list) else type(vector).__name__
             raise InvalidOutput(f"embedding 維度 {size} 與設定 {self.dim} 不符")
         return vector
+
+
+def ollama_model_loaded(
+    base_url: str, model: str, *, transport: Transport, timeout: float
+) -> bool | None:
+    """Ollama `/api/ps`：模型目前是否載入在記憶體。
+
+    回 True／False；查不到（連不上、逾時、非 200、格式不對）回 None，由呼叫端決定退路。
+    模型名比對容許省略 tag（設定 `bge-m3` 對上 `bge-m3:latest`）。
+    """
+    try:
+        resp = transport(f"{base_url.rstrip('/')}/api/ps", None, {}, timeout)
+        if resp.status != 200:
+            return None
+        models = json.loads(resp.body).get("models")
+    except Exception:  # noqa: BLE001 - 探測失敗一律視為未知
+        return None
+    if not isinstance(models, list):
+        return None
+    wanted = {model, f"{model}:latest"} if ":" not in model else {model}
+    for entry in models:
+        if not isinstance(entry, dict):
+            continue
+        for key in ("name", "model"):
+            if entry.get(key) in wanted:
+                return True
+    return False
 
 
 class OpenAISummarizer:

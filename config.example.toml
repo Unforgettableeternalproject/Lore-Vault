@@ -17,6 +17,9 @@ dim = 1024
 timeout = 30.0
 # HTTP API 請求路徑（recall、write 查重）的逾時（秒）；逾時即降級為只走 lexical
 query_timeout = 3.0
+# 模型未載入時（Ollama /api/ps 查不到這個模型＝冷啟動）請求路徑改用的逾時（秒）；
+# 探測失敗時仍用 query_timeout
+cold_query_timeout = 20.0
 # 每分鐘呼叫上限；0 = 不限
 rate_per_minute = 0
 # Ollama keep_alive：請求後模型留在記憶體多久（Go duration；純整數為秒數、負值＝常駐；
