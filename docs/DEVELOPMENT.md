@@ -236,6 +236,7 @@ token 放在 repo 外的 env 檔，不寫進 `.claude.json`：
 `mcp.env`：`LORE_VAULT_API_TOKEN=...`（遠端機器另加 `CF_ACCESS_CLIENT_ID`／`CF_ACCESS_CLIENT_SECRET`，
 或在 `mcp.toml` 設 `cf_access_env_file = "~/.cloudflared/pm-token.env"`）。
 `mcp.toml` 至少設 `[mcp] snapshot_dir`，遠端再設 `base_url`。
+其他機器的完整安裝流程見 [guides/REMOTE-INSTALL.md](guides/REMOTE-INSTALL.md)。
 
 ## 管理指令：刪除、換 space 與 blob 清理（不提供 MCP 工具）
 
