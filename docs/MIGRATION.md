@@ -37,6 +37,13 @@
 7. **對照組兩支**帶過來，README 延續「為什麼不掛」的說明，避免日後誤掛。
 8. **headless `claude -p` 的四個坑**（pipeline 裁決用）：吃全域 CLAUDE.md 與 SessionStart 注入、寫不進 `~/.claude/`、Bash allowlist 認字面路徑、prompt 走 stdin。
 
+### concept id 撞號（2026-09-26 發現）
+
+- 根因：`distill.py` 以 `c-{len(concepts):03d}` 發號，收斂刪除後再新增會撞到仍存在的號碼。已改為高水位 sidecar（`<stem>.id_state.json`）+ 檔案鎖，號碼永不重用
+- 現行資料：1538 筆只有 1273 個唯一 id（251 組重複）；197 筆注入紀錄中 75 筆指向撞號 id
+- 切換時以 `agent_memory_spike/renumber_concepts.py` 重新編號（保留每組第一筆原號，其餘從 c-1809 起），注入紀錄加 `ambiguous_ids` 標記；sidecar 一併改名為 `concepts.id_state.json`。乾跑已驗證新檔 1538 筆經 `POST /v1/concepts` 全數建立、零衝突
+- 無法回溯：已刪除的舊號若曾被重發，當時的注入紀錄指向另一條記憶，現行檔案看不出來
+
 ### 建議順序
 
 1. subtree 併入 → 在本 repo 跑通 134 項測試（未改任何路徑）
@@ -88,6 +95,13 @@
 | 其餘 24 個工具 | 0 |
 
 `list_notebooks` 的 135 次幾乎都是綁定查找（pm skill 的手動比對流程），由 `vault_resolve` 取代。
+
+### Cloudflare 現況（2026-09-26 查）
+
+- tunnel `pm`（`c70f36ba-…`），設定在 `~/.cloudflared/config.yml`：`pm.unforgettableeternalproject.com → localhost:8502`（Web UI）、`pm-api.unforgettableeternalproject.com → localhost:5055`（API）
+- 遠端經 Cloudflare Access service token（`~/.cloudflared/pm-token.env`，由 `pm-proxy.py` 注入 header）
+- 新服務試做期對外埠用 **5056**，不佔用 5055／8502；切換時把 `pm-api` ingress 改指 5056（需授權，T-45）。`pm` 子網域留給之後的 UI（A12）
+- Access 應用與 policy 的實際設定未查（需 Cloudflare API 權限），切換前確認
 
 ### 已知坑（要在新系統避免重演）
 

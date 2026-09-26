@@ -14,6 +14,16 @@
 | A8 | 需要跨機器存取；服務以 docker image 常駐、隨系統啟動 | 艾斯維爾 2026-09-25（D3） |
 | A9 | 儲存：服務端 SQLite（WAL）+ FTS5（CJK bigram）+ BLOB 向量／NumPy 暴力比對；客戶端唯讀快照 | 艾斯維爾 2026-09-25 採用 D1 建議，依據見 D1 |
 | A10 | embedding 沿用 Ollama bge-m3；LLM 用 OpenAI API（key 走 `.env`）；模型寫進設定檔 | 艾斯維爾 2026-09-25（D7） |
+| A11 | 以 Python 為主，專案自有 `.venv`（uv 管理）；hook 路徑只用標準庫。結構可參考上游 open-notebook（本機 `repos/Other/open-notebook`） | 艾斯維爾 2026-09-25（D2） |
+| A12 | 使用者 UI 最後處理，先完成契約（HTTP／MCP）與架構 | 艾斯維爾 2026-09-25 |
+| A13 | 管線中需要 headless `claude -p` 的階段留在主機排程，不進容器；登入憑證不進容器。實查 `pipeline.py`：蒸餾、收斂、校準**三階段都**經 `adjudicate_to_file` 呼叫 `claude -p`，故整條管線留在主機，改經服務 HTTP 讀寫 episode／concept | 艾斯維爾 2026-09-25，主機常駐不關機；依據 T-03 |
+| A14 | 摘要由 LLM 非同步產生，細節見 D4 | 艾斯維爾 2026-09-26 同意 D4 提案 |
+| A15 | MCP 為各機器本地 stdio 殼、轉發服務 HTTP，並負責快照拉取與不可達降級；服務自帶 bearer token（本機也需帶），遠端再經 Cloudflare Access service token；`pm-proxy.py` 退役。對外沿用 `pm` 與 `pm-api` 子網域 | 艾斯維爾 2026-09-26 同意 D8 提案（先試做） |
+| A16 | U.E.P 接口（D6）不在本次範圍；使用者 UI 在目前部分完成後接著做，設計系統由艾斯維爾提供 | 艾斯維爾 2026-09-26 |
+| A17 | 管線寫回 concept 時，repo-scope 的 vault 歸屬：先依 `source_turns` 查來源 episode 的 vault（A），查不到再以 scope 比對 vault 的顯示名／別名（B），都失敗或有歧義則明確拒收不猜。同名 repo 以組織名區分（scope 寫成 `org/repo`）。repo 改名由之後的 UI 提供別名／重新導向管理 | 艾斯維爾 2026-09-26 |
+| A18 | 內容分群：space 先分 `dev`／`lore`／`personal`，現有 vault 全歸 `dev`。agent 預設讀 `dev`，**不以 token 限制**；以 MCP 工具切換「目前 space」，其餘工具只回傳目前 space 的內容。檔案存儲與檢索納入範圍（D10 提案方向），Podcast 不做 | 艾斯維爾 2026-09-26 |
+| A19 | 文件支援：md、txt、json、yaml、toml、pdf、docx、pptx 一次支援，其他純文字檔（含程式碼）一律當 txt；pdf 中文抽取先以 `E:\Documents` 的樣本做前置實測；文件 LLM 摘要第一版不做；單檔上限 25MB／1000 萬字元（2026-09-26 由 200 萬提高：文字密集的中文 pdf 20MB 可抽出約 940 萬字）；`upload_roots` 預設為殼 cwd、可設定額外白名單。space 的三個小項（程式白名單 + doctor、非 dev 不自動建 global、換 space 只走管理指令）照設計 | 艾斯維爾 2026-09-26，設計見 `docs/design/SPACES_AND_DOCUMENTS.md` |
+| A20 | `dev` 與非 dev（`lore`／`personal`）之間不互相轉換、不共用 vault；換 space 只允許 `lore`↔`personal`，並在單一交易內把 key 改成新前綴（舊 key 不留別名）。快照含全部 space、由殼端過濾；無 body 的 `POST /v1/status` 免帶 space | 艾斯維爾 2026-09-26 |
 
 ## 待裁決
 
@@ -33,7 +43,7 @@
 - **中文檢索**：FTS5 trigram 對 2 字詞**靜默回 0 筆**（本機實測「記憶」→0、「記憶系統」→1），pg_trgm 同樣限制。過去 212 筆 PM 搜尋中 **35% 含 2 字中文詞**、58% 純英文、38% 中英混合、平均 6.8 詞的關鍵詞堆疊。解法在服務層：CJK 連續段切 overlapping bigram 後存索引欄，用 `unicode61 tokenchars '_'`（保住 snake_case 識別字）。實測 2 字、3 字、4 字、多詞、CamelCase 識別字皆命中
 - **混合檢索**：BM25 + 向量在服務層做 RRF 融合，與引擎無關
 - **向量**：不建 ANN 索引。數千條 × 1024 維 ≈ 20MB，暴力 cosine 為毫秒級，且先套 vault 過濾再算、不會有「ANN 候選被範圍過濾掉而少回結果」的靜默漏失（A5）。10 萬條以上再重評。也因此不需要 sqlite-vec
-- **Docker 資料卷**：必須用 **named volume**。SQLite／Postgres 經 bind mount 到 NTFS 都有檔案鎖或權限問題。named volume 會隨 Docker Desktop 重置或 vhdx 損毀一起消失，**定期備份到主機是必要步驟**
+- **Docker 資料卷**：預設用 **named volume**。bind mount 到 NTFS 有檔案鎖或權限問題的回報（本機現行版本未重現，見 T-01）。named volume 會隨 Docker Desktop 重置或 vhdx 損毀一起消失，**定期備份到主機是必要步驟**
 
 隨之而來的設計約束：
 
@@ -47,11 +57,24 @@
 
 要補的 doctor 對帳：每個 vault 的 note 數與內容雜湊（對舊系統匯出）、缺 embedding／summary 的 note 數、FTS 索引列數 vs note 數、快照版本 vs 服務端版本、spool 未推送筆數、最近一次備份時間。
 
-仍需實測：named volume 上 SQLite WAL 在 `docker restart` 中斷下不丟資料；SurrealDB 內舊向量確為 bge-m3、1024 維，以及是一篇一向量還是分塊（決定能否直接搬、向量表形狀）。
+**WAL 中斷實測（T-01，2026-09-25，Docker Desktop 28.3.0 / WSL2，python:3.12-slim，named volume）**：寫入中途 SIGKILL、`wal_checkpoint(TRUNCATE)` 進行中 SIGKILL、正常 `docker restart` 三種情境皆 `integrity_check=ok`、已 commit 交易零遺失、rollback 的交易未落地。範圍是行程崩潰一致性，不含斷電。
+
+- 服務程序必須處理 SIGTERM（或以 `--init` 啟動），否則 PID 1 收不到訊號、會被 docker 等待逾時後硬殺
+- bind mount 到 NTFS 在本機現行版本**未重現**鎖或權限問題；但行為隨 Docker Desktop 版本與檔案系統驅動而異，仍以 named volume 為預設
+
+**舊向量實測（T-02，2026-09-25，隔離副本容器唯讀查詢）**：
+
+- note 共 **1490** 則，其中 1474 則有向量、**16 則缺向量**（匯入時補算）。其中只有 **1452** 則屬於某本 notebook（T-33 實測），約 38 則孤兒 note 不屬任何 notebook，且含一則 null byte 使 `GET /api/notes` 全量端點回 500
+- 全數 **1024 維**，**一篇一向量**（存在 `note.embedding` 欄位本身；超過 400 token 的內容在記憶體分塊後 mean-pool 成一個向量，從未落地成多筆 chunk）
+- 確認為 **bge-m3**：`model` 表只登記 `bge-m3:latest`（ollama）；對一則短 note 以本機 bge-m3 重算，與庫內向量 cosine = 0.99999999
+- **量級不一致**：mean-pool 過的長內容 norm ≈ 1，短內容直接存 Ollama 原始輸出 norm ≈ 25。新系統匯入時一律 L2 正規化，之後用點積即等於 cosine
+- 時間戳為 SurrealDB datetime，皆為 UTC；REST API 回傳格式為 `YYYY-MM-DD HH:MM:SS.ffffff+00:00`（T-33 實測），匯入時統一轉成 `…sssZ`
+
+結論：向量表形狀為 `note_id → 1024 維 float32`，一對一，舊向量可整批搬、正規化後使用。
 
 ### D2 語言與環境
 
-建議 Python 3.12+，專案自有 `.venv`（uv 管理）。hook 路徑維持**只用標準庫**，讓系統 Python 可直接執行。
+**已定案（A11）。**
 
 ### D3 服務形態
 
@@ -64,16 +87,28 @@ spike 接入跨機器架構——**艾斯維爾同意照以下草案試做**（�
 
 - **收料**：`Stop` hook 仍在各機器本地執行（標準庫），episode 先寫本地 spool，再非同步推給服務；服務不可達時不阻塞、不遺失，doctor 對帳 spool 與服務端
 - **注入**：`PreToolUse` 每次編輯都跑，不能每次走網路——讀本地的 concept 快照，快照由服務定期同步下來
-- **管線**：蒸餾／收斂／校準在服務端跑，但校準需要 headless `claude -p`，要確認容器內能不能跑，否則留在主機排程
+- **管線**：蒸餾／收斂／校準在服務端跑，但校準需要 headless `claude -p`，要確認容器內能不能跑，否則留在主機排程——**已定案 A13：校準留在主機排程**
+  - T-03 實測（無憑證段）：`node:22-slim` 可安裝並執行 Claude Code 2.1.282；stdin 與位置參數皆不會卡住；`CLAUDE_CONFIG_DIR` 可把狀態導到可寫目錄（解 MIGRATION A.8 坑 2、4）。坑 1（全域 CLAUDE.md／SessionStart 注入）與坑 3（Bash allowlist 字面路徑）需要登入憑證才能驗證，未測——容器內 OAuth refresh 可能輪替 token、使主機登入失效
 - **歸屬**：episode 多一個 `machine` 欄位（凍結），`repo_root` 只在同一台機器上有意義
 
 ### D4 摘要（`summary`）由誰產生
 
-**2026-09-25 艾斯維爾：傾向全部由 LLM 產生，細節待討論。** 要定的：
+**已定案（A14，2026-09-26）：**
 
-- 模型與額度（本機模型 or API）；與 D7 embedding 是否同一供應來源
-- 同步還是非同步：寫入時等摘要，或先存、背景補（查詢時暫以正文首段頂替）
-- 更新 note 時是否重算、舊 1300 則批次補的成本
+- **非同步**：`write` 立即落地回傳，不等 LLM；背景佇列補摘要與 embedding。缺摘要時查詢以正文首段頂替，回傳標明來源（`summary_source: "lead"`）
+- **重算時機**：`update` 改到 body 才重算；只改標題／topics 不重算
+- **模型**：寫在設定檔，預設 `gpt-6-luna`（`reasoning_effort=low`），繁體中文 1–2 句、限制輸出 token。⚠️ 不指定 effort 時推理會吃光 `max_completion_tokens`、回傳**空字串且不報錯**（實測 600 tokens 全耗在推理）——必須明確設 effort，且把空摘要視為失敗而非成功
+- **舊資料**：1490 則匯入後由背景佇列限速補齊
+- **失敗**：有上限的重試，超過標記失敗；doctor 列出缺摘要與失敗數，不無限重試
+
+模型實測（2026-09-26，以 D1 實測段落約 615 input tokens 為樣本，同一 prompt 要求 1–2 句、≤80 字）：
+
+| 模型 | 結果 |
+|---|---|
+| `gpt-6-luna`（effort=low） | 遵守長度、保留關鍵數據，約 2 秒、129 output tokens（艾斯維爾指定，採用） |
+| `gpt-5.4-mini` | 遵守長度，保留關鍵數據 |
+| `gpt-5.4-nano` | 內容正確但遠超長度限制 |
+| `gpt-4.1-mini` | 長度尚可，但加入原文沒有的評價（「準確度高」） |
 
 ### D5 spike 資料目錄
 
@@ -81,7 +116,7 @@ spike 接入跨機器架構——**艾斯維爾同意照以下草案試做**（�
 
 ### D6 對 U.E.P 的接口
 
-MCP、HTTP、或 Python 函式庫形式。等 D3 定案後再決定。
+**不在本次範圍（A16）。**
 
 ### D7 Embedding 模型
 
@@ -102,10 +137,24 @@ Ollama 另裝了 `nomic-embed-text`，PM 未使用。
 
 ### D8 跨機器的 MCP transport 與認證
 
-D3 定為跨機器後新增。要定的：
+**已定案（A15，先試做）。**
 
-- 遠端機器的 MCP 直接連服務的 streamable HTTP，或本地 stdio 殼轉發 HTTP（殼可順便負責快照拉取與降級）
-- 認證：沿用 Cloudflare Access（service token）或服務自帶 token；本機連線是否免認證
-- 現行 `pm-proxy.py` 的角色由誰接手
+### D9 內容分群（space）
 
-不阻擋 D1。
+艾斯維爾 2026-09-26 提出：Lore Vault 不只是專案開發記憶，還要承載世界觀構築、私人筆記等（這才是 PM 移植前 Lore Vault 的原意），需依用途分群。提案：
+
+- vault 之上加一層 space（例如 `dev`／`lore`／`personal`），現有 15 本與 `global` 全歸 `dev`
+- 檢索預設限同一 space，跨 space 需明示（同 vault 硬範圍的做法）
+- token 綁可存取的 space：coding agent 與遠端 MCP 殼預設只開 `dev`，U.E.P 開 `lore`，避免私人內容被所有 agent 檢索
+
+**已定案（A18）**：不採 token 範圍限制，改為 MCP 切換目前 space。
+
+### D10 檔案（文件）存儲與檢索
+
+艾斯維爾 2026-09-26 提出：agent 要能加入與檢索檔案（設定檔、簡報、世界觀文件等），U.E.P 需要讀取這些文件理解世界觀。Podcast 不做。提案：
+
+- MCP 殼新增上傳工具（讀本機檔案上傳），HTTP 另開上傳端點；原始檔以內容雜湊存於 docker volume，去重
+- 抽文字：md、txt、json、yaml、toml、pdf、docx、pptx（圖片 OCR 暫不做）
+- 切段後與 notes 共用 FTS + 向量檢索與 vault／space 範圍；recall 可回文件段落並標來源與位置，get 可取整份或指定段落
+
+**已定案（A19）**，任務卡見設計文件第 8 節（T-52～T-69）。

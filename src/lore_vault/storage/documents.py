@@ -1,0 +1,443 @@
+"""文件 metadata 的儲存原語（A19，T-58）。
+
+- document 必屬某個 vault；space 由 vault 決定。所有讀取都經
+  `resolve_read` + `vault_clause`、寫入經 `resolve_write`，`space` 為必填參數，
+  與 note 同一道硬過濾（A5／A18）：vault 在別的 space → `UnknownVault`。
+- 本模組管 `documents` 列本身與版本關係；原始檔在 `storage.blobs`，chunk、索引、
+  worker 佇列與對帳在 `storage.document_index`。
+- 版本（B1 裁決）：同 vault 同檔名、內容不同的上傳是新版本（`supersedes` 指向前一版）。
+  「被取代」＝有 status='ready' 的文件以 `supersedes` 指向它；被取代的文件仍可
+  `get`／`list`（標 `superseded_by`），但不在 FTS／向量索引內，recall 只回最新版。
+- 純標準庫（不 import numpy），doctor 的唯讀對帳也能用。
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import uuid
+from dataclasses import dataclass
+from typing import Any
+
+from lore_vault.schema.chars import check_fields
+
+from .db import transaction
+from .errors import NotFound
+from .migrate import DOCUMENT_ERROR_CODES
+from .timeutil import utc_now
+from .vaults import resolve_read, resolve_write, vault_clause
+
+DOCUMENT_ID_PREFIX = "doc:"
+
+STATUS_PENDING = "pending"
+STATUS_EXTRACTING = "extracting"
+STATUS_READY = "ready"
+STATUS_FAILED = "failed"
+DOCUMENT_STATUSES = frozenset(
+    {STATUS_PENDING, STATUS_EXTRACTING, STATUS_READY, STATUS_FAILED}
+)
+
+ERROR_CODES = frozenset(DOCUMENT_ERROR_CODES)
+
+_SHA256_HEX = frozenset("0123456789abcdef")
+
+
+@dataclass(frozen=True)
+class Document:
+    id: str
+    vault: str
+    filename: str
+    mime: str
+    size_bytes: int
+    sha256: str
+    version: int
+    supersedes: str | None
+    status: str
+    error_code: str | None
+    error_detail: str | None
+    chunk_count: int
+    created: str
+    updated: str
+    # 文字類文件偵測到的編碼（v9）；二進位格式與尚未抽取為 None
+    encoding: str | None = None
+    # 抽取品質警示（v10）：[{"code", "detail"}, ...]；沒有為空
+    warnings: tuple[dict[str, str], ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "vault": self.vault,
+            "filename": self.filename,
+            "mime": self.mime,
+            "size_bytes": self.size_bytes,
+            "sha256": self.sha256,
+            "version": self.version,
+            "supersedes": self.supersedes,
+            "status": self.status,
+            "error_code": self.error_code,
+            "error_detail": self.error_detail,
+            "chunk_count": self.chunk_count,
+            "encoding": self.encoding,
+            "warnings": [dict(w) for w in self.warnings],
+            "created": self.created,
+            "updated": self.updated,
+        }
+
+
+def _row_to_document(row: sqlite3.Row) -> Document:
+    return Document(
+        id=row["id"],
+        vault=row["vault"],
+        filename=row["filename"],
+        mime=row["mime"],
+        size_bytes=int(row["size_bytes"]),
+        sha256=row["sha256"],
+        version=int(row["version"]),
+        supersedes=row["supersedes"],
+        status=row["status"],
+        error_code=row["error_code"],
+        error_detail=row["error_detail"],
+        chunk_count=int(row["chunk_count"]),
+        created=row["created"],
+        updated=row["updated"],
+        encoding=row["encoding"] if "encoding" in row.keys() else None,
+        warnings=_warnings(row["warnings"] if "warnings" in row.keys() else None),
+    )
+
+
+def _warnings(value: str | None) -> tuple[dict[str, str], ...]:
+    if not value:
+        return ()
+    parsed = json.loads(value)
+    return tuple(dict(item) for item in parsed if isinstance(item, dict))
+
+
+def validate_sha256(value: object) -> str:
+    """sha256 必須是 64 字元小寫十六進位（blob 路徑也由它組成，先驗再用）。"""
+    if not isinstance(value, str) or len(value) != 64 or not set(value) <= _SHA256_HEX:
+        raise ValueError(f"sha256 必須是 64 字元小寫十六進位，得到 {value!r}")
+    return value
+
+
+def new_document_id() -> str:
+    return f"{DOCUMENT_ID_PREFIX}{uuid.uuid4()}"
+
+
+def insert_document(
+    conn: sqlite3.Connection,
+    vault: str,
+    *,
+    space: str,
+    filename: str,
+    mime: str,
+    size_bytes: int,
+    sha256: str,
+    supersedes: str | None = None,
+    document_id: str | None = None,
+    version: int | None = None,
+) -> Document:
+    """新增一列 `status='pending'` 的 document，回傳存下的版本。
+
+    - `supersedes`：取代同 vault 內的既有 document；新列 version 預設為舊 version + 1
+      （`version` 可明確指定，不可小於它）。舊列不存在或屬於別的 vault → `NotFound`。
+    - 不做同 vault 同雜湊去重（上傳端的語意，T-67），也不檢查 blob 是否已寫入
+      （呼叫端先寫 blob 再建列；doctor `documents.blob_exists` 對帳）。
+    """
+    check_fields({"filename": filename, "mime": mime})
+    if not filename.strip():
+        raise ValueError("filename 不可為空")
+    if isinstance(size_bytes, bool) or not isinstance(size_bytes, int):
+        raise TypeError("size_bytes 必須是整數")
+    if size_bytes < 0:
+        raise ValueError("size_bytes 不可為負")
+    validate_sha256(sha256)
+    doc_id = document_id if document_id is not None else new_document_id()
+    if not doc_id.startswith(DOCUMENT_ID_PREFIX) or doc_id == DOCUMENT_ID_PREFIX:
+        raise ValueError(f"document id 必須以 {DOCUMENT_ID_PREFIX!r} 開頭：{doc_id!r}")
+    with transaction(conn):
+        key = resolve_write(conn, vault, space=space)
+        if supersedes is not None:
+            row = conn.execute(
+                "SELECT version FROM documents WHERE id = ? AND vault = ?",
+                (supersedes, key),
+            ).fetchone()
+            if row is None:
+                raise NotFound(
+                    f"vault {key!r} 內找不到要取代的 document {supersedes!r}"
+                )
+            version_floor = int(row[0]) + 1
+            if version is not None and version < version_floor:
+                raise ValueError(f"version 不可小於 {version_floor}，得到 {version}")
+        else:
+            version_floor = 1
+        version = version_floor if version is None else version
+        if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+            raise ValueError(f"version 必須是正整數，得到 {version!r}")
+        now = utc_now()
+        conn.execute(
+            """
+            INSERT INTO documents (id, vault, filename, mime, size_bytes, sha256,
+                                   version, supersedes, status, created, updated)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                doc_id,
+                key,
+                filename,
+                mime,
+                size_bytes,
+                sha256,
+                version,
+                supersedes,
+                STATUS_PENDING,
+                now,
+                now,
+            ),
+        )
+        row = conn.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
+        return _row_to_document(row)
+
+
+def get_document(
+    conn: sqlite3.Connection, vault: str, document_id: str, *, space: str
+) -> Document:
+    """在 vault（與 space）範圍內取 document；不在範圍內一律 `NotFound`。"""
+    scope = resolve_read(conn, vault, space=space)
+    clause, params = vault_clause(scope, "vault")
+    row = conn.execute(
+        f"SELECT * FROM documents WHERE id = ? AND {clause}",
+        (document_id, *params),
+    ).fetchone()
+    if row is None:
+        raise NotFound(f"找不到 document {document_id!r}")
+    return _row_to_document(row)
+
+
+def find_by_sha256(
+    conn: sqlite3.Connection, vault: str, sha256: str, *, space: str
+) -> list[Document]:
+    """範圍內同雜湊的 document（由新到舊），供上傳去重判斷。"""
+    validate_sha256(sha256)
+    scope = resolve_read(conn, vault, space=space)
+    clause, params = vault_clause(scope, "vault")
+    rows = conn.execute(
+        f"""
+        SELECT * FROM documents WHERE sha256 = ? AND {clause}
+        ORDER BY created DESC, id DESC
+        """,
+        (sha256, *params),
+    ).fetchall()
+    return [_row_to_document(r) for r in rows]
+
+
+def list_documents(
+    conn: sqlite3.Connection,
+    vault: str,
+    *,
+    space: str,
+    status: str | None = None,
+    limit: int = 50,
+    cursor: tuple[str, str] | None = None,
+) -> tuple[list[Document], tuple[str, str] | None]:
+    """依 (updated, id) 由新到舊分頁；回傳 (本頁, 下一頁 cursor 或 None)。
+
+    條件都在 SQL 內、LIMIT 之前套用，分頁不會因事後過濾而少回。
+    """
+    scope = resolve_read(conn, vault, space=space)
+    if limit <= 0:
+        raise ValueError(f"limit 必須大於 0，得到 {limit}")
+    clause, params = vault_clause(scope, "vault")
+    conditions = [clause]
+    args: list[Any] = [*params]
+    if status is not None:
+        if status not in DOCUMENT_STATUSES:
+            raise ValueError(
+                f"status 必須是 {sorted(DOCUMENT_STATUSES)} 之一，得到 {status!r}"
+            )
+        conditions.append("status = ?")
+        args.append(status)
+    if cursor is not None:
+        conditions.append("(updated, id) < (?, ?)")
+        args.extend(cursor)
+    rows = conn.execute(
+        f"""
+        SELECT * FROM documents WHERE {" AND ".join(conditions)}
+        ORDER BY updated DESC, id DESC
+        LIMIT ?
+        """,
+        (*args, limit + 1),
+    ).fetchall()
+    page = [_row_to_document(r) for r in rows[:limit]]
+    next_cursor = (page[-1].updated, page[-1].id) if len(rows) > limit else None
+    return page, next_cursor
+
+
+def referenced_sha256(conn: sqlite3.Connection) -> set[str]:
+    """所有 document 列引用的 blob 雜湊（不分 vault／space；對帳用）。"""
+    return {r[0] for r in conn.execute("SELECT DISTINCT sha256 FROM documents")}
+
+
+# ── 版本與可索引性 ───────────────────────────────────────────────────
+
+# 被取代的文件：任何 ready 文件沿 `supersedes` 一路往前追到的各版本（遞移）。
+# 例：v3(ready) → v2(failed) → v1：v1 也算被取代——否則 v2 失敗時 v1 與 v3
+# 會同時在索引裡。
+# 不相關子查詢：SQLite 每個查詢只算一次。
+SUPERSEDED_IDS_SQL = """
+    WITH RECURSIVE chain(id) AS (
+        SELECT supersedes FROM documents
+        WHERE status = 'ready' AND supersedes IS NOT NULL
+        UNION
+        SELECT prev.supersedes FROM documents prev JOIN chain ON prev.id = chain.id
+        WHERE prev.supersedes IS NOT NULL
+    )
+    SELECT id FROM chain
+"""
+
+
+def eligible_clause(alias: str) -> str:
+    """可進索引（FTS／向量、recall）的文件：ready 且未被取代。
+
+    `alias` 為 documents 表別名。
+    """
+    return f"({alias}.status = 'ready' AND {alias}.id NOT IN ({SUPERSEDED_IDS_SQL}))"
+
+
+def not_superseded_clause(alias: str) -> str:
+    return f"{alias}.id NOT IN ({SUPERSEDED_IDS_SQL})"
+
+
+def superseded_by(conn: sqlite3.Connection, ids: list[str]) -> dict[str, str]:
+    """{被取代的 document id: 取代它的最新 ready 版本 id}。
+
+    遞移，同 `SUPERSEDED_IDS_SQL`。
+    """
+    wanted = set(ids)
+    if not wanted:
+        return {}
+    links = {
+        row[0]: row[1]
+        for row in conn.execute(
+            "SELECT id, supersedes FROM documents WHERE supersedes IS NOT NULL"
+        )
+    }
+    result: dict[str, tuple[int, str, str]] = {}
+    for row in conn.execute(
+        "SELECT id, version, created FROM documents "
+        "WHERE status = 'ready' AND supersedes IS NOT NULL"
+    ):
+        ready_id, rank = row[0], (int(row[1]), row[2], row[0])
+        current, seen = links.get(ready_id), {ready_id}
+        while current is not None and current not in seen:
+            seen.add(current)
+            if current in wanted and (current not in result or rank > result[current]):
+                result[current] = rank
+            current = links.get(current)
+    return {doc: rank[2] for doc, rank in result.items()}
+
+
+def latest_live_by_filename(
+    conn: sqlite3.Connection, key: str, filename: str
+) -> tuple[Document | None, int]:
+    """同 vault 同檔名中「現行」的版本（非 failed、未被 ready 版本取代，取最新），
+    與該檔名目前的最大 version（沒有任何版本為 0）。`key` 必須是已解析的 vault key。"""
+    max_row = conn.execute(
+        "SELECT max(version) FROM documents WHERE vault = ? AND filename = ?",
+        (key, filename),
+    ).fetchone()
+    max_version = int(max_row[0] or 0)
+    row = conn.execute(
+        f"""
+        SELECT d.* FROM documents d
+        WHERE d.vault = ? AND d.filename = ? AND d.status != 'failed'
+          AND {not_superseded_clause("d")}
+        ORDER BY d.version DESC, d.created DESC, d.id DESC
+        LIMIT 1
+        """,
+        (key, filename),
+    ).fetchone()
+    return (_row_to_document(row) if row is not None else None), max_version
+
+
+def reset_for_retry(
+    conn: sqlite3.Connection, document_id: str, *, filename: str, mime: str
+) -> Document:
+    """failed 的文件重新上傳（同內容）：沿用同一列改回 pending、清錯誤與嘗試紀錄，
+    檔名／MIME 換成這次上傳的（前次可能因副檔名錯而失敗）。呼叫端負責交易。"""
+    check_fields({"filename": filename, "mime": mime})
+    now = utc_now()
+    cursor = conn.execute(
+        """
+        UPDATE documents SET status = 'pending', error_code = NULL,
+            error_detail = NULL, filename = ?, mime = ?, updated = ?
+        WHERE id = ? AND status = 'failed'
+        """,
+        (filename, mime, now, document_id),
+    )
+    if cursor.rowcount != 1:
+        raise NotFound(f"document {document_id!r} 不是 failed，不能重新排入抽取")
+    conn.execute(
+        "DELETE FROM document_enrichment WHERE document_id = ?", (document_id,)
+    )
+    row = conn.execute(
+        "SELECT * FROM documents WHERE id = ?", (document_id,)
+    ).fetchone()
+    return _row_to_document(row)
+
+
+def list_documents_since(
+    conn: sqlite3.Connection,
+    vault: str,
+    *,
+    space: str,
+    since: str | None = None,
+    limit: int = 50,
+    cursor: tuple[str, str] | None = None,
+) -> tuple[list[Document], tuple[str, str] | None]:
+    """`list` 工具用：依 (updated, id) 由新到舊、`updated >= since`，分頁同
+    `list_documents`。"""
+    scope = resolve_read(conn, vault, space=space)
+    if limit <= 0:
+        raise ValueError(f"limit 必須大於 0，得到 {limit}")
+    clause, params = vault_clause(scope, "vault")
+    conditions = [clause]
+    args: list[Any] = [*params]
+    if since is not None:
+        conditions.append("updated >= ?")
+        args.append(since)
+    if cursor is not None:
+        conditions.append("(updated, id) < (?, ?)")
+        args.extend(cursor)
+    rows = conn.execute(
+        f"""
+        SELECT * FROM documents WHERE {" AND ".join(conditions)}
+        ORDER BY updated DESC, id DESC
+        LIMIT ?
+        """,
+        (*args, limit + 1),
+    ).fetchall()
+    page = [_row_to_document(r) for r in rows[:limit]]
+    next_cursor = (page[-1].updated, page[-1].id) if len(rows) > limit else None
+    return page, next_cursor
+
+
+def get_documents(
+    conn: sqlite3.Connection, vault: str, ids: list[str], *, space: str
+) -> list[Document]:
+    """範圍內的多筆 document（不在範圍內的直接略過）。"""
+    if not ids:
+        return []
+    scope = resolve_read(conn, vault, space=space)
+    clause, params = vault_clause(scope, "vault")
+    found: list[Document] = []
+    for start in range(0, len(ids), 500):
+        part = ids[start : start + 500]
+        marks = ", ".join("?" * len(part))
+        found.extend(
+            _row_to_document(r)
+            for r in conn.execute(
+                f"SELECT * FROM documents WHERE id IN ({marks}) AND {clause}",
+                (*part, *params),
+            )
+        )
+    return found

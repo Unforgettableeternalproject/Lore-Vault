@@ -1,0 +1,9 @@
+# 只送 pyproject.toml、uv.lock、src/、docker/ 進建置上下文；其餘一律排除。
+# 密鑰（.env）與語料（agent_memory_spike/data、data/）絕不能進映像。
+*
+!pyproject.toml
+!uv.lock
+!src/
+!docker/
+**/__pycache__
+**/*.py[cod]

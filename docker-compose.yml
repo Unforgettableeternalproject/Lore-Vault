@@ -1,0 +1,48 @@
+# Lore Vault 服務（T-26）。對外只綁 127.0.0.1:5056
+# （5055／8502 是現行 Open Notebook，Cloudflare tunnel 仍指向它們；切換是另一張需授權的卡）。
+#
+# 需要 .env（不進映像、不進版控）：
+#   LORE_VAULT_API_TOKEN=...          服務 bearer token（A15）
+#   OPENAI_API_KEY=...                摘要用
+#   LORE_VAULT_HOST_BACKUP_DIR=...    主機上的備份目錄（只放備份檔），掛到容器 /backups
+name: lore-vault
+
+services:
+  lore-vault:
+    build: .
+    image: lore-vault:local
+    container_name: lore-vault
+    restart: unless-stopped
+    env_file:
+      - .env
+    # Ollama 走 host.docker.internal:11434（docker/config.toml 預設；
+    # 要改就在 .env 設 LORE_VAULT_EMBEDDING_BASE_URL）
+    extra_hosts:
+      # Docker Desktop 內建此名稱；Linux 引擎需要這行
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:5056:8000"
+    volumes:
+      # 資料庫只放 named volume，禁止 bind mount 到 NTFS（D1、T-01）
+      - lore-vault-data:/data
+      # 備份目錄允許 bind mount：只放 VACUUM INTO 的產物，不是 live DB
+      - type: bind
+        source: ${LORE_VAULT_HOST_BACKUP_DIR:?請在 .env 設定 LORE_VAULT_HOST_BACKUP_DIR（主機備份目錄）}
+        target: /backups
+    healthcheck:
+      # slim 映像沒有 curl；帶上 bearer token（本機也需認證，A15），/healthz 若豁免認證也無妨
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os,urllib.request as u; t=os.environ.get('LORE_VAULT_API_TOKEN',''); u.urlopen(u.Request('http://127.0.0.1:8000/healthz', headers={'Authorization': 'Bearer '+t} if t else {}), timeout=5)"
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+    stop_grace_period: 30s
+
+volumes:
+  lore-vault-data:
+    # 固定名稱，不隨 compose 專案名變動；`docker compose down -v` 會刪掉它，勿用
+    name: lore-vault-data

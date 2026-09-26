@@ -1,0 +1,18 @@
+# 映像內預設設定（LORE_VAULT_CONFIG 指向本檔）。個別項目可用環境變數
+# LORE_VAULT_<區段>_<項目> 覆寫；密鑰不可寫在這裡（OPENAI_API_KEY 等走 env_file）。
+
+[database]
+# /data 是 named volume（docker-compose.yml 的 lore-vault-data）
+path = "/data/lore.db"
+
+[embedding]
+# 主機上的 Ollama
+base_url = "http://host.docker.internal:11434"
+
+[backup]
+# 主機 bind mount 的備份目錄：只放備份檔，不是 live DB
+dir = "/backups"
+
+[documents]
+# 原始檔 blob 放 named volume 內（與資料庫同一個 volume，不 bind mount）
+blob_dir = "/data/blobs"
