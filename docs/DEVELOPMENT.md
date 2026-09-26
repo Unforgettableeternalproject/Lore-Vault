@@ -474,7 +474,7 @@ KEY=VALUE、只用標準庫解析；行程環境變數中同名鍵優先。
   `文件本輪：抽取 完成 …／失敗 …／重試 …／放棄 …；向量 …。剩餘 待抽取 …、缺向量 chunk …`
 - recall／get／list：見 docs/ARCHITECTURE.md「MCP 介面」。快照（`GET /v1/snapshot`）明確排除文件表
   （`storage.snapshot.SNAPSHOT_EXCLUDED_TABLES`，產生時核對為空，否則拒絕產生）
-- 設定 `[documents]`：`blob_dir`、`max_file_bytes`（25MB）、`max_chars`（200 萬）、`min_chars`（50，只套 pdf）、
+- 設定 `[documents]`：`blob_dir`、`max_file_bytes`（25MB）、`max_chars`（1000 萬）、`min_chars`（50，只套 pdf）、
   `chunk_max_tokens`（400）、`chunk_overlap_tokens`（50，不可超過上限一半）、`stuck_seconds`（3600）、
   `extract_timeout`（60 秒）、`extract_memory_mb`（1024，只在 Linux 生效）；
   `[api] document_worker`（true）；`[mcp] upload_roots`

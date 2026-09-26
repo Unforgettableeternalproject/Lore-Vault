@@ -89,7 +89,7 @@ snapshot_max_age_hours = 24.0
 # 單檔原始大小上限（位元組，預設 25MB）
 max_file_bytes = 26214400
 # 抽出文字總長上限（字元）；超過標 too_large
-max_chars = 2000000
+max_chars = 10000000
 # pdf 抽出文字去空白後少於此字數標 empty_extraction（多半是掃描件；docx／pptx 不套）
 min_chars = 50
 # 切段：每個 chunk 的估算 token 上限與相鄰 chunk 重疊（只影響之後抽取的文件）

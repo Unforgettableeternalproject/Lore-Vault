@@ -163,7 +163,7 @@ class DocumentsConfig:
     # 單檔原始大小上限（位元組），預設 25MB
     max_file_bytes: int = 25 * 1024 * 1024
     # 抽出文字總長上限（字元），超過標 too_large
-    max_chars: int = 2_000_000
+    max_chars: int = 10_000_000
     # pdf 抽出文字去空白後少於此字數標 empty_extraction（多半是掃描件；B1 裁決只套 pdf）
     min_chars: int = 50
     # 切段（設計 4.2）：每個 chunk 的估算 token 上限與相鄰 chunk 的重疊 token 數。

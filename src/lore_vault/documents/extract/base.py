@@ -118,11 +118,11 @@ class Extraction:
 
 @dataclass(frozen=True)
 class Limits:
-    """上限（A19）：單檔 25MB、抽出文字 200 萬字元；pdf 去空白後少於 `min_chars`
+    """上限（A19）：單檔 25MB、抽出文字 1000 萬字元；pdf 去空白後少於 `min_chars`
     視為 empty_extraction（T-57 裁決；B1 裁決限縮為只套 pdf）。"""
 
     max_bytes: int = 25 * 1024 * 1024
-    max_chars: int = 2_000_000
+    max_chars: int = 10_000_000
     min_chars: int = 50
     # docx／pptx（zip）解壓後總大小上限 = max_bytes 的倍數，擋壓縮炸彈
     unzip_ratio: int = 8
