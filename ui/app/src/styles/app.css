@@ -803,6 +803,14 @@ details.lv-check > .lv-check__head { cursor: pointer; }
 .lv-kv dt { font-family: var(--font-mono); font-size: 10px; letter-spacing: .12em; color: var(--ink-mute); padding-top: 2px; }
 .lv-kv dd { margin: 0; overflow-wrap: anywhere; }
 .lv-kv__btn { margin-left: 12px; }
+/* 寬鬆版 key-value（連線設定）：固定標籤欄寬、拉開行距與欄距；手機改上下堆疊 */
+.lv-kv--roomy { grid-template-columns: minmax(96px, 150px) minmax(0, 1fr); gap: 14px 32px; font-size: 14px; line-height: 1.6; }
+.lv-kv--roomy dt { font-size: 11px; padding-top: 3px; }
+.lv-kv__note { display: block; margin-top: 4px; font-size: 12px; color: var(--ink-mute); }
+.lv-settings .lv-section { margin-top: 40px; padding-top: 28px; }
+.lv-settings .lv-section__title { margin-bottom: 18px; }
+.lv-settings .lv-hint { max-width: 72ch; margin-top: 22px; }
+.lv-settings .lv-actions { margin-top: 18px; }
 .lv-backlog { padding: 10px 0; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 4px; }
 .lv-backlog p { margin: 0; }
 .lv-backlog__head { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; color: var(--ink-title); }
@@ -992,6 +1000,9 @@ details.lv-check > .lv-check__head { cursor: pointer; }
   .lv-alias { grid-template-columns: minmax(0, 1fr) auto; }
   .lv-alias__tag { grid-column: 1 / -1; }
   .lv-kbd-list__row { grid-template-columns: 72px minmax(0, 1fr); }
+  .lv-kv--roomy { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .lv-kv--roomy dd + dt { margin-top: 12px; }
+  .lv-settings .lv-section { margin-top: 32px; padding-top: 24px; }
   .lv-search { padding: 0 8px 0 12px; gap: 8px; flex-wrap: wrap; }
   .lv-search__mode { order: 3; flex-basis: 100%; padding-bottom: 8px; }
   .lv-toasts { right: var(--gutter-mobile); left: var(--gutter-mobile); }

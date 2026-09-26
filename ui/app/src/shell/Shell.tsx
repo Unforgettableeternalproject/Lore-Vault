@@ -253,6 +253,7 @@ export function Shell({ api, principal, author, limits, theme, onToggleTheme, de
               class="btn-outline btn-outline--sm lv-icon-btn"
               onClick={onToggleTheme}
               aria-label={theme === 'dark' ? '切換為淺色' : '切換為深色'}
+              title={theme === 'dark' ? '切換為淺色' : '切換為深色'}
             >
               <span aria-hidden="true">{theme === 'dark' ? '☀' : '☾'}</span>
             </button>
@@ -385,8 +386,6 @@ export function Shell({ api, principal, author, limits, theme, onToggleTheme, de
               params={route.params}
               query={route.query}
               spaceKey={spaceId}
-              theme={theme}
-              onToggleTheme={onToggleTheme}
               onLogout={onLogout}
             />
           </main>
@@ -448,16 +447,12 @@ function ScreenView({
   params,
   query,
   spaceKey,
-  theme,
-  onToggleTheme,
   onLogout,
 }: {
   screen: ScreenId;
   params: string[];
   query: URLSearchParams;
   spaceKey: SpaceId;
-  theme: Theme;
-  onToggleTheme: () => void;
   onLogout: () => void;
 }) {
   // key 帶 space：切換 space 時畫面重新掛載，不殘留上一個 space 的資料
@@ -490,7 +485,7 @@ function ScreenView({
     case 'memory':
       return <Memory key={spaceKey} />;
     case 'settings':
-      return <Settings theme={theme} onToggleTheme={onToggleTheme} onLogout={onLogout} />;
+      return <Settings onLogout={onLogout} />;
   }
 }
 
