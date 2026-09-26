@@ -6,10 +6,9 @@ import { axeViolations, createVault, login, watchPage, writeNote } from './helpe
 
 const VAULT = 'folder/e2e-mobile';
 // 正式站的 vault key 多是不含空白的長 GitHub 路徑：出現在 vault 列表、維護頁、麵包屑與記憶層錨點，
-// 是 360px 橫向溢出的根因（短 key 測不出來）。
-// key 刻意不含「.」：服務端 SPA fallback 目前把最後一段含「.」的 /ui 路徑當靜態檔回 404（例如
-// /ui/maint/github.com%2F...），直接 goto 這類網址會拿到 404；那是另一個問題，這裡只測版面。
-const LONG_VAULT = 'folder/unforgettableeternalproject-testseperatememorysystem-e2e-mobile-long-key';
+// 是 360px 橫向溢出的根因（短 key 測不出來）。沿用真實形態（含「.」），
+// 直接開 /ui/maint/<encoded key> 也同時驗證服務端 SPA fallback 不會把它當靜態檔回 404。
+const LONG_VAULT = 'github.com/unforgettableeternalproject/u.e.p-s-testseperatememorysystem-e2e-mobile';
 let noteId = '';
 let longNoteId = '';
 
