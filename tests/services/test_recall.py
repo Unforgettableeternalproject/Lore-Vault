@@ -63,6 +63,12 @@ def test_mixed_zh_en_query_ranks_the_matching_note_first(corpus, embedder):
     assert _ids(result)[0] == "fts"
 
 
+def test_lexical_mode_recalls_pure_cjk_question(corpus):
+    """無空白的中文問句：lexical 路要能靠部分詞命中（舊實作整句成片語、回 0 筆）。"""
+    result = recall(corpus, "版本不一致時會怎麼衝突", A, space="dev", mode=MODE_LEXICAL)
+    assert _ids(result)[0] == "lock"
+
+
 def test_english_paraphrase_is_rescued_by_vector_leg(corpus, embedder):
     """純英文改寫：lexical 找不到中文 note，向量那一路補上。"""
     query = "chinese full text search"

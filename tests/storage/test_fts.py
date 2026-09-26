@@ -24,15 +24,64 @@ def test_tokens_split_cjk_into_overlapping_bigrams():
     assert fts.tokens("「記憶」，系統。") == ["記憶", "系統"]
 
 
-def test_match_query_quotes_everything_and_uses_or():
-    assert fts.build_match_query("記憶系統 SQLite") == '"記憶 憶系 系統" OR "SQLite"'
+def test_match_query_quotes_every_token_and_uses_or():
+    # 每個 token 各自一個 OR 分支，不組成片語（不要求相鄰）
+    assert (
+        fts.build_match_query("記憶系統 SQLite")
+        == '"記憶" OR "憶系" OR "系統" OR "SQLite"'
+    )
     assert fts.build_match_query("   ") is None
     assert fts.build_match_query("*** -- ()") is None
-    # FTS5 語法字元與保留字只當字面值
+    # FTS5 語法字元與保留字只當字面值；成對引號內保留為片語
     q = fts.build_match_query('NEAR(a b) OR "x" -y col:z')
-    assert q == '"NEAR a" OR "b" OR "OR" OR "x" OR "y" OR "col z"'
-    # 重複詞（大小寫不同）只留一個
+    assert q == '"NEAR" OR "a" OR "b" OR "OR" OR "x" OR "y" OR "col" OR "z"'
+    # 重複 token（大小寫不同）只留一個
     assert fts.build_match_query("Vault vault") == '"Vault"'
+
+
+def test_pure_cjk_question_is_not_one_long_phrase():
+    """中文問句沒有空白：舊實作會組成一整個片語，幾乎必然 0 筆。"""
+    q = fts.build_match_query("資料庫要怎麼備份")
+    assert q == '"資料" OR "料庫" OR "庫要" OR "要怎" OR "怎麼" OR "麼備" OR "備份"'
+    # 每個分支都是單一 token，沒有任何含空白的片語
+    assert all(" " not in term.strip('"') for term in q.split(" OR "))
+
+
+def test_mixed_cjk_latin_query_splits_per_token():
+    assert (
+        fts.build_match_query("用SQLite做WAL備份")
+        == '"用" OR "SQLite" OR "做" OR "WAL" OR "備份"'
+    )
+
+
+def test_user_quoted_phrase_is_kept_as_phrase():
+    assert fts.build_match_query('"記憶系統" 設計') == '"記憶 憶系 系統" OR "設計"'
+    assert (
+        fts.build_match_query('找 "storage/fts.py" 檔案')
+        == '"找" OR "storage fts py" OR "檔案"'
+    )
+    # 片語與同一個單 token 去重
+    assert fts.build_match_query('"vault" Vault') == '"vault"'
+    # 空片語、只有符號的片語被略過
+    assert fts.build_match_query('"" "***" 記憶') == '"記憶"'
+
+
+def test_unbalanced_or_injected_quotes_are_literal():
+    # 沒配對的引號當一般字元忽略，不會讓 MATCH 語法失衡
+    assert fts.build_match_query('記憶"系統') == '"記憶" OR "系統"'
+    # 成對引號框住的語法字當片語字面值，不會變成 FTS 運算子
+    assert fts.build_match_query('a" OR b NEAR "c') == '"a" OR "OR b NEAR" OR "c"'
+    # 引號內的 FTS 語法仍只當字面 token
+    assert fts.build_match_query('"a* OR -b"') == '"a OR b"'
+
+
+def test_match_terms_are_capped():
+    words = [f"w{i}" for i in range(fts.MAX_MATCH_TERMS + 10)]
+    q = fts.build_match_query(" ".join(words))
+    terms = q.split(" OR ")
+    assert len(terms) == fts.MAX_MATCH_TERMS
+    assert terms[0] == '"w0"'
+    assert terms[-1] == f'"w{fts.MAX_MATCH_TERMS - 1}"'
 
 
 @pytest.fixture
@@ -58,7 +107,7 @@ def _ids(conn, query, **kw):
 @pytest.mark.parametrize(
     ("query", "expected"),
     [
-        ("記憶系統", "n-memory"),  # 4 字，含標題
+        ('"記憶系統"', "n-memory"),  # 4 字片語，含標題
         ("暴力比對", "n-vector"),  # 4 字
         ("時間戳", "n-time"),  # 3 字
         ("RecallService", "n-memory"),  # CamelCase
@@ -78,9 +127,36 @@ def test_two_char_cjk_word_hits(corpus):
     assert set(_ids(corpus, "記憶")) == {"n-memory", "n-weak"}
 
 
-def test_cjk_term_is_a_phrase_not_scattered_chars(corpus):
-    # 「記憶」與「設計」都在 n-memory 的標題，但「記憶設計」並不連續出現
-    assert _ids(corpus, "記憶設計") == []
+def test_unquoted_cjk_term_matches_partial_bigrams(corpus):
+    # 「記憶」與「設計」都在 n-memory 的標題，但「記憶設計」並不連續出現：
+    # 不加引號時照樣命中（逐 token OR），命中較多的排前面
+    ids = _ids(corpus, "記憶設計")
+    assert ids[0] == "n-memory"
+    assert set(ids) == {"n-memory", "n-weak"}
+    assert _ids(corpus, "記憶系統")[0] == "n-memory"
+
+
+def test_quoted_cjk_term_requires_adjacency(corpus):
+    assert _ids(corpus, '"記憶設計"') == []
+    assert _ids(corpus, '"記憶系統"') == ["n-memory"]
+
+
+def test_injection_and_quote_heavy_queries_do_not_raise(corpus):
+    for q in ('"', '""', '"記憶', 'a" OR "b', 'NEAR("記憶" "系統", 2)', "記憶* ^系統"):
+        _ids(corpus, q)  # 不可拋 sqlite3.OperationalError
+
+
+def test_pure_cjk_question_recalls_note_with_some_of_its_words(
+    conn, add_vault, add_note
+):
+    """召回回歸：無空白的中文問句只要含 note 的部分詞就要命中。
+
+    舊實作把整句當成一個片語（要求每個 bigram 相鄰），這題回 0 筆。
+    """
+    add_vault(V)
+    add_note(V, "n-backup", "備份排程", "每天凌晨用 VACUUM INTO 把資料庫備份到主機。")
+    add_note(V, "n-other", "時區規則", "容器一律 UTC。")
+    assert _ids(conn, "資料庫要怎麼定期備份到主機上") == ["n-backup"]
 
 
 def test_snake_case_identifier_is_not_split(corpus):
