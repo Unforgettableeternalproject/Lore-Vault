@@ -20,6 +20,7 @@ EXPECTED_TABLES = {
     "episodes",
     "concepts",
     "injections",
+    "note_tombstones",
 }
 
 

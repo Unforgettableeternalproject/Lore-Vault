@@ -339,7 +339,7 @@ T-01、T-02、T-03（前置 spike 實測）、T-04、T-05（subtree 併入與既
 - 分支已定（A13）：蒸餾／收斂／校準都呼叫 `claude -p`，整條管線留在主機排程，改為經服務 HTTP 讀 episode、寫 concept
 - 待辦（2026-09-26 發現）：
   - `pipeline.py --push-concepts` 以 `vault="*"` 送出且每筆不帶 vault，repo-scope 的新 concept 會被拒——需決定 scope（repo 名）→ vault key 的對應方式
-  - 注入紀錄的 `ambiguous_ids`（concept 撞號遷移標記）目前沒有消費者：spike 的校準／檢索本來就沒有「排除被注入過的輪次」的實作，只有 `transcript.py` 註解的意圖。是否實作屬行為變更（牽動 A6 的 precision 基準），另行裁決
+  - 注入紀錄的 `ambiguous_ids`（concept 撞號遷移標記）：已由 `retrieve.main` 消費，評測語料排除 ambiguous 輪次（`transcript.load_ambiguous_turns`／`is_ambiguous`）；calibrate 逐 concept 出題、不挑輪次，無切入點。現行紀錄 0 筆標記、基準零影響；切換時重新編號後預計 75 筆會帶標記，其後的 precision 基準要重跑。「排除所有被注入過的輪次」仍未實作，屬行為變更（牽動 A6 的 precision 基準），另行裁決
   - `GET /v1/episodes` 的 `since` 比 started_at；spool 晚推的舊 episode 以 since 增量會漏，管線應以 cursor 或 recorded 增量
 - 範圍：蒸餾／收斂／校準在服務端跑；若 T-03 結論為「容器內可跑 `claude -p`」則管線容器化，否則留在主機排程
 - 涉及檔案：`pipeline/`（延續 spike `distill.py`／`consolidate.py`／`calibrate.py`／`pipeline.py`）

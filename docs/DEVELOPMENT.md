@@ -219,18 +219,22 @@ token 放在 repo 外的 env 檔，不寫進 `.claude.json`：
 
 | 子指令 | 說明 |
 |---|---|
-| `delete-note --vault KEY --id NOTE_ID [--yes]` | 刪單則 note（vault 可用別名） |
-| `delete-vault --key KEY [--force] [--yes]` | 刪整個 vault；只接受正式 key。vault 內有 note 或 episode／concept／injection 時必須 `--force` |
+| `delete-note --vault KEY --id NOTE_ID [--reason TEXT] [--yes]` | 刪單則 note（vault 可用別名） |
+| `delete-vault --key KEY [--force] [--reason TEXT] [--yes]` | 刪整個 vault；只接受正式 key。vault 內有 note 或 episode／concept／injection 時必須 `--force` |
+| `undelete-note --id NOTE_ID [--yes]` | 移除墓碑；下次重跑匯入時該 note 會匯回 |
 
 - 預設 dry-run：stdout 印 JSON（`mode`、`vault`、`counts`、`note_ids`、`requires_force`），
   只有 id 與筆數、不含標題與內文。加 `--yes` 才刪；exit code 0 成功、1 找不到／需要 `--force`／schema 不符、2 參數錯誤
 - 單一交易：FTS 列、向量與補算紀錄（CASCADE）、別名（CASCADE）、episodes／concepts／injections
   一併刪；刪完核對實際筆數與規劃、檢查無孤兒向量／補算列，不符整段 rollback
-- 匯入對帳（`import_sources`／`import_vault_counts` 刻意無外鍵）採**退帳**：刪 note 時刪它的清單列、
-  該 (source, vault) 來源筆數減一；刪 vault 時清掉該 vault 的清單列與筆數列。刪後 `import.on_reconcile`
-  與 `storage.fts_rows` 維持綠。代價：doctor 不區分「刻意刪除」與「從未匯入」（清單已無該筆），
-  且重跑 `import_on import` 會把刻意刪掉的 note 匯回來（匯入本來就整批重寫清單）。
-  要「重匯不復活」需墓碑表（schema 變更），目前不做
+- **墓碑**（schema v5 `note_tombstones`，刻意無外鍵）：每則被刪的 note 寫一筆（note id、vault、
+  對帳清單記載的來源與來源 id、刪除時間、`--reason`）；`delete-vault --force` 為其下每則 note 各寫一筆。
+  匯入對帳清單（`import_sources`／`import_vault_counts`）不動
+- 重跑 `import_on import`：有墓碑的 note 跳過、不匯回，報告 `skipped.deleted` 與 `deleted_skipped` 列出；
+  來源 note 全部有墓碑的 vault 不重建（`vaults.deleted_skipped`）。已知缺口：沒有 note 的空 vault 刪除不寫墓碑，
+  若 mapping 仍有該本會被重建
+- `import.on_reconcile`：清單有、note 沒有、有墓碑 → 刻意刪除（`counts.deleted`，只報告）；沒有墓碑 → 漏筆（fail）。
+  來源筆數核對改為「實際 + 刻意刪除 = 來源」。`undelete-note` 後、重匯前 doctor 會顯示漏筆，重匯即恢復綠
 - 服務執行中可直接用（WAL + busy_timeout；與匯入工具同樣直接寫 DB）。快照快取以內容指紋判斷，刪除後下次拉取即更新
 
 容器內：

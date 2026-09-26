@@ -6,12 +6,13 @@
 漏匯一筆時清單仍在，對帳才看得出來。
 
 對帳（`reconcile`）規則：
-- 清單有、`notes` 沒有，或清單標記尚未匯入 → 漏筆（fail）
+- 清單有、`notes` 沒有、但有刪除墓碑（`note_tombstones`）→ 刻意刪除（只報告）
+- 清單有、`notes` 沒有且無墓碑，或清單標記尚未匯入 → 漏筆（fail）
 - note 的 `updated` 等於匯入當下的值、但 (title, body) 雜湊不符 → 被竄改（fail）。
   經服務正常修改一定會推進 `updated`；補摘要不推進 `updated`、也不動 title／body
 - `updated` 已推進 → 匯入後在新系統修改過（只報告）
 - vault 內多出清單沒有的 note → 新系統新增的（只報告）
-- 每個 vault 的來源筆數 ≠ 清單列數或 ≠ 實際存在的筆數 → fail
+- 每個 vault 的來源筆數 ≠ 清單列數或 ≠ 實際存在 + 刻意刪除的筆數 → fail
 """
 
 from __future__ import annotations
@@ -65,6 +66,34 @@ def _has_tables(conn: sqlite3.Connection) -> bool:
         """
     ).fetchone()
     return int(rows[0]) == 2
+
+
+@dataclass(frozen=True)
+class Tombstones:
+    """管理指令刪除的 note（schema v5 以前的資料庫視為沒有墓碑）。"""
+
+    note_ids: frozenset[str]
+    # 指定來源下被刪 note 的來源 id
+    source_ids: frozenset[str]
+
+    def covers(self, note_id: str, source_id: str) -> bool:
+        return note_id in self.note_ids or source_id in self.source_ids
+
+
+def tombstones(conn: sqlite3.Connection, source: str) -> Tombstones:
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'note_tombstones'"
+    ).fetchone()
+    if exists is None:
+        return Tombstones(frozenset(), frozenset())
+    rows = conn.execute("SELECT note_id, source, source_id FROM note_tombstones")
+    note_ids: set[str] = set()
+    source_ids: set[str] = set()
+    for note_id, row_source, source_id in rows:
+        note_ids.add(note_id)
+        if row_source == source and source_id is not None:
+            source_ids.add(source_id)
+    return Tombstones(frozenset(note_ids), frozenset(source_ids))
 
 
 def require_tables(conn: sqlite3.Connection) -> None:
@@ -218,16 +247,23 @@ def reconcile(conn: sqlite3.Connection, source: str) -> Reconciliation:
         r[0]: (r[1], r[2], r[3], r[4])
         for r in conn.execute("SELECT id, vault, title, body, updated FROM notes")
     }
+    graves = tombstones(conn, source)
 
     missing: list[str] = []
+    deleted: list[str] = []
     tampered: list[str] = []
     modified: list[str] = []
     wrong_vault: list[str] = []
     present_by_vault: dict[str, int] = {}
     manifest_by_vault: dict[str, int] = {}
+    deleted_by_vault: dict[str, int] = {}
     for row in sorted(manifest.values(), key=lambda r: (r.vault, r.source_id)):
         manifest_by_vault[row.vault] = manifest_by_vault.get(row.vault, 0) + 1
         found = notes.get(row.note_id)
+        if found is None and graves.covers(row.note_id, row.source_id):
+            deleted_by_vault[row.vault] = deleted_by_vault.get(row.vault, 0) + 1
+            deleted.append(row.note_id)
+            continue
         if found is None or row.imported_updated is None:
             state = "尚未匯入" if found is not None else "notes 中不存在"
             missing.append(f"漏筆 {row.vault}/{row.note_id}（{state}）")
@@ -251,11 +287,13 @@ def reconcile(conn: sqlite3.Connection, source: str) -> Reconciliation:
         expected = expected_counts.get(vault)
         listed = manifest_by_vault.get(vault, 0)
         present = present_by_vault.get(vault, 0)
+        removed = deleted_by_vault.get(vault, 0)
         if expected is None:
             count_errors.append(f"{vault}：清單有 {listed} 列但沒有來源筆數")
-        elif listed != expected or present != expected:
+        elif listed != expected or present + removed != expected:
             count_errors.append(
-                f"{vault}：來源 {expected}、清單 {listed}、實際 {present}"
+                f"{vault}：來源 {expected}、清單 {listed}、實際 {present}、"
+                f"刻意刪除 {removed}"
             )
 
     manifest_ids = {r.note_id for r in manifest.values()}
@@ -271,6 +309,7 @@ def reconcile(conn: sqlite3.Connection, source: str) -> Reconciliation:
         "manifest": len(manifest),
         "present": sum(present_by_vault.values()),
         "missing": len(missing),
+        "deleted": len(deleted),
         "tampered": len(tampered),
         "wrong_vault": len(wrong_vault),
         "count_mismatch": len(count_errors),
@@ -280,6 +319,8 @@ def reconcile(conn: sqlite3.Connection, source: str) -> Reconciliation:
     problems = count_errors + missing + tampered + wrong_vault
     if not problems:
         note = []
+        if deleted:
+            note.append(f"{len(deleted)} 則為刻意刪除")
         if modified:
             note.append(f"{len(modified)} 則匯入後已在新系統修改")
         if extras:
@@ -287,7 +328,8 @@ def reconcile(conn: sqlite3.Connection, source: str) -> Reconciliation:
         suffix = f"（{'；'.join(note)}）" if note else ""
         return Reconciliation(
             "pass",
-            f"{source}：{len(vaults)} 個 vault、{len(manifest)} 則與來源一致{suffix}",
+            f"{source}：{len(vaults)} 個 vault、"
+            f"{len(manifest) - len(deleted)} 則與來源一致{suffix}",
             counts,
             tuple(f"{v}: {expected_counts.get(v, 0)}" for v in vaults[:MAX_DETAILS]),
         )

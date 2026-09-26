@@ -206,8 +206,40 @@ def _v4(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+# 刪除墓碑：管理指令刪掉的 note 記在這裡，重跑外部匯入時跳過，不讓它匯回來；
+# 匯入對帳把有墓碑的清單列算成「刻意刪除」而不是漏匯。
+# 刻意不設指向 notes／vaults 的外鍵：note 與 vault 都已刪除，墓碑要比它們活得久。
+# source／source_id：刪除當下對帳清單記載的來源（非匯入的 note 為 NULL）。
+_V5_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE note_tombstones (
+        note_id    TEXT PRIMARY KEY CHECK (length(trim(note_id)) > 0),
+        vault      TEXT NOT NULL,
+        source     TEXT,
+        source_id  TEXT,
+        deleted_at TEXT NOT NULL,
+        reason     TEXT NOT NULL,
+        CHECK ((source IS NULL) = (source_id IS NULL))
+    ) STRICT
+    """,
+    "CREATE INDEX note_tombstones_source ON note_tombstones(source, source_id)",
+    "CREATE INDEX note_tombstones_vault ON note_tombstones(vault)",
+)
+
+
+def _v5(conn: sqlite3.Connection) -> None:
+    for statement in _V5_STATEMENTS:
+        conn.execute(statement)
+
+
 # 有序遷移：索引 i 的函式把版本從 i 升到 i+1。只能往後加，不可改動已發佈的項目。
-MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (_v1, _v2, _v3, _v4)
+MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
+    _v1,
+    _v2,
+    _v3,
+    _v4,
+    _v5,
+)
 
 SCHEMA_VERSION = len(MIGRATIONS)
 

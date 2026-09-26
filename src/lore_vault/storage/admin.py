@@ -7,22 +7,27 @@
 - note：FTS 列（虛擬表無外鍵，手動刪）、向量與補算紀錄（外鍵 CASCADE）
 - vault：上述 + 別名（CASCADE）+ episodes／concepts／injections
   （外鍵無 CASCADE，手動刪）
-- 匯入對帳清單（`import_sources`／`import_vault_counts`）：刻意沒有外鍵
-  （漏匯才看得出來），所以刪除時一併「退帳」——刪掉該 note 的清單列、
-  把該 vault 的來源筆數減一；刪 vault 則清掉該 vault 的清單與筆數。
-  刪除後對帳仍為綠，代價是重跑匯入會把刻意刪掉的 note 匯回來
-  （清單本來就由匯入整批重寫）。沒做墓碑表：那需要 schema v4 並改對帳邏輯。
+- 墓碑（`note_tombstones`，schema v5）：每則被刪的 note 寫一筆墓碑（id、vault、
+  對帳清單記載的來源、刪除時間、原因）。匯入對帳清單（`import_sources`／
+  `import_vault_counts`）**不動**：對帳把「清單有、note 沒有、有墓碑」算成刻意刪除，
+  沒有墓碑的才是漏匯；重跑匯入遇到墓碑跳過，不會把刻意刪掉的 note 匯回來。
+  `undelete_note` 移除墓碑，下次匯入即可匯回。
 """
 
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 from .db import transaction
 from .errors import NotFound, StorageError, UnknownVault
+from .timeutil import utc_now
 from .vaults import resolve_write
+
+DEFAULT_NOTE_REASON = "admin delete-note"
+DEFAULT_VAULT_REASON = "admin delete-vault"
 
 
 class NeedsForce(StorageError):
@@ -89,25 +94,25 @@ def plan_note_deletion(
         "enrichment": _count(
             conn, "SELECT count(*) FROM note_enrichment WHERE note_seq = ?", (seq,)
         ),
-        "import_sources": 0,
+        "tombstones": 1,
     }
-    if _has_table(conn, "import_sources"):
-        counts["import_sources"] = _count(
-            conn, "SELECT count(*) FROM import_sources WHERE note_id = ?", (note_id,)
-        )
     return DeletePlan(target="note", vault=key, note_ids=(note_id,), counts=counts)
 
 
-def delete_note(conn: sqlite3.Connection, vault: str, note_id: str) -> DeletePlan:
-    """刪一則 note 與其 FTS、向量、補算紀錄，並退掉匯入對帳清單（單一交易）。"""
+def delete_note(
+    conn: sqlite3.Connection,
+    vault: str,
+    note_id: str,
+    *,
+    reason: str = DEFAULT_NOTE_REASON,
+) -> DeletePlan:
+    """刪一則 note 與其 FTS、向量、補算紀錄，並寫墓碑（單一交易）。"""
     with transaction(conn):
         plan = plan_note_deletion(conn, vault, note_id)
         seq = conn.execute(
             "SELECT seq FROM notes WHERE id = ? AND vault = ?", (note_id, plan.vault)
         ).fetchone()["seq"]
-        done = {"import_sources": 0}
-        if plan.counts["import_sources"]:
-            done["import_sources"] = _forget_import_notes(conn, [note_id])
+        done = {"tombstones": _write_tombstones(conn, plan.vault, [note_id], reason)}
         done["fts_rows"] = conn.execute(
             "DELETE FROM note_fts WHERE rowid = ?", (seq,)
         ).rowcount
@@ -119,25 +124,63 @@ def delete_note(conn: sqlite3.Connection, vault: str, note_id: str) -> DeletePla
         return plan
 
 
-def _forget_import_notes(conn: sqlite3.Connection, note_ids: list[str]) -> int:
-    """刪掉 note 的清單列，並把對應 (source, vault) 的來源筆數各減一。"""
-    removed = 0
+def _write_tombstones(
+    conn: sqlite3.Connection, vault: str, note_ids: Sequence[str], reason: str
+) -> int:
+    """每則 note 寫一筆墓碑；來源取自對帳清單（沒有就 NULL）。回傳寫入筆數。"""
+    if not reason.strip():
+        raise StorageError("刪除原因不可為空")
+    has_manifest = _has_table(conn, "import_sources")
+    now = utc_now()
+    written = 0
     for note_id in note_ids:
-        rows = conn.execute(
-            "SELECT source, vault FROM import_sources WHERE note_id = ?", (note_id,)
-        ).fetchall()
-        for source, vault in rows:
-            conn.execute(
-                """
-                UPDATE import_vault_counts SET source_count = source_count - 1
-                WHERE source = ? AND vault = ? AND source_count > 0
-                """,
-                (source, vault),
-            )
-        removed += conn.execute(
-            "DELETE FROM import_sources WHERE note_id = ?", (note_id,)
+        source = source_id = None
+        if has_manifest:
+            row = conn.execute(
+                "SELECT source, source_id FROM import_sources WHERE note_id = ?",
+                (note_id,),
+            ).fetchone()
+            if row is not None:
+                source, source_id = row[0], row[1]
+        # 取消刪除後再刪一次：覆寫舊墓碑
+        written += conn.execute(
+            """
+            INSERT OR REPLACE INTO note_tombstones
+                (note_id, vault, source, source_id, deleted_at, reason)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (note_id, vault, source, source_id, now, reason),
         ).rowcount
-    return removed
+    return written
+
+
+def find_tombstone(conn: sqlite3.Connection, note_id: str) -> dict[str, Any]:
+    """查一則墓碑（只有 metadata）；沒有就 NotFound。"""
+    row = conn.execute(
+        """
+        SELECT note_id, vault, source, source_id, deleted_at, reason
+        FROM note_tombstones WHERE note_id = ?
+        """,
+        (note_id,),
+    ).fetchone()
+    if row is None:
+        raise NotFound(f"note {note_id!r} 沒有墓碑")
+    return {
+        "note_id": row[0],
+        "vault": row[1],
+        "source": row[2],
+        "source_id": row[3],
+        "deleted_at": row[4],
+        "reason": row[5],
+    }
+
+
+def undelete_note(conn: sqlite3.Connection, note_id: str) -> dict[str, Any]:
+    """移除墓碑，下次匯入可把該 note 匯回來。回傳被移除的墓碑。"""
+    with transaction(conn):
+        grave = find_tombstone(conn, note_id)
+        conn.execute("DELETE FROM note_tombstones WHERE note_id = ?", (note_id,))
+        return grave
 
 
 # ── 整個 vault ──
@@ -180,22 +223,11 @@ def plan_vault_deletion(conn: sqlite3.Connection, key: str) -> DeletePlan:
         "aliases": _count(
             conn, "SELECT count(*) FROM vault_aliases WHERE vault = ?", (key,)
         ),
-        "import_sources": 0,
-        "import_vault_counts": 0,
+        "tombstones": len(note_ids),
     }
     for table in _VAULT_RECORD_TABLES:
         counts[table] = _count(
             conn, f"SELECT count(*) FROM {table} WHERE vault = ?", (key,)
-        )
-    if _has_table(conn, "import_sources"):
-        counts["import_sources"] = _count(
-            conn,
-            "SELECT count(*) FROM import_sources WHERE vault = ? "
-            "OR note_id IN (SELECT id FROM notes WHERE vault = ?)",
-            (key, key),
-        )
-        counts["import_vault_counts"] = _count(
-            conn, "SELECT count(*) FROM import_vault_counts WHERE vault = ?", (key,)
         )
     requires_force = counts["notes"] > 0 or any(
         counts[t] > 0 for t in _VAULT_RECORD_TABLES
@@ -210,9 +242,16 @@ def plan_vault_deletion(conn: sqlite3.Connection, key: str) -> DeletePlan:
 
 
 def delete_vault(
-    conn: sqlite3.Connection, key: str, *, force: bool = False
+    conn: sqlite3.Connection,
+    key: str,
+    *,
+    force: bool = False,
+    reason: str = DEFAULT_VAULT_REASON,
 ) -> DeletePlan:
-    """刪 vault 與其全部資料（單一交易）。vault 內有資料時必須 `force=True`。"""
+    """刪 vault 與其全部資料，並為其下每則 note 寫墓碑（單一交易）。
+
+    vault 內有資料時必須 `force=True`。
+    """
     with transaction(conn):
         plan = plan_vault_deletion(conn, key)
         if plan.requires_force and not force:
@@ -221,16 +260,9 @@ def delete_vault(
                 "確定要一併刪除請加 --force"
             )
         seqs = "SELECT seq FROM notes WHERE vault = ?"
-        done: dict[str, int] = {"import_sources": 0, "import_vault_counts": 0}
-        if _has_table(conn, "import_sources"):
-            done["import_sources"] = conn.execute(
-                "DELETE FROM import_sources WHERE vault = ? "
-                "OR note_id IN (SELECT id FROM notes WHERE vault = ?)",
-                (key, key),
-            ).rowcount
-            done["import_vault_counts"] = conn.execute(
-                "DELETE FROM import_vault_counts WHERE vault = ?", (key,)
-            ).rowcount
+        done: dict[str, int] = {
+            "tombstones": _write_tombstones(conn, key, plan.note_ids, reason)
+        }
         done["fts_rows"] = conn.execute(
             f"DELETE FROM note_fts WHERE rowid IN ({seqs})", (key,)
         ).rowcount

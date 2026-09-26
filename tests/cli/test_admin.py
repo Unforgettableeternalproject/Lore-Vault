@@ -1,4 +1,4 @@
-"""管理用刪除：dry-run 不動資料、--yes 單一交易刪除、刪後 FTS 與匯入對帳仍綠。"""
+"""管理用刪除：dry-run 不動資料、--yes 單一交易刪除並寫墓碑、刪後對帳仍綠。"""
 
 from __future__ import annotations
 
@@ -109,6 +109,7 @@ def _table_counts(db) -> dict[str, int]:
                 "note_enrichment",
                 "import_sources",
                 "import_vault_counts",
+                "note_tombstones",
             )
         }
     finally:
@@ -146,14 +147,22 @@ def test_delete_note_dry_run_changes_nothing(db):
         "fts_rows": 1,
         "embeddings": 1,
         "enrichment": 1,
-        "import_sources": 1,
+        "tombstones": 1,
     }
     assert _table_counts(db) == before
 
 
-def test_delete_imported_note_keeps_reconciliation_green(db):
+def test_delete_imported_note_writes_tombstone_and_stays_green(db):
     code, result = _run(
-        db, "delete-note", "--vault", "folder/a", "--id", "note:a1", "--yes"
+        db,
+        "delete-note",
+        "--vault",
+        "folder/a",
+        "--id",
+        "note:a1",
+        "--reason",
+        "過時",
+        "--yes",
     )
     assert code == 0 and result["mode"] == "deleted"
     after = _table_counts(db)
@@ -161,16 +170,56 @@ def test_delete_imported_note_keeps_reconciliation_green(db):
     assert after["note_fts"] == 3
     assert after["note_embeddings"] == 3
     assert after["note_enrichment"] == 0
-    assert after["import_sources"] == 2
+    # 對帳清單與來源筆數不退帳：靠墓碑分辨刻意刪除
+    assert after["import_sources"] == 3
+    assert after["note_tombstones"] == 1
     conn = connect(db)
     try:
         count = conn.execute(
             "SELECT source_count FROM import_vault_counts WHERE vault = 'folder/a'"
         ).fetchone()[0]
+        grave = admin.find_tombstone(conn, "note:a1")
+        result = imports.reconcile(conn, SOURCE)
     finally:
         conn.close()
-    assert count == 1
+    assert count == 2
+    assert grave["vault"] == "folder/a"
+    assert (grave["source"], grave["source_id"]) == (SOURCE, "note:a1")
+    assert grave["reason"] == "過時" and grave["deleted_at"]
+    assert result.counts["deleted"] == 1 and result.counts["missing"] == 0
+    assert "刻意刪除" in result.summary
     _green(db)
+
+
+def test_delete_native_note_tombstone_has_no_source(db):
+    code, _ = _run(db, "delete-note", "--vault", "folder/a", "--id", "note:a3", "--yes")
+    assert code == 0
+    conn = connect(db)
+    try:
+        grave = admin.find_tombstone(conn, "note:a3")
+    finally:
+        conn.close()
+    assert grave["source"] is None and grave["source_id"] is None
+    assert grave["reason"] == admin.DEFAULT_NOTE_REASON
+    _green(db)
+
+
+def test_undelete_removes_tombstone_and_reconcile_reports_missing(db):
+    _run(db, "delete-note", "--vault", "folder/a", "--id", "note:a1", "--yes")
+    code, result = _run(db, "undelete-note", "--id", "note:a1")
+    assert code == 0 and result["mode"] == "dry_run"
+    assert _table_counts(db)["note_tombstones"] == 1
+    code, result = _run(db, "undelete-note", "--id", "note:a1", "--yes")
+    assert code == 0 and result["mode"] == "undeleted"
+    assert _table_counts(db)["note_tombstones"] == 0
+    conn = connect(db)
+    try:
+        # 墓碑移除、尚未重匯：對帳顯示漏筆（重匯即補回）
+        result = imports.reconcile(conn, SOURCE)
+    finally:
+        conn.close()
+    assert result.status == "fail" and result.counts["missing"] == 1
+    assert _run(db, "undelete-note", "--id", "note:a1", "--yes")[0] == 1
 
 
 def test_output_has_no_titles_or_bodies(db):
@@ -194,8 +243,7 @@ def test_delete_vault_force_removes_everything_and_stays_green(db):
     assert code == 0 and result["mode"] == "dry_run"
     assert result["counts"]["notes"] == 3
     assert result["counts"]["aliases"] == 1
-    assert result["counts"]["import_sources"] == 2
-    assert result["counts"]["import_vault_counts"] == 1
+    assert result["counts"]["tombstones"] == 3
 
     code, result = _run(db, "delete-vault", "--key", "folder/a", "--force", "--yes")
     assert code == 0 and result["mode"] == "deleted"
@@ -206,9 +254,20 @@ def test_delete_vault_force_removes_everything_and_stays_green(db):
         "note_fts": 1,
         "note_embeddings": 1,
         "note_enrichment": 0,
-        "import_sources": 1,
-        "import_vault_counts": 1,
+        "import_sources": 3,
+        "import_vault_counts": 2,
+        "note_tombstones": 3,
     }
+    conn = connect(db)
+    try:
+        result = imports.reconcile(conn, SOURCE)
+        vaults = {
+            r[0] for r in conn.execute("SELECT DISTINCT vault FROM note_tombstones")
+        }
+    finally:
+        conn.close()
+    assert result.counts["deleted"] == 2 and result.counts["missing"] == 0
+    assert vaults == {"folder/a"}
     _green(db)
 
 
@@ -278,13 +337,27 @@ def test_failed_delete_rolls_back(db, monkeypatch):
 # ── 對帳要能紅：拿掉保護時會出錯 ──
 
 
-def test_raw_delete_without_import_cleanup_turns_reconcile_red(db):
+def test_raw_delete_without_tombstone_turns_reconcile_red(db):
+    """漏匯（沒有墓碑的消失）仍然是紅燈，不會被當成刻意刪除。"""
     conn = connect(db)
     try:
         seq = conn.execute("SELECT seq FROM notes WHERE id = 'note:a1'").fetchone()[0]
         conn.execute("DELETE FROM note_fts WHERE rowid = ?", (seq,))
         conn.execute("DELETE FROM notes WHERE seq = ?", (seq,))
         assert checks.fts_rows(conn).status == "pass"
+        result = imports.reconcile(conn, SOURCE)
+        assert result.status == "fail"
+        assert result.counts["missing"] == 1 and result.counts["deleted"] == 0
+    finally:
+        conn.close()
+
+
+def test_delete_with_tombstone_removed_turns_reconcile_red(db):
+    """拿掉墓碑：admin 刪除後的狀態就等同漏匯。"""
+    _run(db, "delete-note", "--vault", "folder/a", "--id", "note:a1", "--yes")
+    conn = connect(db)
+    try:
+        conn.execute("DELETE FROM note_tombstones")
         assert imports.reconcile(conn, SOURCE).status == "fail"
     finally:
         conn.close()

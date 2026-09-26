@@ -23,6 +23,8 @@ stdout／stderr 只印統計（筆數、id、雜湊），不印標題以外的�
 note id 直接沿用 ON 原 id（形如 `note:xxxx`，自帶 namespace，不與新系統的
 uuid hex 相撞）：可追溯、重跑天然冪等，連結也能在寫入前就解析成 id。
 對帳清單另存在 `import_sources`（來源 id、內容雜湊、匯入當下的 updated）。
+管理指令刪除過的 note 有墓碑（`note_tombstones`）：重跑匯入時跳過，不匯回，
+報告列在 `deleted_skipped`；來源 note 全部已刪除的 vault 也不重建。
 """
 
 from __future__ import annotations
@@ -707,7 +709,7 @@ def _plan(
 def _new_report() -> dict[str, Any]:
     return {
         "source": SOURCE,
-        "vaults": {"created": [], "existing": []},
+        "vaults": {"created": [], "existing": [], "deleted_skipped": []},
         "notes": {
             "planned": 0,
             "inserted": 0,
@@ -719,7 +721,9 @@ def _new_report() -> dict[str, Any]:
             "db_tampered": [],
             "conflicts": [],
         },
-        "skipped": {"orphan": 0, "notebook_skipped": 0},
+        # deleted：管理指令刪除過（有墓碑），不匯回
+        "skipped": {"orphan": 0, "notebook_skipped": 0, "deleted": 0},
+        "deleted_skipped": [],
         "per_vault": {},
         "review": [],
         "multi_membership": [],
@@ -746,8 +750,15 @@ def run_import(
     ]
     planned = _plan(export, mapping, entries, report)
     report["notes"]["planned"] = len(planned)
+    # 墓碑：管理指令刪掉的 note 不匯回。仍留在對帳清單與來源筆數裡，
+    # 對帳才分得出「刻意刪除」與「漏匯」
+    graves = imports.tombstones(conn, SOURCE)
+    alive = [p for p in planned if not graves.covers(p.source_id, p.source_id)]
+    alive_vaults = {p.vault for p in alive}
+    buried_vaults = {p.vault for p in planned} - alive_vaults
 
-    # vault：不存在才建（既有 vault 的別名與顯示名稱不動）
+    # vault：不存在才建（既有 vault 的別名與顯示名稱不動）；
+    # 來源 note 全部已刪除的 vault（delete-vault --force 過）不重建
     existing = {v.key: v for v in list_vaults(conn)}
     wanted: dict[str, dict[str, Any]] = {}
     for entry in entries.values():
@@ -755,6 +766,9 @@ def run_import(
             wanted.setdefault(entry["key"], entry)
     for key, entry in sorted(wanted.items()):
         current = existing.get(key)
+        if current is None and key in buried_vaults:
+            report["vaults"]["deleted_skipped"].append(key)
+            continue
         kind = entry.get("kind", "repo")
         if current is not None:
             if current.kind != kind:
@@ -799,12 +813,16 @@ def run_import(
     resolver = LinkResolver()
     for row in conn.execute("SELECT vault, id, title FROM notes"):
         resolver.add(row[0], row[1], row[2])
-    for p in planned:
+    for p in alive:
         resolver.add(p.vault, p.source_id, p.title)
 
     link_stats: dict[str, int] = {}
     notes_report = report["notes"]
     for p in sorted(planned, key=lambda x: (x.created, x.source_id)):
+        if graves.covers(p.source_id, p.source_id):
+            report["skipped"]["deleted"] += 1
+            report["deleted_skipped"].append(p.source_id)
+            continue
         links = resolver.resolve(p.vault, p.source_id, p.body)
         for entry in links.entries:
             link_stats[entry["status"]] = link_stats.get(entry["status"], 0) + 1
@@ -898,6 +916,7 @@ def report_summary(report: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "vaults_created": len(report["vaults"]["created"]),
         "vaults_existing": len(report["vaults"]["existing"]),
+        "vaults_deleted_skipped": len(report["vaults"]["deleted_skipped"]),
         "per_vault": report["per_vault"],
         "notes": {k: (len(v) if isinstance(v, list) else v) for k, v in notes.items()},
         "skipped": report["skipped"],

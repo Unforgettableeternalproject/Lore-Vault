@@ -136,6 +136,53 @@ def load_injections(path: Path = INJECTION_LOG) -> dict[tuple[str, str], list[st
     return found
 
 
+def load_ambiguous_turns(path: Path = INJECTION_LOG) -> set[tuple[str, str]]:
+    """讀注入紀錄中帶 ``ambiguous_ids`` 的鍵（renumber_concepts 標的撞號紀錄）。
+
+    鍵的算法與 ``load_injections`` 相同（prompt_id 優先，否則退回指紋）。
+    刻意不改 ``load_injections``：那邊決定「有沒有被注入」，這裡只回答
+    「注入的是哪條分不出來」——後者的輪次不能當乾淨的評測語料。
+    """
+    if not path.exists():
+        return set()
+    found: set[tuple[str, str]] = set()
+    try:
+        with path.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict) or not record.get("ambiguous_ids"):
+                    continue
+                raw_prompt_id = record.get("prompt_id")
+                if raw_prompt_id:
+                    found.add((str(record.get("session_id")), str(raw_prompt_id)))
+                elif record.get("prompt_fingerprint"):
+                    found.add((str(record.get("session_id")),
+                               FINGERPRINT_KEY_PREFIX + str(record["prompt_fingerprint"])))
+    except OSError:
+        return set()
+    return found
+
+
+def is_ambiguous(episode: dict[str, Any], ambiguous: set[tuple[str, str]]) -> bool:
+    """這輪是否受過 id 撞號的注入影響。三把鍵與 ``build_episode`` 歸屬 injected 時相同：
+    (session, prompt_id)、SessionStart 的哨兵鍵、使用者輸入指紋。"""
+    if not ambiguous:
+        return False
+    session_id = str(episode.get("session_id"))
+    keys = (
+        (session_id, str(episode.get("prompt_id"))),
+        (session_id, SESSION_WIDE_PROMPT_ID),
+        (session_id, FINGERPRINT_KEY_PREFIX + prompt_fingerprint(episode.get("user_text") or "")),
+    )
+    return any(key in ambiguous for key in keys)
+
+
 def load_touches(path: Path = TOUCH_LOG) -> dict[tuple[str, str], set[str]]:
     """讀 hook 的觀察紀錄，鍵是 (session_id, prompt_id)，值是 file_key 集合。
 

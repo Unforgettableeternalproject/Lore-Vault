@@ -1,7 +1,12 @@
 """管理指令（不提供 MCP 工具）：`python -m lore_vault.cli.admin <子指令>`。
 
-- `delete-note --vault KEY --id NOTE_ID`
-- `delete-vault --key KEY [--force]`：vault 內有 note 或其他紀錄時必須 `--force`
+- `delete-note --vault KEY --id NOTE_ID [--reason TEXT]`
+- `delete-vault --key KEY [--force] [--reason TEXT]`：vault 內有 note 或其他紀錄時
+  必須 `--force`
+- `undelete-note --id NOTE_ID`：移除墓碑，下次重跑匯入時該 note 會匯回來
+
+刪除會為每則被刪的 note 寫墓碑（`note_tombstones`）：重跑匯入不會匯回，
+匯入對帳把它算成「刻意刪除」而非漏匯。
 
 預設 dry-run：只印將刪內容的 metadata（筆數、note id；不印標題與內文）。
 加 `--yes` 才真的刪，刪除在單一交易內完成（見 `lore_vault.storage.admin`）。
@@ -36,6 +41,7 @@ def _parser() -> argparse.ArgumentParser:
     p_note = sub.add_parser("delete-note", help="刪除單則 note")
     p_note.add_argument("--vault", required=True, help="vault key 或別名")
     p_note.add_argument("--id", required=True, dest="note_id", help="note id")
+    p_note.add_argument("--reason", default=admin.DEFAULT_NOTE_REASON, help="刪除原因")
     p_note.add_argument("--yes", action="store_true", help="真的刪除（預設 dry-run）")
 
     p_vault = sub.add_parser("delete-vault", help="刪除整個 vault")
@@ -43,7 +49,14 @@ def _parser() -> argparse.ArgumentParser:
     p_vault.add_argument(
         "--force", action="store_true", help="vault 內有 note 或其他紀錄時仍刪除"
     )
+    p_vault.add_argument(
+        "--reason", default=admin.DEFAULT_VAULT_REASON, help="刪除原因"
+    )
     p_vault.add_argument("--yes", action="store_true", help="真的刪除（預設 dry-run）")
+
+    p_undel = sub.add_parser("undelete-note", help="移除墓碑，讓下次匯入可匯回")
+    p_undel.add_argument("--id", required=True, dest="note_id", help="note id")
+    p_undel.add_argument("--yes", action="store_true", help="真的移除（預設 dry-run）")
     return parser
 
 
@@ -84,14 +97,28 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> 
                 file=sys.stderr,
             )
             return 1
+        if args.command == "undelete-note":
+            if args.yes:
+                grave = admin.undelete_note(conn, args.note_id)
+            else:
+                grave = admin.find_tombstone(conn, args.note_id)
+            result = {"mode": "undeleted" if args.yes else "dry_run", **grave}
+            if not args.yes:
+                result["hint"] = "確認無誤後加 --yes 執行"
+            out.write(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+            return 0
         if args.command == "delete-note":
             if args.yes:
-                plan = admin.delete_note(conn, args.vault, args.note_id)
+                plan = admin.delete_note(
+                    conn, args.vault, args.note_id, reason=args.reason
+                )
             else:
                 plan = admin.plan_note_deletion(conn, args.vault, args.note_id)
         else:
             if args.yes:
-                plan = admin.delete_vault(conn, args.key, force=args.force)
+                plan = admin.delete_vault(
+                    conn, args.key, force=args.force, reason=args.reason
+                )
             else:
                 plan = admin.plan_vault_deletion(conn, args.key)
         result = {"mode": "deleted" if args.yes else "dry_run", **plan.to_dict()}

@@ -45,7 +45,8 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).parent))
 from hook_stop import DEFAULT_EPISODE_DIR, load_deduped  # noqa: E402
-from transcript import ORIGIN_HUMAN, file_key_overlap, file_keys  # noqa: E402
+from transcript import (ORIGIN_HUMAN, file_key_overlap, file_keys,  # noqa: E402
+                        is_ambiguous, load_ambiguous_turns)
 
 from paths import CONCEPT_PATH as DEFAULT_CONCEPT_PATH  # noqa: E402
 from paths import WORK_DIR  # noqa: E402
@@ -841,6 +842,10 @@ def main() -> int:
         return query_once(pool, args.query, args.top_k)
 
     episodes, _ = load_deduped(args.episode_dir)
+    # 注入紀錄標了 ambiguous_ids（concept 撞號重新編號）的輪次不當評測語料：
+    # 分不出當時注入的是哪條。只排除這種，被注入過的其他輪次照舊（A6 基準不變）
+    ambiguous = load_ambiguous_turns()
+    episodes = [e for e in episodes if not is_ambiguous(e, ambiguous)]
     if args.dump_precision:
         return dump_precision_tasks(pool, episodes, args.dump_precision,
                                     args.sample, args.seed, args.top_k)

@@ -12,7 +12,7 @@ import pytest
 from lore_vault.cli import import_on as mod
 from lore_vault.doctor import DoctorContext, Status, default_registry
 from lore_vault.doctor.command import main as doctor_main
-from lore_vault.storage import imports
+from lore_vault.storage import admin, imports
 from lore_vault.storage.db import connect
 from lore_vault.storage.notes import get_note, update_note_if
 
@@ -443,6 +443,77 @@ def test_reconcile_goes_red_when_one_note_is_missing(fake, tmp_path, conn):
     # 重跑匯入補回漏筆後恢復綠燈
     report = mod.run_import(conn, export, mapping)
     assert report["notes"]["reinserted"] == 1
+    assert _reconcile(conn).status is Status.PASS
+
+
+# ── 墓碑：管理指令刪除的 note／vault 不匯回 ──────────────────────────
+
+
+def test_admin_deleted_note_is_not_reimported(fake, tmp_path, conn):
+    export, mapping = _prepare(fake, tmp_path)
+    mod.run_import(conn, export, _reviewed(mapping))
+    admin.delete_note(conn, "folder/beta", "note:b1")
+    result = _reconcile(conn)
+    assert result.status is Status.PASS
+    assert result.counts["deleted"] == 1
+
+    report = mod.run_import(conn, export, mapping)
+    assert report["skipped"]["deleted"] == 1
+    assert report["deleted_skipped"] == ["note:b1"]
+    assert report["notes"]["reinserted"] == 0
+    assert mod.report_summary(report)["skipped"]["deleted"] == 1
+    assert conn.execute("SELECT 1 FROM notes WHERE id = 'note:b1'").fetchone() is None
+    result = _reconcile(conn)
+    assert result.status is Status.PASS
+    assert result.counts["deleted"] == 1 and result.counts["missing"] == 0
+
+
+def test_without_tombstone_check_reimport_revives_deleted_note(
+    fake, tmp_path, conn, monkeypatch
+):
+    """拿掉匯入端的墓碑檢查：刻意刪除的 note 會被匯回來。"""
+    export, mapping = _prepare(fake, tmp_path)
+    mod.run_import(conn, export, _reviewed(mapping))
+    admin.delete_note(conn, "folder/beta", "note:b1")
+    monkeypatch.setattr(
+        imports,
+        "tombstones",
+        lambda conn, source: imports.Tombstones(frozenset(), frozenset()),
+    )
+    report = mod.run_import(conn, export, mapping)
+    assert report["notes"]["reinserted"] == 1
+    assert conn.execute("SELECT 1 FROM notes WHERE id = 'note:b1'").fetchone()
+
+
+def test_deleted_vault_is_not_recreated_on_reimport(fake, tmp_path, conn):
+    export, mapping = _prepare(fake, tmp_path)
+    mod.run_import(conn, export, _reviewed(mapping))
+    admin.delete_vault(conn, "github.com/u/alpha", force=True)
+    assert _reconcile(conn).status is Status.PASS
+
+    report = mod.run_import(conn, export, mapping)
+    assert report["vaults"]["deleted_skipped"] == ["github.com/u/alpha"]
+    assert report["vaults"]["created"] == []
+    assert report["skipped"]["deleted"] == 4
+    assert (
+        conn.execute("SELECT 1 FROM vaults WHERE key = 'github.com/u/alpha'").fetchone()
+        is None
+    )
+    assert conn.execute("SELECT count(*) FROM notes").fetchone()[0] == 2
+    result = _reconcile(conn)
+    assert result.status is Status.PASS
+    assert result.counts["deleted"] == 4
+
+
+def test_undeleted_note_comes_back_on_reimport(fake, tmp_path, conn):
+    export, mapping = _prepare(fake, tmp_path)
+    mod.run_import(conn, export, _reviewed(mapping))
+    admin.delete_note(conn, "folder/beta", "note:b1")
+    admin.undelete_note(conn, "note:b1")
+    assert _reconcile(conn).status is Status.FAIL
+    report = mod.run_import(conn, export, mapping)
+    assert report["notes"]["reinserted"] == 1
+    assert report["skipped"]["deleted"] == 0
     assert _reconcile(conn).status is Status.PASS
 
 

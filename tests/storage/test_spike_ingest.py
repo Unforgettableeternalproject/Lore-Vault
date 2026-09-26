@@ -54,7 +54,7 @@ def test_v3_database_upgrades_to_v4_keeping_rows(tmp_path):
         )
     assert current_version(conn) == 3
     migrate(conn)
-    assert current_version(conn) == len(MIGRATIONS) == 4
+    assert current_version(conn) == len(MIGRATIONS)
     assert vault_origins(conn) == [(V, ORIGIN_MANUAL, None)]
     # 既有 concept 依寫入順序（rowid）回填 ord，不依 id
     concepts, _ = records.export_concepts(conn, "*")
