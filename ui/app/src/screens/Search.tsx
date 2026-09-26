@@ -1,9 +1,10 @@
-// 檢索（T-79）：查詢框、vault 篩選、結果列（類型、摘要來源、vault、更新、分數），
+// 檢索（T-79）：查詢框、vault 篩選（VaultPicker，與側欄共用）、結果列（類型、摘要來源、vault、更新、分數），
 // 降級／截斷／不支援的種類／缺向量都要明確呈現。「載入其餘結果」＝提高 budget（必要時 limit）重查。
 import { useEffect, useRef, useState } from 'preact/hooks';
 
 import { Banner, ErrorState, Loading, SourceTag } from '../components/ui';
-import { ALL, useApp, vaultName } from '../lib/context';
+import { VaultPicker } from '../components/VaultPicker';
+import { useApp, vaultName } from '../lib/context';
 import { authorLabel, describeDegradedReason, formatTime, isAbort, locatorLabel } from '../lib/format';
 import { routePath } from '../lib/router';
 import type { RecallItem, RecallResult } from '../lib/types';
@@ -25,7 +26,7 @@ export const SEARCH_INPUT_ID = 'lv-search-input';
 const KIND_LABEL: Record<string, string> = { note: '筆記', chunk: '文件段落', concept: '記憶概念' };
 
 export function Search({ initialQuery }: { initialQuery: string }) {
-  const { api, space, vault, setVault, vaults, navigate, limits } = useApp();
+  const { api, space, vault, vaults, navigate, limits } = useApp();
   const DEFAULT_LIMIT = limits.recall_default_limit;
   const DEFAULT_BUDGET = limits.recall_default_budget;
   const MAX_LIMIT = limits.recall_max_limit;
@@ -138,22 +139,8 @@ export function Search({ initialQuery }: { initialQuery: string }) {
         </button>
       </form>
 
-      <div class="lv-chips" role="group" aria-label="vault 篩選">
-        <button type="button" class={'lv-chip' + (vault === ALL ? ' is-on' : '')} aria-pressed={vault === ALL} onClick={() => setVault(ALL)}>
-          本 space 全部
-        </button>
-        {vaults.items.map((v) => (
-          <button
-            key={v.key}
-            type="button"
-            class={'lv-chip' + (vault === v.key ? ' is-on' : '')}
-            aria-pressed={vault === v.key}
-            title={v.key}
-            onClick={() => setVault(v.key)}
-          >
-            {v.display}
-          </button>
-        ))}
+      <div class="lv-filters lv-filters--search">
+        <VaultPicker />
       </div>
 
       {degraded && result && (
