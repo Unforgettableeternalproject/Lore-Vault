@@ -386,7 +386,13 @@ def attempt_login(
             return LoginOutcome("locked", status)
         if matched:
             assert row is not None
+            # A23：登入成功即歸零失敗計數（未鎖定時）
+            conn.execute(
+                "UPDATE ui_login_state SET failures = 0, failure_day = NULL "
+                "WHERE id = 1 AND locked_at IS NULL"
+            )
             _log(conn, now, ip, attempted, "success")
+            status = _status(conn, now)
             return LoginOutcome("success", status, _account(row))
         failures = status.failures + 1
         locked_at = format_utc(now) if failures >= MAX_FAILURES else None

@@ -451,10 +451,13 @@ def test_failure_count_is_global_across_ips(make_ui):
     assert login(fresh).status_code == 423
 
 
-def test_success_does_not_reset_failure_count(ui):
-    """A23：只有換日與人工解鎖會歸零；成功登入不歸零。"""
+def test_success_resets_failure_count(ui):
+    """A23：登入成功即歸零；之後要再連錯 3 次才鎖定。"""
     _fail(ui, 2)
     assert login(ui).status_code == 204
+    assert ui.get("/ui/api/login", headers=UI).json()["remaining"] == 3
+    first, second = _fail(ui, 2)
+    assert [r.json()["error"]["remaining"] for r in (first, second)] == [2, 1]
     assert login(ui, WRONG).status_code == 423
 
 
