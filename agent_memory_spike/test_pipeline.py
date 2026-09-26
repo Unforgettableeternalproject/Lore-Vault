@@ -166,3 +166,42 @@ def test_credited_reads_the_actual_ledger_line():
     assert pipeline._credited("[calibrate] 更新 12 條 → x", r"更新 (\d+) 條") == 12
     # 找不到那行 = 版本不合，寧可誤報失敗也不靜默放行
     assert pipeline._credited("完全無關的輸出") == -1
+
+
+# --- 切換：直譯器與排程腳本 -------------------------------------------------
+
+def test_tool_python_is_repo_relative_venv():
+    """裁決者的 allowlist 認字面：必須是相對 repo 根的路徑，且不再依賴 U.E.P env。"""
+    tool = pipeline.TOOL_PYTHON
+    assert not Path(tool).is_absolute()
+    assert ".." not in Path(tool).parts
+    assert "U.E.P" not in tool
+    assert tool == ".venv/Scripts/python.exe"
+
+
+def test_run_pipeline_script_keeps_its_two_traps():
+    """排程腳本：UTF-8 含 BOM（PS 5.1 否則吞掉中文註解後的行）、
+    Python 輸出走 cmd /c 重導而非 *>>，直譯器用本 repo 的 .venv。"""
+    raw = (Path(__file__).parent / "run_pipeline.ps1").read_bytes()
+    assert raw.startswith(b"\xef\xbb\xbf")
+    text = raw.decode("utf-8-sig")
+    assert "U.E.P-s-Core" not in text
+    assert r'$python = Join-Path $repo ".venv\Scripts\python.exe"' in text
+    assert "& cmd /c" in text
+    assert not any("*>>" in line for line in text.splitlines()
+                   if not line.lstrip().startswith("#"))
+
+
+def test_run_pipeline_script_pushes_concepts_only_after_a_successful_run():
+    """--run 成功才推；推送也走 cmd /c 進同一份 log，失敗反映在腳本 exit code。"""
+    text = (Path(__file__).parent / "run_pipeline.ps1").read_bytes().decode("utf-8-sig")
+    code_lines = [line.strip() for line in text.splitlines()
+                  if line.strip() and not line.lstrip().startswith("#")]
+    run_at = next(i for i, line in enumerate(code_lines) if "--run" in line)
+    gate_at = next(i for i, line in enumerate(code_lines) if line.startswith("if ($code -eq 0)"))
+    push_at = next(i for i, line in enumerate(code_lines) if "--push-concepts" in line)
+    assert run_at < gate_at < push_at
+    push_line = code_lines[push_at]
+    assert push_line.startswith("& cmd /c") and '>> `"$log`" 2>&1' in push_line
+    assert "if ($pushCode -ne 0) { $code = $pushCode }" in code_lines
+    assert code_lines[-1] == "exit $code"

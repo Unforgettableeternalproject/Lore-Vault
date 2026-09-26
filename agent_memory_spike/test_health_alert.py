@@ -68,6 +68,28 @@ def test_pipeline_failure_is_reported(work):
     assert "health" in alerts[0] and "888" in alerts[0]
 
 
+def _with_push_record(work, record):
+    state_path = work / "pipeline_state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state[health.CONCEPT_PUSH_KEY] = record
+    state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+
+def test_concept_push_failure_is_reported(work):
+    """排程的推送失敗只留在 log 裡；服務端記憶凍結而快照年齡照樣綠，只有這裡看得到。"""
+    _with_push_record(work, {"ok": False, "at": "2026-09-27T03:45:00+00:00",
+                             "summary": "服務端拒收整批（batch_rejected）：2 筆 invalid（2 筆被拒）"})
+    alerts = health.collect_alerts()
+    assert len(alerts) == 1
+    assert "concept 推送" in alerts[0] and "batch_rejected" in alerts[0]
+
+
+def test_concept_push_success_is_silent(work):
+    _with_push_record(work, {"ok": True, "at": "2026-09-27T03:45:00+00:00",
+                             "summary": "upsert 3、刪除 0，套用 1/1 批"})
+    assert health.collect_alerts() == []
+
+
 def test_stale_schedule_is_reported(work):
     """管線失敗至少留得下 log；排程掛了連 log 都不會有，那更難察覺。"""
     _aged(work / "logs" / "pipeline-20260824.log", health.STALE_PIPELINE_DAYS + 1)

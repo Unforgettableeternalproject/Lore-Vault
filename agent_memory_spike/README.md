@@ -197,7 +197,7 @@ python hook_stop.py --sync <transcript_path> --dry-run
 ## 測試
 
 ```bash
-../U.E.P-s-Core/env/Scripts/python.exe -m pytest agent_memory_spike/test_transcript.py -q
+.venv/Scripts/python.exe -m pytest agent_memory_spike/test_transcript.py -q
 ```
 
 不放在主專案 `tests/` 底下，避免混進 echo_memory 的 suite。
@@ -725,7 +725,7 @@ python pipeline.py --run --stage calibrate     # 只跑一個階段
 2. **寫不進 `~/.claude/` 底下**（算敏感路徑，要互動批准，而 headless 沒有互動）。
    所以裁決者**只回 JSON、不寫檔**，由管線負責落地——這反而更好，
    寫入範圍被程式限死，裁決者也就不需要超過讀取的權限
-3. **指令必須用相對路徑的直譯器**（`../U.E.P-s-Core/env/Scripts/python.exe`）。
+3. **指令必須用相對路徑的直譯器**（`.venv/Scripts/python.exe`，相對 repo 根；allowlist 放本 repo 的 `.claude/settings.local.json`）。
    換成 `sys.executable` 的絕對路徑，裁決者的 Bash 一律被擋下——
    allowlist 認的是字面，不是解析後的路徑
 4. **prompt 要走 stdin**。接在 `--append-system-prompt` 後面當位置參數時，

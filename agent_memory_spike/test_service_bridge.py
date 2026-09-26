@@ -434,7 +434,12 @@ def test_push_concepts_prints_per_item_reasons_and_fails(tmp_path, monkeypatch, 
     assert "github.com/org-a/tool" in err and "id='c1'" in err
     assert "id='c0'" not in err  # 成功的那筆不列
     assert "機密陳述" not in err  # 不印 statement 原文
-    assert saved == []  # 被拒就不更新已推送 id
+    # 被拒就不更新已推送 id，但要留下失敗紀錄（健康告警讀它）
+    assert len(saved) == 1
+    assert pipeline.PUSHED_IDS_KEY not in saved[0]
+    record = saved[0][pipeline.CONCEPT_PUSH_KEY]
+    assert record["ok"] is False and "batch_rejected" in record["summary"]
+    assert "機密陳述" not in record["summary"]
 
 
 def test_push_concepts_other_rejections_still_raise(tmp_path, monkeypatch):
@@ -448,6 +453,89 @@ def test_push_concepts_other_rejections_still_raise(tmp_path, monkeypatch):
         monkeypatch.setattr(pipeline, "service_settings", lambda: _svc_settings(svc.url))
         with pytest.raises(ServiceRejected):
             pipeline.push_concepts_command(dry_run=False, concept_path=path)
+
+
+@pytest.fixture
+def _isolated_state(tmp_path, monkeypatch):
+    """pipeline_state.json 指到 tmp：不碰 ~/.claude/agent-memory-spike。"""
+    state_path = tmp_path / "pipeline_state.json"
+    monkeypatch.setattr(pipeline, "STATE_PATH", state_path)
+    return state_path
+
+
+def _concepts_file(tmp_path, ids):
+    path = tmp_path / "concepts.json"
+    path.write_text(json.dumps([{"id": i, "statement": f"s {i}"} for i in ids]),
+                    encoding="utf-8")
+    return path
+
+
+def test_push_concepts_success_records_ids_and_ok(tmp_path, monkeypatch, _isolated_state):
+    path = _concepts_file(tmp_path, ["c1", "c2"])
+    _isolated_state.write_text(json.dumps({"service_pushed_concept_ids": ["c1", "gone"]}),
+                               encoding="utf-8")
+    with FakeService(lambda *a: (200, {"applied": True, "results": []}, {})) as svc:
+        monkeypatch.setattr(pipeline, "service_settings", lambda: _svc_settings(svc.url))
+        assert pipeline.push_concepts_command(dry_run=False, concept_path=path) == 0
+    assert svc.requests[0]["body"]["delete"] == ["gone"]
+    state = json.loads(_isolated_state.read_text(encoding="utf-8"))
+    assert state[pipeline.PUSHED_IDS_KEY] == ["c1", "c2"]
+    record = state[pipeline.CONCEPT_PUSH_KEY]
+    assert record["ok"] is True and record["upserted"] == 2 and record["deleted"] == 1
+    assert record["at"].endswith("+00:00")
+
+
+def test_push_concepts_unreachable_is_recorded_and_raised(tmp_path, monkeypatch,
+                                                         _isolated_state):
+    """服務不可達：traceback 照舊進 log（拋出），且 state 留下失敗紀錄、不動已推送 id。"""
+    from lore_vault.hooks.service import ServiceError
+
+    path = _concepts_file(tmp_path, ["c1"])
+    _isolated_state.write_text(json.dumps({"service_pushed_concept_ids": ["old"]}),
+                               encoding="utf-8")
+    monkeypatch.setattr(pipeline, "service_settings",
+                        lambda: _svc_settings(closed_port_url()))
+    with pytest.raises(ServiceError):
+        pipeline.push_concepts_command(dry_run=False, concept_path=path)
+    state = json.loads(_isolated_state.read_text(encoding="utf-8"))
+    assert state[pipeline.PUSHED_IDS_KEY] == ["old"]
+    assert state[pipeline.CONCEPT_PUSH_KEY]["ok"] is False
+    assert TOKEN not in _isolated_state.read_text(encoding="utf-8")
+
+
+def test_push_concepts_unconfigured_is_recorded(tmp_path, monkeypatch, _isolated_state):
+    path = _concepts_file(tmp_path, ["c1"])
+
+    def unconfigured():
+        raise RuntimeError("推送未設定（缺 LORE_VAULT_URL）")
+
+    monkeypatch.setattr(pipeline, "service_settings", unconfigured)
+    with pytest.raises(RuntimeError):
+        pipeline.push_concepts_command(dry_run=False, concept_path=path)
+    record = json.loads(_isolated_state.read_text(encoding="utf-8"))[pipeline.CONCEPT_PUSH_KEY]
+    assert record["ok"] is False and "RuntimeError" in record["summary"]
+
+
+def test_push_concepts_dry_run_records_nothing(tmp_path, monkeypatch, _isolated_state):
+    path = _concepts_file(tmp_path, ["c1"])
+    monkeypatch.setattr(pipeline, "service_settings",
+                        lambda: pytest.fail("dry-run 不該連服務"))
+    assert pipeline.push_concepts_command(dry_run=True, concept_path=path) == 0
+    assert not _isolated_state.exists()
+
+
+def test_push_record_keys_agree_with_doctor_and_health_alert():
+    """pipeline 寫、doctor 與健康告警讀同一組鍵與檔名；改名要三處一起改。"""
+    import hook_health_alert
+    import paths
+
+    from lore_vault.doctor import concept_push_check as check
+
+    assert check.PUSHED_IDS_KEY == pipeline.PUSHED_IDS_KEY
+    assert check.CONCEPT_PUSH_KEY == pipeline.CONCEPT_PUSH_KEY
+    assert hook_health_alert.CONCEPT_PUSH_KEY == pipeline.CONCEPT_PUSH_KEY
+    assert check.CONCEPTS_NAME == paths.CONCEPT_PATH.name
+    assert check.PIPELINE_STATE_NAME == paths.PIPELINE_STATE_PATH.name
 
 
 def test_pipeline_stages_are_untouched():

@@ -2,7 +2,8 @@
 [--embedding-dim N] [--backup-dir DIR] [--backup-max-age-hours H]
 [--snapshot-dir DIR] [--snapshot-max-age-hours H] [--spool-dir DIR] [--client-env FILE]
 [--spool-warn-age-hours H] [--spool-fail-age-hours H] [--concept-snapshot FILE]
-[--concept-snapshot-max-age-hours H] [--mcp-concept-snapshot-path FILE] [--config FILE]`
+[--concept-snapshot-max-age-hours H] [--mcp-concept-snapshot-path FILE]
+[--spike-home DIR] [--config FILE]`
 的進入點。
 
 `--db` 以唯讀開啟（不建檔、不遷移），放進 context 資源 `"db"`；
@@ -128,6 +129,11 @@ def main(
         help="MCP 殼寫入的 concept 快照（未給則由設定推導；路徑一致性對帳用）",
     )
     parser.add_argument(
+        "--spike-home",
+        help="spike 資料目錄（concepts.json、pipeline_state.json；concept 推送對帳用，"
+        "未給則取 --spool-dir 上一層）",
+    )
+    parser.add_argument(
         "--blob-dir",
         help="文件 blob 目錄（documents 對帳用；未給則取設定的 documents.blob_dir）",
     )
@@ -166,6 +172,7 @@ def main(
             "concept_snapshot": args.concept_snapshot,
             "concept_snapshot_max_age_hours": args.concept_snapshot_max_age_hours,
             "mcp_concept_snapshot_path": args.mcp_concept_snapshot_path,
+            "spike_home": args.spike_home,
             "config": args.config,
             "blob_dir": args.blob_dir,
             "tombstones_warn_age_days": args.tombstones_warn_age_days,

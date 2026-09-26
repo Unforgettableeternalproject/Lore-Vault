@@ -486,18 +486,21 @@ KEY=VALUE、只用標準庫解析；行程環境變數中同名鍵優先。
 
 `python -m lore_vault.doctor --category spool --spool-dir DIR [--client-env FILE]
 [--spool-warn-age-hours 1] [--spool-fail-age-hours 24]`、`--category concept_snapshot --concept-snapshot FILE
-[--concept-snapshot-max-age-hours 24]`。
+[--concept-snapshot-max-age-hours 24]`、`--category concept_push --spike-home DIR`（未給則取 `--spool-dir` 上一層）。
 
 - `spool.pending`：最舊一筆待推送超過 fail 門檻為 fail、超過 warn 門檻為 warn；推送未設定為 warn
 - `spool.conflicts`：`rejected/` 非零為 fail（服務拒收或本地檔損毀，需人工處理）
 - `concept_snapshot.age`：從未拉取、manifest 與檔案 sha256 不一致、格式不符、超過年齡（以 `checked_at` 計）為 fail
 - `concept_snapshot.path_agreement`：client.env 的 `LORE_VAULT_CONCEPT_SNAPSHOT` 與 MCP 快照路徑（`--mcp-concept-snapshot-path`，未給則由設定推導 `mcp.concept_snapshot_path`／`<snapshot_dir>/concepts.json`）不是同一檔為 fail；任一邊未設為 skipped
+- `concept_push.lag`：本地 `concepts.json` 的 id 與 `pipeline_state.json` 的 `service_pushed_concept_ids` 比對，有未推送或待刪除 id、或上次推送（`concept_push` 紀錄）失敗為 fail；從未推送、或 id 一致但 `concepts.json` 在上次成功推送後又被改過為 warn；不連服務
 
 ### 主機管線轉接（骨架，預設關閉）
 
 `pipeline.py --pull-episodes OUT.jsonl [--since UTC]`（`GET /v1/episodes`，全部 vault、依 cursor 讀到底）、
 `pipeline.py --push-concepts [--dry-run]`（`POST /v1/concepts` upsert；刪除＝上次推過、這次已不在池內的 id，
-記在 `pipeline_state.json`）。尚未接進 STAGES，三個判卷階段不變。
+記在 `pipeline_state.json`）。不在 STAGES 內、三個判卷階段不變；排程腳本 `run_pipeline.ps1` 在 `--run` 成功後另跑
+`--push-concepts`（`--run` 失敗不推），推送失敗進同一份 log、腳本 exit 非 0，並寫 `pipeline_state.json` 的
+`concept_push`（`ok: false`）讓 SessionStart 健康告警顯示。
 
 ## 文件存儲與檢索（T-58～T-69）
 
