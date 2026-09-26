@@ -462,12 +462,8 @@ button { font: inherit; }
 .lv-result__title { font-family: var(--font-serif-tc); font-size: 17px; font-weight: 600; color: var(--ink-title); line-height: 1.5; overflow-wrap: anywhere; }
 .lv-result__summary { display: flex; gap: 10px; margin-top: 6px; align-items: baseline; }
 .lv-result__text { font-family: var(--font-serif-tc); font-size: 14px; line-height: 1.8; color: var(--ink-soft); min-width: 0; overflow-wrap: anywhere; }
-.lv-result__meta { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; text-align: right; }
-.lv-result__vault { font-size: 12px; color: var(--ink-soft); }
-.lv-result__author { font-family: var(--font-mono); font-size: 11px; color: var(--ink-soft); }
+.lv-result__meta { display: flex; flex-direction: column; gap: 5px; align-items: flex-end; text-align: right; max-width: 220px; }
 .lv-table__who { display: flex; flex-direction: column; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
-.lv-result__score { font-family: var(--font-mono); font-size: 10px; color: var(--ink-mute); }
-.lv-result__score.is-degraded { color: var(--lv-gold-text); }
 .lv-truncated {
   margin-top: 20px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
   padding: 14px 18px; border: 1px dashed var(--line-strong); border-radius: 4px;
@@ -828,8 +824,8 @@ details.lv-check > .lv-check__head { cursor: pointer; }
 .lv-concepts { list-style: none; margin: 12px 0 0; padding: 0; }
 .lv-concept { display: grid; grid-template-columns: minmax(0, 1fr) 110px; gap: 16px; padding: 14px 4px; border-bottom: 1px solid var(--line); }
 .lv-concept__statement { font-family: var(--font-serif-tc); font-size: 15px; line-height: 1.8; color: var(--ink-title); overflow-wrap: anywhere; }
-.lv-concept__meta { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 6px; align-items: baseline; }
-.lv-concept__side { text-align: right; display: flex; flex-direction: column; gap: 4px; }
+.lv-concept__meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; align-items: center; }
+.lv-concept__side { display: flex; flex-direction: column; gap: 5px; align-items: flex-end; }
 .lv-episode-group { margin-top: 16px; }
 
 .lv-test-rows { list-style: none; margin: 16px 0 0; padding: 0; border: 1px solid var(--line); }
@@ -871,6 +867,37 @@ details.lv-check > .lv-check__head { cursor: pointer; }
 .lv-dupes__section .lv-banner { margin-top: 0; }
 .lv-dupes__foot { padding: 14px 16px; }
 .lv-plain-list { margin: 6px 0; padding-left: 1.2em; font-size: 13px; color: var(--ink-soft); overflow-wrap: anywhere; }
+
+/* metadata 標籤（components/ui Badge）：依種類分色。文字色一律走 --lv-*-text（已過 AA），底色只用淡 tint */
+.lv-badge {
+  display: inline-flex; align-items: center; max-width: 100%; min-width: 0; padding: 1px 7px;
+  font-family: var(--font-mono); font-size: 11px; line-height: 1.6; letter-spacing: .02em; white-space: normal;
+  border: 1px solid var(--line-strong); border-radius: var(--lv-radius-control); color: var(--ink-soft);
+  overflow-wrap: anywhere; text-align: left;
+}
+.lv-badge__value { min-width: 0; }
+.lv-badge--vault {
+  color: var(--lv-zone-text); border-color: var(--zone-stroke, var(--line-strong));
+  background: color-mix(in srgb, var(--zone-main, var(--uep-gold)) 8%, transparent);
+  font-family: var(--font-sans); font-weight: 600;
+}
+.lv-badge--author {
+  color: var(--lv-info-text); border-color: color-mix(in srgb, var(--status-info) 45%, transparent);
+  background: color-mix(in srgb, var(--status-info) 7%, transparent);
+}
+.lv-badge--kind {
+  color: var(--lv-info-text); border-color: color-mix(in srgb, var(--status-info) 45%, transparent);
+}
+.lv-badge--time { color: var(--ink-soft); border-color: var(--line-strong); }
+.lv-badge--score { color: var(--ink-soft); border-style: dashed; }
+.lv-badge--degraded, .lv-badge--warn {
+  color: var(--lv-gold-text); border-color: color-mix(in srgb, var(--uep-gold) 55%, transparent);
+  background: color-mix(in srgb, var(--uep-gold) 7%, transparent);
+}
+.lv-badge--tag { color: var(--ink-soft); background: var(--bg-sunken); }
+.lv-badge--anchor { color: var(--ink-soft); border-style: dotted; }
+.lv-badge--plain { color: var(--ink-mute); border-style: dashed; }
+.lv-badges { display: flex; flex-wrap: wrap; gap: 4px; align-content: flex-start; min-width: 0; }
 
 /* 列表的小標籤（更正鏈）、標籤筆數 */
 .lv-table__chain { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -983,7 +1010,7 @@ details.lv-check > .lv-check__head { cursor: pointer; }
   .lv-table__row { border: 1px solid var(--line); border-radius: var(--radius-sm); margin-bottom: 10px; padding: 14px; }
   .lv-result { grid-template-columns: minmax(0, 1fr); gap: 8px; }
   .lv-result__type { flex-direction: row; flex-wrap: wrap; gap: 10px; }
-  .lv-result__meta { flex-direction: row; flex-wrap: wrap; align-items: baseline; text-align: left; gap: 12px; }
+  .lv-result__meta { flex-direction: row; flex-wrap: wrap; align-items: center; text-align: left; gap: 6px; max-width: none; }
 
   /* 檢視頁單欄 */
   .lv-detail { flex-direction: column; gap: 24px; }
@@ -996,7 +1023,7 @@ details.lv-check > .lv-check__head { cursor: pointer; }
   .lv-health-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .lv-check__body { padding-left: 14px; }
   .lv-concept { grid-template-columns: minmax(0, 1fr); }
-  .lv-concept__side { text-align: left; flex-direction: row; flex-wrap: wrap; gap: 12px; }
+  .lv-concept__side { flex-direction: row; flex-wrap: wrap; gap: 6px; align-items: center; }
   .lv-alias { grid-template-columns: minmax(0, 1fr) auto; }
   .lv-alias__tag { grid-column: 1 / -1; }
   .lv-kbd-list__row { grid-template-columns: 72px minmax(0, 1fr); }

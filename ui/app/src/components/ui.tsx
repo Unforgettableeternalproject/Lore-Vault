@@ -17,6 +17,35 @@ export function SourceTag({ source }: { source: SummarySource | string | undefin
   );
 }
 
+/**
+ * metadata 標籤（vault、寫入者、日期、模式／分數、標籤、錨點…）：依種類分色，讓列表的 metadata 不再像一串純文字。
+ * label 給螢幕閱讀器與滑鼠提示（例如「vault」「寫入者」），畫面上只顯示值；testId 放在值本身，textContent 只含值。
+ */
+export type BadgeTone = 'vault' | 'author' | 'time' | 'score' | 'degraded' | 'tag' | 'kind' | 'warn' | 'anchor' | 'plain';
+
+export function Badge({
+  tone,
+  label,
+  children,
+  title,
+  testId,
+}: {
+  tone: BadgeTone;
+  label: string;
+  children: ComponentChildren;
+  title?: string;
+  testId?: string;
+}) {
+  return (
+    <span class={`lv-badge lv-badge--${tone}`} title={title ?? label}>
+      <span class="lv-visually-hidden">{label}：</span>
+      <span class="lv-badge__value" data-testid={testId}>
+        {children}
+      </span>
+    </span>
+  );
+}
+
 type Tone = 'warn' | 'error' | 'info';
 
 /** 狀態橫幅：降級、截斷、缺漏等。label 為等寬大寫標籤（DEGRADED、TRUNCATED…）。 */

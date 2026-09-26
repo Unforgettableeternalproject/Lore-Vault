@@ -2,7 +2,7 @@
 // 降級／截斷／不支援的種類／缺向量都要明確呈現。「載入其餘結果」＝提高 budget（必要時 limit）重查。
 import { useEffect, useRef, useState } from 'preact/hooks';
 
-import { Banner, ErrorState, Loading, SourceTag } from '../components/ui';
+import { Badge, Banner, ErrorState, Loading, SourceTag } from '../components/ui';
 import { VaultPicker } from '../components/VaultPicker';
 import { useApp, vaultName } from '../lib/context';
 import { authorLabel, describeDegradedReason, formatTime, isAbort, locatorLabel } from '../lib/format';
@@ -257,16 +257,20 @@ function ResultRow({
         </span>
       </span>
       <span class="lv-result__meta">
-        <span class="lv-result__vault">{vaultLabel}</span>
+        <Badge tone="vault" label="vault" title={item.vault}>
+          {vaultLabel}
+        </Badge>
         {item.kind === 'note' && (
-          <span class={'lv-result__author' + (item.author ? '' : ' lv-muted')} data-testid="result-author">
+          <Badge tone={item.author ? 'author' : 'plain'} label="寫入者" testId="result-author">
             {authorLabel(item.author)}
-          </span>
+          </Badge>
         )}
-        <span class="lv-mono">{formatTime(item.updated)}</span>
-        <span class={'lv-result__score' + (degraded ? ' is-degraded' : '')} title="RRF 融合分數">
+        <Badge tone="time" label="更新">
+          {formatTime(item.updated)}
+        </Badge>
+        <Badge tone={degraded ? 'degraded' : 'score'} label="檢索模式與分數" title="RRF 融合分數">
           {degraded ? '關鍵字' : '混合'} · {item.score.toFixed(4)}
-        </span>
+        </Badge>
       </span>
     </button>
   );

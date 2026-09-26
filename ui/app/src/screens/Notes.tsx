@@ -6,7 +6,7 @@
 // 更正鏈（supersedes／superseded_by）在列上標示。
 import { useEffect, useState } from 'preact/hooks';
 
-import { Banner, ErrorState, Loading, SourceTag } from '../components/ui';
+import { Badge, Banner, ErrorState, Loading, SourceTag } from '../components/ui';
 import { VaultPicker } from '../components/VaultPicker';
 import { useApp, vaultName } from '../lib/context';
 import { authorLabel, daysAgoIso, describeError, formatTime, isAbort } from '../lib/format';
@@ -253,23 +253,35 @@ export function Notes() {
                       )}
                     </span>
                   )}
-                  {vault === '*' && <span class="lv-table__sub">{vaultName({ vaults }, n.vault)}</span>}
+                  {vault === '*' && (
+                    <span class="lv-table__sub">
+                      <Badge tone="vault" label="vault" title={n.vault}>
+                        {vaultName({ vaults }, n.vault)}
+                      </Badge>
+                    </span>
+                  )}
                 </span>
-                <span role="cell" class="lv-mono lv-muted">
-                  {n.topics.map((t) => `#${t}`).join(' ')}
+                <span role="cell" class="lv-badges">
+                  {n.topics.map((t) => (
+                    <Badge key={t} tone="tag" label="標籤">
+                      #{t}
+                    </Badge>
+                  ))}
                 </span>
                 <span role="cell" class="lv-table__who">
-                  <span class={'lv-mono' + (n.author ? '' : ' lv-muted')} data-testid="note-author">
+                  <Badge tone={n.author ? 'author' : 'plain'} label="寫入者" testId="note-author">
                     {authorLabel(n.author)}
-                  </span>
+                  </Badge>
                   {n.updated_by && n.updated_by !== n.author && (
                     <span class="lv-mono lv-muted lv-small" data-testid="note-updated-by">
                       最後修改 {n.updated_by}
                     </span>
                   )}
                 </span>
-                <span role="cell" class="lv-mono lv-muted is-right">
-                  {formatTime(n.updated)}
+                <span role="cell" class="is-right">
+                  <Badge tone="time" label="更新">
+                    {formatTime(n.updated)}
+                  </Badge>
                 </span>
               </a>
             ))}
