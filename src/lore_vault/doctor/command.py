@@ -79,6 +79,18 @@ def main(
         "--snapshot-dir", help="MCP 殼的本地快照目錄（snapshot 對帳用）"
     )
     parser.add_argument(
+        "--tombstones-warn-age-days",
+        type=float,
+        default=None,
+        help="最舊墓碑超過幾天時 tombstones.summary 為 warn（預設 0 = 不警告）",
+    )
+    parser.add_argument(
+        "--tombstones-warn-bytes",
+        type=int,
+        default=None,
+        help="墓碑快照總位元組超過時 tombstones.summary 為 warn（預設 0 = 不警告）",
+    )
+    parser.add_argument(
         "--snapshot-max-age-hours",
         type=float,
         default=None,
@@ -156,6 +168,8 @@ def main(
             "mcp_concept_snapshot_path": args.mcp_concept_snapshot_path,
             "config": args.config,
             "blob_dir": args.blob_dir,
+            "tombstones_warn_age_days": args.tombstones_warn_age_days,
+            "tombstones_warn_bytes": args.tombstones_warn_bytes,
         }
         settings.update({k: v for k, v in optional.items() if v is not None})
         if args.db:

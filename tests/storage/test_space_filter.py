@@ -37,7 +37,13 @@ SHARED = "共同關鍵字 世界觀"
 
 def _note(vault: str, note_id: str, title: str) -> Note:
     return Note(
-        id=note_id, vault=vault, title=title, body=SHARED, created=TS, updated=TS
+        principal="xavier",
+        id=note_id,
+        vault=vault,
+        title=title,
+        body=SHARED,
+        created=TS,
+        updated=TS,
     )
 
 

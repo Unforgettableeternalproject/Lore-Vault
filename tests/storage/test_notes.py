@@ -18,6 +18,7 @@ def vault(add_vault):
 
 def test_round_trip_normalizes_timestamps(conn, vault):
     note = Note(
+        principal="xavier",
         id="n-1",
         vault="Folder/Notes",
         title="標題",
@@ -40,6 +41,39 @@ def test_duplicate_id_and_unknown_vault(conn, vault, add_note):
         add_note(V, "n-1", "t")
     with pytest.raises(UnknownVault):
         add_note("folder/nope", "n-2", "t")
+
+
+def test_insert_requires_principal(conn, vault):
+    """A22：principal 是最底層必填（匯入等繞過服務層的路徑也擋），不預設成任何人。"""
+    note = Note(
+        id="n-x",
+        vault=V,
+        title="t",
+        body="b",
+        created="2026-09-01T00:00:00.000Z",
+        updated="2026-09-01T00:00:00.000Z",
+    )
+    with pytest.raises(SchemaError, match="principal"):
+        notes.insert_note(conn, V, note, space="dev")
+    assert conn.execute("SELECT count(*) FROM notes").fetchone()[0] == 0
+
+
+def test_update_editor_sets_updated_by_without_touching_author(conn, vault, add_note):
+    stored = add_note(V, "n-1", "t")
+    first = notes.update_note_if(
+        conn, V, "n-1", stored.updated, {"body": "x"}, space="dev", editor=("B", "p")
+    )
+    assert (first.author, first.updated_by, first.updated_by_principal) == (
+        None,
+        "B",
+        "p",
+    )
+    # 不帶 editor 的內部呼叫：作者欄位不動
+    second = notes.update_note_if(
+        conn, V, "n-1", first.updated, {"body": "y"}, space="dev"
+    )
+    assert (second.updated_by, second.updated_by_principal) == ("B", "p")
+    assert notes.get_note(conn, V, "n-1", space="dev").updated_by == "B"
 
 
 def test_get_notes_keeps_order_and_skips_missing(conn, vault, add_note):

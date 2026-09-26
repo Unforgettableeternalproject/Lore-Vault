@@ -6,6 +6,17 @@
 # 啟動前仍以 lore_vault.storage.sqlite_check 斷言 ≥ 3.37 + FTS5 + STRICT。
 
 ARG PYTHON_IMAGE=python:3.14-slim-trixie
+ARG NODE_IMAGE=node:22-slim
+
+# ── UI 建置階段（A21）：Vite 建置 ui/app → /ui/dist；node 不進最終映像 ──
+FROM ${NODE_IMAGE} AS ui-builder
+WORKDIR /ui
+# 第一層：只有相依套件（package.json／package-lock.json 不變就吃快取）
+COPY ui/app/package.json ui/app/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --no-audit --no-fund
+COPY ui/app/ ./
+RUN npm run build
 
 # ── 建置階段：uv 依 uv.lock 安裝相依套件到 /app/.venv ──
 FROM ${PYTHON_IMAGE} AS builder
@@ -48,6 +59,8 @@ RUN groupadd --system --gid 10001 lorevault \
 
 WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
+# 只帶建置產物（靜態檔）；docker/config.toml 的 ui.static_dir 指向這裡
+COPY --from=ui-builder /ui/dist /app/ui
 COPY docker/config.toml /app/config.toml
 
 ENV PATH=/app/.venv/bin:$PATH \

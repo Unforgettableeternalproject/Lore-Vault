@@ -13,6 +13,8 @@ from lore_vault.storage import checks as storage_checks
 from lore_vault.storage import enrichment as storage_enrichment
 from lore_vault.storage import imports as storage_imports
 from lore_vault.storage import ingest_checks as storage_ingest
+from lore_vault.storage import manage as storage_manage
+from lore_vault.storage import ui_login as storage_ui_login
 
 from .backup_check import backup_recent
 from .concept_snapshot_check import (
@@ -186,6 +188,51 @@ def space_key_prefix_agreement(ctx: DoctorContext) -> CheckResult:
     return _to_result(storage_checks.space_key_prefix_agreement(ctx.require("db")))
 
 
+def vaults_alias_integrity(ctx: DoctorContext) -> CheckResult:
+    return _to_result(storage_manage.alias_integrity(ctx.require("db")))
+
+
+def tombstones_disjoint(ctx: DoctorContext) -> CheckResult:
+    return _to_result(storage_manage.tombstones_disjoint(ctx.require("db")))
+
+
+def notes_attribution(ctx: DoctorContext) -> CheckResult:
+    return _to_result(storage_manage.note_attribution(ctx.require("db")))
+
+
+def tombstones_note_snapshots(ctx: DoctorContext) -> CheckResult:
+    return _to_result(storage_manage.tombstone_snapshots(ctx.require("db")))
+
+
+def tombstones_summary(ctx: DoctorContext) -> CheckResult:
+    """資訊項：墓碑數、快照總位元組、最舊一筆年齡。
+
+    設定鍵 `tombstones_warn_age_days`／`tombstones_warn_bytes`（0 或未設 = 不警告）。
+    """
+    now = ctx.settings.get("now") or datetime.now(UTC)
+    return _to_result(
+        storage_manage.tombstone_stats(
+            ctx.require("db"),
+            now=now,
+            warn_age_days=float(ctx.settings.get("tombstones_warn_age_days") or 0),
+            warn_bytes=int(ctx.settings.get("tombstones_warn_bytes") or 0),
+        )
+    )
+
+
+def ui_login_lock(ctx: DoctorContext) -> CheckResult:
+    """A23：UI 登入鎖定中為 fail（附鎖定時間）；近 24 小時失敗次數為資訊。"""
+    db = ctx.require("db")
+    exists = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        ("ui_login_state",),
+    ).fetchone()
+    if exists is None:
+        raise CheckSkipped("資料庫尚無 UI 登入表（schema v13 前）")
+    now = ctx.settings.get("now") or datetime.now(UTC)
+    return _to_result(storage_ui_login.lock_check(db, now=now))
+
+
 def default_registry() -> Registry:
     registry = Registry()
     registry.add(
@@ -347,6 +394,54 @@ def default_registry() -> Registry:
             "vaults",
             vaults_auto_created,
             "episode 收料／管線自動建立的 vault 數與來源（供審視）",
+        )
+    )
+    registry.add(
+        Check(
+            "vaults.alias_integrity",
+            "vaults",
+            vaults_alias_integrity,
+            "別名不等於任何 vault 的正式 key，且指向現存 vault",
+        )
+    )
+    registry.add(
+        Check(
+            "tombstones.disjoint",
+            "tombstones",
+            tombstones_disjoint,
+            "note／文件墓碑與現行表沒有重複 id（undelete 須同交易刪墓碑）",
+        )
+    )
+    registry.add(
+        Check(
+            "tombstones.note_snapshots",
+            "tombstones",
+            tombstones_note_snapshots,
+            "note 墓碑的內容快照可解析、id 相符、還原必要欄位齊全",
+        )
+    )
+    registry.add(
+        Check(
+            "tombstones.summary",
+            "tombstones",
+            tombstones_summary,
+            "資訊：墓碑數、快照總位元組、最舊一筆年齡（設了門檻才會 warn）",
+        )
+    )
+    registry.add(
+        Check(
+            "ui.login_lock",
+            "ui",
+            ui_login_lock,
+            "UI 登入未被鎖定（鎖定為 fail，需人工 ui-unlock）；近 24 小時失敗次數",
+        )
+    )
+    registry.add(
+        Check(
+            "notes.attribution",
+            "notes",
+            notes_attribution,
+            "每則 note 都有 principal 與 updated_by_principal（A22）",
         )
     )
     for name, func, description in (

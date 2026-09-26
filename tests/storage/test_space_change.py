@@ -31,7 +31,13 @@ SOURCE = "open_notebook"
 
 def _note(vault: str, note_id: str, title: str) -> Note:
     return Note(
-        id=note_id, vault=vault, title=title, body="世界觀 祕密", created=TS, updated=TS
+        principal="xavier",
+        id=note_id,
+        vault=vault,
+        title=title,
+        body="世界觀 祕密",
+        created=TS,
+        updated=TS,
     )
 
 

@@ -8,6 +8,10 @@
 `POST /v1/status`（純健康檢查）與 `GET /v1/snapshot`（整庫唯讀副本，由殼端依
 目前 space 過濾）。
 
+作者（A22）：`write`／`update` 接受 `author`（寫入者自報名，未填存 null、不代填）；
+`principal` 由認證中介層依憑證判定（`api.principals`），body 帶 `principal` 與其他
+未知欄位一樣 422 拒絕。
+
 `POST /v1/documents`（T-67）是唯一的 multipart 端點：欄位 `file`、`vault`、`space`
 （必填）、`filename?`、`mime?`；大小上限在讀取 body 時就擋（413 `too_large`）。
 """
@@ -29,7 +33,12 @@ from lore_vault import notes as notes_service
 from lore_vault.doctor import DoctorContext, default_registry
 from lore_vault.doctor.builtin import DEFAULT_BACKLOG_MAX_AGE
 from lore_vault.documents import service as document_service
-from lore_vault.notes.service import DEFAULT_GET_BUDGET, DEFAULT_LIST_LIMIT
+from lore_vault.notes.service import (
+    DEFAULT_GET_BUDGET,
+    DEFAULT_LIST_BUDGET,
+    DEFAULT_LIST_LIMIT,
+    FIELDS_FULL,
+)
 from lore_vault.recall import recall as recall_service
 from lore_vault.recall.service import DEFAULT_BUDGET as RECALL_DEFAULT_BUDGET
 from lore_vault.recall.service import DEFAULT_LIMIT as RECALL_DEFAULT_LIMIT
@@ -52,6 +61,7 @@ from lore_vault.storage.vaults import (
 )
 
 from .errors import DocumentsNotConfigured, PayloadTooLarge, VaultExists
+from .principals import principal_of
 from .state import AppState
 
 router = APIRouter(prefix="/v1")
@@ -98,6 +108,8 @@ class GetRequest(_ScopedReq):
     vault: str | None = None
     ids: list[str]
     budget: int = DEFAULT_GET_BUDGET
+    # full（預設，含全文）／meta（只回 metadata，不組裝全文、不佔預算）
+    fields: str = FIELDS_FULL
 
 
 class ListRequest(_ScopedReq):
@@ -107,21 +119,30 @@ class ListRequest(_ScopedReq):
     cursor: str | None = None
     limit: int = DEFAULT_LIST_LIMIT
     kinds: list[str] | None = None
+    # 本頁 note 摘要字數總和上限（title 不計；公平分配，超過配額的截短、
+    # 連下限都給不起的尾端 summary 為 null）
+    budget: int = DEFAULT_LIST_BUDGET
 
 
 class WriteRequest(_ScopedReq):
     vault: str | None = None
     title: str
     body: str
+    # 寫入者自報名（agent 角色名、UI 的 `Xavier (Bernie)`）；未填為 null
+    author: str | None = None
     topics: list[str] = Field(default_factory=list)
     links: list[str] = Field(default_factory=list)
     supersedes: str | None = None
+    # 只跑驗證、範圍、查重與連結解析，不寫入（回 200）
+    dry_run: bool = False
 
 
 class UpdateRequest(_ScopedReq):
     vault: str | None = None
     id: str
     expected_updated: str
+    # 這次修改者的自報名，寫進 updated_by（未填為 null，不沿用上一位）
+    author: str | None = None
     title: str | None = None
     body: str | None = None
     topics: list[str] | None = None
@@ -233,6 +254,7 @@ def get(request: Request, req: GetRequest) -> dict[str, Any]:
             req.ids,
             space=req.space,  # type: ignore[arg-type]
             budget=req.budget,
+            fields=req.fields,
         )
     return result.to_dict()
 
@@ -249,12 +271,15 @@ def list_(request: Request, req: ListRequest) -> dict[str, Any]:
             cursor=req.cursor,
             limit=req.limit,
             kinds=req.kinds,
+            budget=req.budget,
         )
     return result.to_dict()
 
 
 @router.post("/write", status_code=status.HTTP_201_CREATED)
-def write(request: Request, req: WriteRequest) -> dict[str, Any]:
+def write(request: Request, req: WriteRequest, response: Response) -> dict[str, Any]:
+    """新增 note（201）。`dry_run: true` 只查重與解析連結、不寫入（200）：
+    與正式寫入同一個函式，驗證、vault／space 範圍、supersedes 檢查完全相同。"""
     state = _state(request)
     with state.connection() as conn:
         result = notes_service.write(
@@ -263,13 +288,19 @@ def write(request: Request, req: WriteRequest) -> dict[str, Any]:
             req.title,
             req.body,
             space=req.space,  # type: ignore[arg-type]
+            principal=principal_of(request),
+            author=req.author,
             topics=req.topics,
             links=req.links,
             supersedes=req.supersedes,
             embedder=state.query_embedder,
             dim=state.dim,
+            dry_run=req.dry_run,
         )
-    state.wake_worker()
+    if req.dry_run:
+        response.status_code = status.HTTP_200_OK
+    else:
+        state.wake_worker()
     return result.to_dict()
 
 
@@ -286,6 +317,8 @@ def update(request: Request, req: UpdateRequest) -> dict[str, Any]:
             req.id,
             req.expected_updated,
             space=req.space,  # type: ignore[arg-type]
+            principal=principal_of(request),
+            author=req.author,
             title=req.title,
             body=req.body,
             topics=req.topics,
@@ -330,6 +363,13 @@ def status_(
                     "blob_dir": state.settings.config.documents.blob_dir,
                     "documents_stuck_seconds": (
                         state.settings.config.documents.stuck_seconds
+                    ),
+                    # 0 = 不警告（tombstones.summary 只當資訊項）
+                    "tombstones_warn_age_days": (
+                        state.settings.config.database.tombstone_warn_age_days
+                    ),
+                    "tombstones_warn_bytes": (
+                        state.settings.config.database.tombstone_warn_bytes
                     ),
                 },
                 resources={"db": conn},

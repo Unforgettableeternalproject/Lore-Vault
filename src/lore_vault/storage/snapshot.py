@@ -128,7 +128,8 @@ _FINGERPRINT_QUERIES = (
     "SELECT key, display, kind, created, space FROM {db}.vaults ORDER BY key",
     "SELECT alias, vault FROM {db}.vault_aliases ORDER BY alias",
     "SELECT seq, id, vault, title, summary, body, topics, links, supersedes, "
-    "created, updated FROM {db}.notes ORDER BY seq",
+    "created, updated, author, principal, updated_by, updated_by_principal "
+    "FROM {db}.notes ORDER BY seq",
 )
 
 
@@ -196,9 +197,12 @@ def build_snapshot(
             conn.execute(
                 """
                 INSERT INTO main.notes (seq, id, vault, title, summary, body, topics,
-                                        links, supersedes, created, updated)
+                                        links, supersedes, created, updated,
+                                        author, principal, updated_by,
+                                        updated_by_principal)
                 SELECT seq, id, vault, title, summary, body, topics,
-                       links, supersedes, created, updated
+                       links, supersedes, created, updated,
+                       author, principal, updated_by, updated_by_principal
                 FROM src.notes
                 """
             )

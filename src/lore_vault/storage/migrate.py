@@ -435,6 +435,134 @@ def _v10(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+# 文件復原與人工重試（v11，T-74）：
+# - document_tombstones 補上重建 documents 列所需的 metadata（filename／mime／
+#   size_bytes／version）。舊墓碑為 NULL，復原時明確拒絕、不猜
+# - documents.manual_retries：經管理端點人工重排抽取的次數（有上限）。
+#   `reset_for_retry` 會清掉 document_enrichment 的嘗試紀錄，人工次數不能放那裡
+_V11_STATEMENTS: tuple[str, ...] = (
+    "ALTER TABLE document_tombstones ADD COLUMN filename TEXT",
+    "ALTER TABLE document_tombstones ADD COLUMN mime TEXT",
+    "ALTER TABLE document_tombstones ADD COLUMN size_bytes INTEGER",
+    "ALTER TABLE document_tombstones ADD COLUMN version INTEGER",
+    """
+    ALTER TABLE documents
+        ADD COLUMN manual_retries INTEGER NOT NULL DEFAULT 0
+        CHECK (manual_retries >= 0)
+    """,
+)
+
+
+def _v11(conn: sqlite3.Connection) -> None:
+    for statement in _V11_STATEMENTS:
+        conn.execute(statement)
+
+
+# 作者契約與可復原的 note 刪除（v12，A22）：
+# - notes.author：寫入者自報的名稱（未填 NULL，不代填）；principal：服務依憑證判定
+#   的主體；updated_by／updated_by_principal：最後一次寫入者。可為 NULL 且不設
+#   DEFAULT：漏設 principal 的寫入路徑不會被默默記成某人，由儲存層拒收、doctor
+#   `notes.attribution` 對帳
+# - 回填：principal 一律 'xavier'（v12 前唯一的憑證）；舊 PM 匯入成功的 note（對帳
+#   清單 imported_updated 非 NULL）author／updated_by 標 'legacy'，其餘 author 維持
+#   NULL。清單有列但 imported_updated 為 NULL 的是「id 已存在但非本工具匯入」，不算
+# - note_tombstones.snapshot：刪除當下 note 的完整內容（JSON），undelete 據此還原原 id；
+#   v12 前的舊墓碑為 NULL，維持「只移除墓碑」的舊行為
+_V12_STATEMENTS: tuple[str, ...] = (
+    "ALTER TABLE notes ADD COLUMN author TEXT",
+    "ALTER TABLE notes ADD COLUMN principal TEXT",
+    "ALTER TABLE notes ADD COLUMN updated_by TEXT",
+    "ALTER TABLE notes ADD COLUMN updated_by_principal TEXT",
+    "UPDATE notes SET principal = 'xavier', updated_by_principal = 'xavier'",
+    """
+    UPDATE notes SET author = 'legacy', updated_by = 'legacy'
+    WHERE id IN (
+        SELECT note_id FROM import_sources WHERE imported_updated IS NOT NULL
+    )
+    """,
+    """
+    ALTER TABLE note_tombstones ADD COLUMN snapshot TEXT
+        CHECK (snapshot IS NULL OR json_valid(snapshot))
+    """,
+)
+
+
+def _v12(conn: sqlite3.Connection) -> None:
+    for statement in _V12_STATEMENTS:
+        conn.execute(statement)
+
+
+# UI 帳號密碼登入與全域鎖定（v13，A23；規則見 `storage.ui_login`）：
+# - ui_accounts：username 即 session 的 principal；儲存保留大小寫、比對不分大小寫
+#   （COLLATE NOCASE，也讓大小寫不同的同名帳號無法並存）。密碼只存 scrypt 雜湊，
+#   salt 與參數（n／r／p／dklen）寫在列中，日後調整參數不影響舊雜湊的驗證
+# - ui_login_state：單列（id = 1）的全域失敗計數與鎖定狀態；服務重啟不歸零、不解鎖
+# - ui_login_log：每次嘗試一列（不含密碼）；result 另含人工解鎖的 'unlock'
+# - principal 改名：唯一的主體由 'xavier' 改為 'UEPBernie'（與 Eternity 帳號一致）。
+#   notes 的 principal／updated_by_principal 與 note 墓碑快照 JSON 內的同名欄位一併
+#   改寫；不動 notes.updated（樂觀鎖版本）
+_V13_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE ui_accounts (
+        username      TEXT PRIMARY KEY COLLATE NOCASE
+                      CHECK (length(username) BETWEEN 1 AND 64
+                             AND username = trim(username)),
+        display       TEXT NOT NULL CHECK (length(trim(display)) > 0),
+        password_hash BLOB NOT NULL,
+        salt          BLOB NOT NULL,
+        scrypt_n      INTEGER NOT NULL CHECK (scrypt_n > 1),
+        scrypt_r      INTEGER NOT NULL CHECK (scrypt_r > 0),
+        scrypt_p      INTEGER NOT NULL CHECK (scrypt_p > 0),
+        dklen         INTEGER NOT NULL CHECK (dklen >= 16),
+        created       TEXT NOT NULL,
+        updated       TEXT NOT NULL
+    ) STRICT
+    """,
+    """
+    CREATE TABLE ui_login_state (
+        id          INTEGER PRIMARY KEY CHECK (id = 1),
+        failures    INTEGER NOT NULL DEFAULT 0 CHECK (failures >= 0),
+        failure_day TEXT,
+        locked_at   TEXT,
+        updated     TEXT
+    ) STRICT
+    """,
+    "INSERT INTO ui_login_state (id, failures) VALUES (1, 0)",
+    """
+    CREATE TABLE ui_login_log (
+        seq      INTEGER PRIMARY KEY,
+        at       TEXT NOT NULL,
+        ip       TEXT NOT NULL,
+        username TEXT,
+        result   TEXT NOT NULL CHECK (result IN
+                 ('success', 'bad_credentials', 'locked', 'no_account', 'unlock'))
+    ) STRICT
+    """,
+    "CREATE INDEX ui_login_log_at ON ui_login_log(at)",
+    "UPDATE notes SET principal = 'UEPBernie' WHERE principal = 'xavier'",
+    """
+    UPDATE notes SET updated_by_principal = 'UEPBernie'
+    WHERE updated_by_principal = 'xavier'
+    """,
+    """
+    UPDATE note_tombstones
+    SET snapshot = json_set(snapshot, '$.principal', 'UEPBernie')
+    WHERE snapshot IS NOT NULL AND json_extract(snapshot, '$.principal') = 'xavier'
+    """,
+    """
+    UPDATE note_tombstones
+    SET snapshot = json_set(snapshot, '$.updated_by_principal', 'UEPBernie')
+    WHERE snapshot IS NOT NULL
+      AND json_extract(snapshot, '$.updated_by_principal') = 'xavier'
+    """,
+)
+
+
+def _v13(conn: sqlite3.Connection) -> None:
+    for statement in _V13_STATEMENTS:
+        conn.execute(statement)
+
+
 # 有序遷移：索引 i 的函式把版本從 i 升到 i+1。只能往後加，不可改動已發佈的項目。
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _v1,
@@ -447,6 +575,9 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _v8,
     _v9,
     _v10,
+    _v11,
+    _v12,
+    _v13,
 )
 
 SCHEMA_VERSION = len(MIGRATIONS)

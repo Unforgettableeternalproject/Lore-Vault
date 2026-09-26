@@ -1,0 +1,1028 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="_ds/u-e-p-imaginary-space-design-system-6b2a32ba-0f2c-4bf4-bb53-769b0e5ad504/tokens/fonts.css">
+<link rel="stylesheet" href="_ds/u-e-p-imaginary-space-design-system-6b2a32ba-0f2c-4bf4-bb53-769b0e5ad504/tokens/colors.css">
+<link rel="stylesheet" href="_ds/u-e-p-imaginary-space-design-system-6b2a32ba-0f2c-4bf4-bb53-769b0e5ad504/tokens/zones.css">
+<link rel="stylesheet" href="_ds/u-e-p-imaginary-space-design-system-6b2a32ba-0f2c-4bf4-bb53-769b0e5ad504/tokens/typography.css">
+<link rel="stylesheet" href="_ds/u-e-p-imaginary-space-design-system-6b2a32ba-0f2c-4bf4-bb53-769b0e5ad504/tokens/motion.css">
+<link rel="stylesheet" href="_ds/u-e-p-imaginary-space-design-system-6b2a32ba-0f2c-4bf4-bb53-769b0e5ad504/tokens/space.css">
+<link rel="stylesheet" href="_ds/u-e-p-imaginary-space-design-system-6b2a32ba-0f2c-4bf4-bb53-769b0e5ad504/tokens/base.css">
+<link rel="stylesheet" href="_ds/u-e-p-imaginary-space-design-system-6b2a32ba-0f2c-4bf4-bb53-769b0e5ad504/components/components.css">
+<link rel="stylesheet" href="_ds/u-e-p-imaginary-space-design-system-6b2a32ba-0f2c-4bf4-bb53-769b0e5ad504/styles.css">
+<script src="_ds/u-e-p-imaginary-space-design-system-6b2a32ba-0f2c-4bf4-bb53-769b0e5ad504/_ds_bundle.js"></script>
+<style>
+html,body{margin:0;padding:0;background:#14151a}
+a{color:var(--zone-soft,#d5b618);text-decoration:none}
+a:hover{color:var(--uep-gold)}
+::selection{background:rgba(213,182,24,.3)}
+</style>
+</helmet>
+
+<div data-theme="{{ theme }}" data-zone="{{ zone }}" style="min-height:100vh;background:var(--bg);color:var(--ink);color-scheme:{{ theme }};font-family:var(--font-sans);font-size:14px;position:relative;display:flex;flex-direction:column">
+
+
+  <header style="position:sticky;top:0;z-index:100;height:65px;display:flex;align-items:center;gap:24px;padding:0 24px;background:color-mix(in srgb,var(--bg) 94%,transparent);backdrop-filter:blur(16px);border-bottom:1px solid var(--line)">
+    <div style="position:absolute;left:0;right:0;top:0;height:2px;background:var(--zone-soft)"></div>
+    <x-import component-from-global-scope="UEPImaginarySpaceDesignSystem_6b2a32.BrandMark" size="29" glyph="L" title="Lore Vault" subtitle="PM · 紀錄與記憶層" hint-size="200px,36px"></x-import>
+
+    <div style="position:relative">
+      <button onClick="{{ toggleSpaceMenu }}" style="display:flex;align-items:center;gap:12px;height:40px;padding:0 14px 0 6px;background:var(--zone-tint);border:1px solid var(--zone-stroke);border-radius:999px;color:var(--ink);cursor:pointer;font-family:var(--font-sans)">
+        <span style="width:30px;height:30px;border-radius:50%;background:var(--zone-main);color:#fff;display:flex;align-items:center;justify-content:center;font-family:var(--font-mono);font-size:13px">{{ sp.glyph }}</span>
+        <span style="display:flex;flex-direction:column;align-items:flex-start;line-height:1.15">
+          <span style="font-family:var(--font-mono);font-size:9px;letter-spacing:.22em;color:var(--ink-mute)">SPACE</span>
+          <span style="font-size:13px;font-weight:600">{{ sp.en }} · {{ sp.name }}</span>
+        </span>
+        <span style="font-family:var(--font-mono);font-size:11px;color:var(--ink-mute);margin-left:4px">切換 ▾</span>
+      </button>
+      <sc-if value="{{ spaceMenuOpen }}" hint-placeholder-val="{{ false }}">
+        <div style="position:absolute;top:50px;left:0;width:340px;background:var(--bg-card);border:1px solid var(--line-strong);border-radius:14px;box-shadow:0 0 0 1px rgba(213,182,24,.08),0 24px 60px rgba(0,0,0,.45);padding:8px;z-index:200">
+          <div style="padding:10px 12px 8px;font-family:var(--font-mono);font-size:10px;letter-spacing:.16em;color:var(--ink-mute)">切換領域 · 所有列表會重新載入</div>
+          <sc-for list="{{ spaces }}" as="s" hint-placeholder-count="3">
+            <button data-zone="{{ s.zone }}" onClick="{{ s.pick }}" style="width:100%;display:flex;gap:14px;align-items:center;padding:12px;background:{{ s.bg }};border:1px solid {{ s.border }};border-radius:10px;cursor:pointer;text-align:left;color:var(--ink);margin-bottom:4px;font-family:var(--font-sans)" style-hover="background:var(--zone-tint)">
+              <span style="width:36px;height:36px;flex:none;border-radius:50%;background:var(--zone-main);color:#fff;display:flex;align-items:center;justify-content:center;font-family:var(--font-mono);font-size:14px">{{ s.glyph }}</span>
+              <span style="flex:1;min-width:0">
+                <span style="display:block;font-weight:600;font-size:14px">{{ s.en }} · {{ s.name }}</span>
+                <span style="display:block;font-size:12px;color:var(--ink-mute);margin-top:2px">{{ s.desc }}</span>
+              </span>
+              <span style="font-family:var(--font-mono);font-size:10px;color:var(--ink-mute);text-align:right">{{ s.count }}</span>
+            </button>
+          </sc-for>
+        </div>
+      </sc-if>
+    </div>
+
+    <div style="flex:1"></div>
+    <button onClick="{{ goSettings }}" style="display:flex;align-items:center;gap:8px;background:none;border:none;cursor:pointer;font-family:var(--font-mono);font-size:11px;letter-spacing:.08em;color:var(--ink-mute)">
+      <span style="width:7px;height:7px;border-radius:50%;background:#34d399"></span>pm.uep.local
+    </button>
+    <sc-if value="{{ degraded }}" hint-placeholder-val="{{ false }}">
+      <button onClick="{{ goHealth }}" style="font-family:var(--font-mono);font-size:10px;letter-spacing:.14em;color:var(--uep-gold);border:1px solid rgba(213,182,24,.5);background:rgba(213,182,24,.08);padding:5px 10px;border-radius:999px;cursor:pointer">語意檢索離線</button>
+    </sc-if>
+    <x-import component-from-global-scope="UEPImaginarySpaceDesignSystem_6b2a32.Button" variant="outline" size="sm" onClick="{{ toggleTheme }}" hint-size="44px,32px">{{ themeGlyph }}</x-import>
+  </header>
+
+  <div style="display:grid;grid-template-columns:260px minmax(0,1fr);flex:1;position:relative">
+    <aside style="border-right:1px solid var(--line);padding:24px 16px;display:flex;flex-direction:column;gap:28px;position:sticky;top:65px;height:calc(100vh - 65px);box-sizing:border-box;overflow-y:auto;overflow-x:hidden;min-width:0">
+      <nav style="display:flex;flex-direction:column;gap:2px">
+        <sc-for list="{{ nav }}" as="n" hint-placeholder-count="8">
+          <button onClick="{{ n.go }}" style="display:flex;align-items:center;gap:12px;padding:9px 10px;border:none;border-left:2px solid {{ n.bar }};background:{{ n.bg }};color:{{ n.color }};cursor:pointer;text-align:left;font-family:var(--font-sans);font-size:14px" style-hover="background:var(--zone-tint)">
+            <span style="width:18px;text-align:center;font-family:var(--font-mono);font-size:13px;color:var(--zone-soft)">{{ n.glyph }}</span>
+            <span style="flex:1">{{ n.label }}</span>
+            <sc-if value="{{ n.hasBadge }}" hint-placeholder-val="{{ false }}">
+              <span style="font-family:var(--font-mono);font-size:10px;color:#f87171;border:1px solid rgba(248,113,113,.5);padding:1px 6px;border-radius:999px">{{ n.badge }}</span>
+            </sc-if>
+          </button>
+        </sc-for>
+      </nav>
+      <div style="display:flex;flex-direction:column;gap:2px">
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:0 10px 8px">
+          <span style="font-family:var(--font-mono);font-size:10px;letter-spacing:.16em;color:var(--ink-mute)">VAULTS · {{ sp.en }}</span>
+          <button onClick="{{ goVaults }}" style="background:none;border:none;color:var(--ink-mute);font-family:var(--font-mono);font-size:12px;cursor:pointer">+</button>
+        </div>
+        <sc-for list="{{ vaults }}" as="v" hint-placeholder-count="4">
+          <button onClick="{{ v.pick }}" style="min-width:0;width:100%;display:flex;justify-content:space-between;gap:8px;padding:7px 10px;border:none;border-left:2px solid {{ v.bar }};background:{{ v.bg }};color:var(--ink-soft);cursor:pointer;text-align:left;font-size:13px;font-family:var(--font-sans)" style-hover="background:var(--zone-tint);color:var(--ink)">
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ v.name }}</span>
+            <span style="font-family:var(--font-mono);font-size:10px;color:var(--ink-mute)">{{ v.notes }}</span>
+          </button>
+        </sc-for>
+      </div>
+      <div style="margin-top:auto;padding:14px;border:1px solid var(--zone-stroke);background:var(--zone-tint);border-radius:4px">
+        <div style="font-family:var(--font-mono);font-size:9px;letter-spacing:.22em;color:var(--ink-mute)">目前寫入位置</div>
+        <div style="margin-top:6px;font-size:13px;font-weight:600">{{ sp.en }} / {{ currentVaultName }}</div>
+      </div>
+    </aside>
+
+    <main style="padding:40px 56px 80px;min-width:0;position:relative">
+
+      <sc-if value="{{ isSearch }}" hint-placeholder-val="{{ true }}">
+        <div style="max-width:940px">
+          <div style="font-family:var(--font-mono);font-size:10px;letter-spacing:.22em;color:var(--zone-soft)">RECALL · {{ sp.en }} SPACE</div>
+          <h1 style="font-family:var(--font-display);font-weight:500;font-size:42px;margin:6px 0 24px;color:var(--ink-title)">檢索</h1>
+          <div style="display:flex;align-items:center;gap:12px;padding:0 18px;height:56px;background:var(--bg-card);border:1px solid var(--line-strong);border-radius:10px">
+            <span style="font-family:var(--font-mono);color:var(--zone-soft);font-size:14px">&gt;</span>
+            <input value="{{ query }}" onChange="{{ onQuery }}" style="flex:1;background:none;border:none;outline:none;color:var(--ink);font-family:var(--font-sans);font-size:17px">
+            <span style="font-family:var(--font-mono);font-size:10px;letter-spacing:.12em;color:var(--ink-mute)">{{ modeLabel }}</span>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:14px">
+            <sc-for list="{{ vaultChips }}" as="c" hint-placeholder-count="4">
+              <button onClick="{{ c.pick }}" style="padding:5px 12px;border-radius:999px;border:1px solid {{ c.border }};background:{{ c.bg }};color:{{ c.color }};font-size:12px;cursor:pointer;font-family:var(--font-sans)">{{ c.label }}</button>
+            </sc-for>
+          </div>
+
+          <sc-if value="{{ degraded }}" hint-placeholder-val="{{ false }}">
+            <div style="margin-top:24px;display:grid;grid-template-columns:auto 1fr auto;gap:16px;align-items:center;padding:14px 18px;border:1px solid rgba(213,182,24,.55);background:rgba(213,182,24,.08);border-radius:4px">
+              <span style="font-family:var(--font-mono);font-size:10px;letter-spacing:.16em;color:var(--uep-gold)">DEGRADED</span>
+              <div>
+                <div style="font-weight:600;color:var(--ink-title)">降級檢索：只有關鍵字比對</div>
+                <div style="font-size:13px;color:var(--ink-soft);margin-top:2px">語意模型 bge-m3 @ localhost:11434 無回應。以下結果沒有經過語意排序，同義詞與換句話說的筆記不會出現。</div>
+              </div>
+              <x-import component-from-global-scope="UEPImaginarySpaceDesignSystem_6b2a32.Button" variant="outline" size="sm" onClick="{{ goHealth }}" hint-size="90px,32px">查看健檢</x-import>
+            </div>
+          </sc-if>
+
+          <div style="display:flex;justify-content:space-between;align-items:baseline;margin:28px 0 8px;padding-bottom:10px;border-bottom:1px solid var(--line)">
+            <span style="font-family:var(--font-mono);font-size:10px;letter-spacing:.16em;color:var(--ink-mute)">{{ resultCountLabel }}</span>
+            <span style="font-family:var(--font-mono);font-size:10px;letter-spacing:.12em;color:var(--ink-mute)">只列標題與摘要 · 點開看全文</span>
+          </div>
+
+          <sc-for list="{{ results }}" as="r" hint-placeholder-count="5">
+            <button onClick="{{ r.open }}" style="width:100%;display:grid;grid-template-columns:88px minmax(0,1fr) auto;gap:16px;padding:18px 14px;border:none;border-bottom:1px solid var(--line);border-left:2px solid transparent;background:none;color:var(--ink);text-align:left;cursor:pointer;font-family:var(--font-sans)" style-hover="background:var(--zone-tint);border-left-color:var(--zone-soft)">
+              <div style="display:flex;flex-direction:column;gap:6px">
+                <span style="font-family:var(--font-mono);font-size:10px;letter-spacing:.14em;color:{{ r.typeColor }}">{{ r.typeLabel }}</span>
+                <span style="font-family:var(--font-mono);font-size:11px;color:var(--ink-mute)">{{ r.loc }}</span>
+              </div>
+              <div style="min-width:0">
+                <div style="font-family:var(--font-serif-tc);font-size:17px;font-weight:600;color:var(--ink-title);line-height:1.5">{{ r.title }}</div>
+                <div style="display:flex;gap:10px;margin-top:6px;align-items:baseline">
+                  <span style="flex:none;font-family:var(--font-mono);font-size:9px;letter-spacing:.12em;padding:2px 6px;border:1px solid {{ r.srcBorder }};color:{{ r.srcColor }};border-radius:3px">{{ r.srcLabel }}</span>
+                  <span style="font-family:var(--font-serif-tc);font-size:14px;line-height:1.8;color:var(--ink-soft);text-wrap:pretty">{{ r.summary }}</span>
+                </div>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end;text-align:right">
+                <span style="font-size:12px;color:var(--ink-soft)">{{ r.vault }}</span>
+                <span style="font-family:var(--font-mono);font-size:11px;color:var(--ink-mute)">{{ r.updated }}</span>
+                <span style="font-family:var(--font-mono);font-size:10px;color:{{ r.matchColor }}">{{ r.match }}</span>
+              </div>
+            </button>
+          </sc-for>
+
+          <div style="margin-top:20px;display:flex;align-items:center;gap:16px;padding:14px 18px;border:1px dashed var(--line-strong);border-radius:4px">
+            <span style="font-family:var(--font-mono);font-size:10px;letter-spacing:.16em;color:var(--uep-gold)">TRUNCATED</span>
+            <span style="flex:1;font-size:13px;color:var(--ink-soft)">已達字數預算 2,000 字（用掉 1,962）。另有 <strong style="color:var(--ink-title)">{{ truncated }} 筆</strong>結果未列出。</span>
+            <x-import component-from-global-scope="UEPImaginarySpaceDesignSystem_6b2a32.Button" variant="outline" size="sm" hint-size="110px,32px">載入其餘結果</x-import>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isNotes }}" hint-placeholder-val="{{ false }}">
+        <div style="max-width:1100px">
+          <div style="display:flex;justify-content:space-between;align-items:flex-end;gap:24px">
+            <div>
+              <div style="font-family:var(--font-mono);font-size:10px;letter-spacing:.22em;color:var(--zone-soft)">NOTES · {{ sp.en }} / {{ currentVaultName }}</div>
+              <h1 style="font-family:var(--font-display);font-weight:500;font-size:42px;margin:6px 0 0;color:var(--ink-title)">筆記</h1>
+            </div>
+            <x-import component-from-global-scope="UEPImaginarySpaceDesignSystem_6b2a32.Button" variant="gold" onClick="{{ goNew }}" hint-size="110px,40px">+ 新增筆記</x-import>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:24px;margin:28px 0 12px;align-items:center">
+            <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+              <span style="font-family:var(--font-mono);font-size:10px;letter-spacing:.16em;color:var(--ink-mute);margin-right:4px">TAGS</span>
+              <sc-for list="{{ tagChips }}" as="t" hint-placeholder-count="5">
+                <button onClick="{{ t.pick }}" style="padding:4px 10px;border-radius:999px;border:1px solid {{ t.border }};background:{{ t.bg }};color:{{ t.color }};font-family:var(--font-mono);font-size:11px;cursor:pointer">#{{ t.label }}</button>
+              </sc-for>
+            </div>
+            <div style="display:flex;gap:6px;align-items:center">
+              <span style="font-family:var(--font-mono);font-size:10px;letter-spacing:.16em;color:var(--ink-mute);margin-right:4px">TIME</span>
+              <sc-for list="{{ timeChips }}" as="t" hint-placeholder-count="3">
+                <button onClick="{{ t.pick }}" style="padding:4px 10px;border-radius:999px;border:1px solid {{ t.border }};background:{{ t.bg }};color:{{ t.color }};font-size:12px;cursor:pointer;font-family:var(--font-sans)">{{ t.label }}</button>
+              </sc-for>
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:minmax(0,1fr) 140px 130px 110px;gap:16px;padding:10px 14px;border-bottom:1px solid var(--line-strong);font-family:var(--font-mono);font-size:10px;letter-spacing:.14em;color:var(--ink-mute)">
+            <span>標題 / 摘要</span><span>標籤</span><span>寫入者</span><span style="text-align:right">更新</span>
+          </div>
+          <sc-for list="{{ notesList }}" as="n" hint-placeholder-count="6">
+            <button onClick="{{ n.open }}" style="width:100%;display:grid;grid-template-columns:minmax(0,1fr) 140px 130px 110px;gap:16px;padding:14px;border:none;border-bottom:1px solid var(--line);background:none;color:var(--ink);text-align:left;cursor:pointer;align-items:start;font-family:var(--font-sans)" style-hover="background:var(--zone-tint)">
+              <div style="min-width:0">
+                <div style="font-family:var(--font-serif-tc);font-weight:600;font-size:15px;color:var(--ink-title)">{{ n.title }}</div>
+                <div style="display:flex;gap:8px;margin-top:4px;align-items:baseline">
+                  <span style="flex:none;font-family:var(--font-mono);font-size:9px;letter-spacing:.12em;padding:1px 5px;border:1px solid {{ n.srcBorder }};color:{{ n.srcColor }};border-radius:3px">{{ n.srcLabel }}</span>
+                  <span style="font-size:13px;color:var(--ink-soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ n.summary }}</span>
+                </div>
+              </div>
+              <span style="font-family:var(--font-mono);font-size:11px;color:var(--ink-mute)">{{ n.tagText }}</span>
+              <span style="font-family:var(--font-mono);font-size:11px;color:{{ n.authorColor }}">{{ n.author }}</span>
+              <span style="font-family:var(--font-mono);font-size:11px;color:var(--ink-mute);text-align:right">{{ n.updated }}</span>
+            </button>
+          </sc-for>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:20px;font-family:var(--font-mono);font-size:11px;color:var(--ink-mute)">
+            <span>1–{{ notesShown }} / {{ notesTotal }}</span>
+            <div style="display:flex;gap:6px">
+              <x-import component-from-global-scope="UEPImaginarySpaceDesignSystem_6b2a32.Button" variant="terminal" disabled="{{ true }}" hint-size="60px,30px">← 上頁</x-import>
+              <x-import component-from-global-scope="UEPImaginarySpaceDesignSystem_6b2a32.Button" variant="terminal" hint-size="60px,30px">下頁 →</x-import>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isNote }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;flex-wrap:wrap;gap:48px">
+          <article style="flex:1 1 520px;max-width:760px;min-width:0">
+            <div style="font-family:var(--font-mono);font-size:10px;letter-spacing:.22em;color:var(--ink-mute);display:flex;gap:8px;align-items:center">
+              <button onClick="{{ goNotes }}" style="background:none;border:none;padding:0;color:var(--zone-soft);font:inherit;letter-spacing:inherit;cursor:pointer">{{ sp.en }} / {{ note.vault }}</button><span>/</span><span>NOTE · v{{ note.version }}</span>
+            </div>
+            <h1 style="font-family:var(--font-serif-tc);font-weight:600;font-size:34px;line-height:1.4;margin:10px 0 12px;color:var(--ink-title)">{{ note.title }}</h1>
+            <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:center;font-family:var(--font-mono);font-size:11px;color:var(--ink-mute)">
+              <span>寫入 <span style="color:{{ note.authorColor }}">{{ note.author }}</span></span>
+              <span>更新 {{ note.updated }}</span>
+              <span>{{ note.tagText }}</span>
+            </div>
+
+            <sc-if value="{{ noteRead }}" hint-placeholder-val="{{ true }}">
+              <div>
+                <div style="margin:24px 0;padding:16px 20px;background:var(--bg-soft);border:1px solid var(--line)">
+                  <div style="display:flex;gap:10px;align-items:center;margin-bottom:6px">
+                    <span style="font-family:var(--font-mono);font-size:9px;letter-spacing:.12em;padding:2px 6px;border:1px solid {{ note.srcBorder }};color:{{ note.srcColor }};border-radius:3px">{{ note.srcLabel }}</span>
+                    <span style="font-family:var(--font-mono);font-size:10px;color:var(--ink-mute)">{{ note.srcNote }}</span>
+                  </div>
+                  <div style="font-family:var(--font-serif-tc);font-size:15px;line-height:1.9;color:var(--ink-soft)">{{ note.summary }}</div>
+                </div>
+
+                <sc-if value="{{ isRich }}" hint-placeholder-val="{{ true }}">
+                  <div style="font-family:var(--font-serif-tc);font-size:17px;line-height:2.08;color:var(--ink)">
+                    <p style="margin:0 0 20px">PreToolUse hook 在 agent 編輯檔案前觸發，從記憶層撈出與該檔案錨點相關的 concept 注入上下文。注入量必須受控，否則會擠掉使用者真正的指示。本筆記取代了 <a href="#" onClick="{{ openOld }}" style="border-bottom:1px solid var(--zone-stroke)">[[注入預算 400 字]]</a> 的做法。</p>
+                    <h2 style="font-family:var(--font-serif-tc);font-size:21px;font-weight:600;margin:32px 0 12px;color:var(--ink-title)">預算規則</h2>
+                    <table style="width:100%;border-collapse:collapse;font-family:var(--font-sans);font-size:14px;line-height:1.6;margin:0 0 20px">
+                      <thead><tr>
+                        <th style="text-align:left;padding:8px 12px;border-bottom:1px solid var(--line-strong);font-family:var(--font-mono);font-size:10px;letter-spacing:.14em;color:var(--ink-mute);font-weight:400">HOOK</th>
+                        <th style="text-align:left;padding:8px 12px;border-bottom:1px solid var(--line-strong);font-family:var(--font-mono);font-size:10px;letter-spacing:.14em;color:var(--ink-mute);font-weight:400">上限</th>
+                        <th style="text-align:left;padding:8px 12px;border-bottom:1px solid var(--line-strong);font-family:var(--font-mono);font-size:10px;letter-spacing:.14em;color:var(--ink-mute);font-weight:400">超出時</th>
+                      </tr></thead>
+                      <tbody>
+                        <tr><td style="padding:10px 12px;border-bottom:1px solid var(--line);font-family:var(--font-mono);font-size:13px">SessionStart</td><td style="padding:10px 12px;border-bottom:1px solid var(--line)">1,200 字</td><td style="padding:10px 12px;border-bottom:1px solid var(--line)">只保留 repo 範圍的 concept</td></tr>
+                        <tr><td style="padding:10px 12px;border-bottom:1px solid var(--line);font-family:var(--font-mono);font-size:13px">PreToolUse</td><td style="padding:10px 12px;border-bottom:1px solid var(--line)">600 字</td><td style="padding:10px 12px;border-bottom:1px solid var(--line)">依校準分數由低到高捨棄</td></tr>
+                        <tr><td style="padding:10px 12px;border-bottom:1px solid var(--line);font-family:var(--font-mono);font-size:13px">UserPromptSubmit</td><td style="padding:10px 12px;border-bottom:1px solid var(--line)">400 字</td><td style="padding:10px 12px;border-bottom:1px solid var(--line)">不注入，只記一行 log</td></tr>
+                      </tbody>
+                    </table>
+                    <p style="margin:0 0 16px">截斷一律在結尾標註剩餘筆數，讓 agent 知道還有東西沒看到：</p>
+                    <pre style="margin:0 0 20px;padding:16px 18px;background:var(--bg-sunken);border:1px solid var(--line);border-radius:4px;font-family:var(--font-mono);font-size:13px;line-height:1.7;color:var(--ink);overflow:auto"><span style="color:var(--ink-mute)"># hook_pretooluse.py</span>
+budget = BUDGETS["PreToolUse"]  <span style="color:var(--ink-mute)"># 600</span>
+picked, dropped = fit(concepts, budget, key=lambda c: -c.calibration)
+if dropped:
+    out.append(f"…另有 {len(dropped)} 則 concept 因預算未注入")</pre>
+                    <p style="margin:0">相關：<a href="#" style="border-bottom:1px solid var(--zone-stroke)">[[MCP recall 回傳契約]]</a>、<a href="#" style="border-bottom:1px solid var(--zone-stroke)">[[hook 輸出必須是單行 JSON]]</a>。</p>
+                  </div>
+                </sc-if>
+                <sc-if value="{{ notRich }}" hint-placeholder-val="{{ false }}">
+                  <div style="font-family:var(--font-serif-tc);font-size:17px;line-height:2.08;color:var(--ink)">
+                    <p style="margin:0 0 20px">{{ note.summary }}</p>
+                    <p style="margin:0;color:var(--ink-mute)">（正文示意）</p>
+                  </div>
+                </sc-if>
+                <div style="display:flex;gap:10px;margin-top:40px;padding-top:20px;border-top:1px solid var(--line)">
+                  <x-import component-from-global-scope="UEPImaginarySpaceDesignSystem_6b2a32.Button" variant="zone" onClick="{{ startEdit }}" hint-size="80px,36px">編輯</x-import>
+                  <x-import component-from-global-scope="UEPImaginarySpaceDesignSystem_6b2a32.Button" variant="outline" hint-size="120px,36px">寫一則更正</x-import>
+                  <div style="flex:1"></div>
+                  <x-import component-from-global-scope="UEPImaginarySpaceDesignSystem_6b2a32.Button" variant="outline" onClick="{{ goMaint }}" hint-size="80px,36px">刪除…</x-import>
+                </div>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ noteEdit }}" hint-placeholder-val="{{ false }}">
+              <div style="margin-top:24px">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+                  <span style="font-family:var(--font-mono);font-size:10px;letter-spacing:.16em;color:var(--ink-mute)">MARKDOWN · 基於 v{{ note.version }} 編輯</span>
+                  <span style="font-family:var(--font-mono);font-size:10px;color:var(--ink-mute)">[[標題]] 建立互連</span>
+                </div>
+                <textarea style="width:100%;min-height:360px;box-sizing:border-box;padding:18px;background:var(--bg-sunken);border:1px solid var(--line-strong);border-radius:8px;color:var(--ink);font-family:var(--font-mono);font-size:13px;line-height:1.8;resize:vertical;outline:none">{{ editText }}</textarea>
+                <div style="display:flex;gap:10px;margin-top:14px">
+                  <x-import component-from-global-scope="UEPImaginarySpaceDesignSystem_6b2a32.Button" variant="gold" onClick="{{ saveEdit }}" hint-size="80px,40px">儲存</x-import>
+                  <x-import component-from-global-scope="UEPImaginarySpaceDesignSystem_6b2a32.Button" variant="outline" onClick="{{ cancelEdit }}" hint-size="80px,40px">取消</x-import>
+                </div>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ noteConflict }}" hint-placeholder-val="{{ false }}">
+              <div style="margin-top:24px">
+                <div style="padding:16px 20px;border:1px solid rgba(248,113,113,.5);background:rgba(248,113,113,.07);border-radius:4px">
+                  <div style="font-family:var(--font-mono);font-size:10px;letter-spacing:.16em;color:#f87171">VERSION CONFLICT · 未儲存</div>
+                  <div style="margin-top:6px;font-weight:600;color:var(--ink-title)">你基於 v4 編輯，但 codex 在 3 分鐘前已寫入 v5。</div>
+                  <div style="font-size:13px;color:var(--ink-soft);margin-top:2px">你的修改仍在這裡。選一個版本作為 v6，或合併後再存。</div>
+                </div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px">
+                  <div style="border:1px solid var(--line-strong);border-radius:4px;overflow:hidden">
+                    <div style="padding:10px 14px;border-bottom:1px solid var(--line);font-family:var(--font-mono);font-size:10px;letter-spacing:.14em;color:var(--ink-mute);display:flex;justify-content:space-between"><span>目前版本 v5</span><span>codex · 3 分鐘前</span></div>
+                    <pre style="margin:0;padding:14px;font-family:var(--font-mono);font-size:12px;line-height:1.8;white-space:pre-wrap;color:var(--ink-soft)">| PreToolUse | 600 字 | 依校準分數由低到高捨棄 |
+<span style="background:rgba(52,211,153,.14);color:var(--ink)">| PostToolUse | 300 字 | 僅在測試失敗時注入 |</span>
+
+截斷一律在結尾標註剩餘筆數。</pre>
+                  </div>
+                  <div style="border:1px solid var(--zone-stroke);border-radius:4px;overflow:hidden">
+                    <div style="padding:10px 14px;border-bottom:1px solid var(--line);font-family:var(--font-mono);font-size:10px;letter-spacing:.14em;color:var(--zone-soft);display:flex;justify-content:space-between"><span>你的修改</span><span>基於 v4</span></div>
+                    <pre style="margin:0;padding:14px;font-family:var(--font-mono);font-size:12px;line-height:1.8;white-space:pre-wrap;color:var(--ink-soft)"><span style="background:rgba(213,182,24,.16);color:var(--ink)">| PreToolUse | 800 字 | 依校準分數由低到高捨棄 |</span>
+
+截斷一律在結尾標註剩餘筆數<span style="background:rgba(213,182,24,.16);color:var(--ink)">，並附上被捨棄 concept 的 id</span>。</pre>
+                  </div>
+                </div>
+                <div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:16px">
+                  <x-import component-from-global-scope="UEPImaginarySpaceDesignSystem_6b2a32.Button" variant="gold" onClick="{{ resolveMerge }}" hint-size="140px,40px">在 v5 上合併我的修改</x-import>
+                  <x-import component-from-global-scope="UEPImaginarySpaceDesignSystem_6b2a32.Button" variant="outline" onClick="{{ resolveMine }}" hint-size="120px,40px">以我的版本覆寫</x-import>
+                  <x-import component-from-global-scope="UEPImaginarySpaceDesignSystem_6b2a32.Button" variant="outline" onClick="{{ resolveTheirs }}" hint-size="120px,40px">放棄我的修改</x-import>
+                </div>
+              </div>
+            </sc-if>
+          </article>
+
+          <aside style="flex:1 1 220px;max-width:300px;display:flex;flex-direction:column;gap:28px;padding-top:28px">
+            <div>
+              <div style="font-family:var(--font-mono);font-size:10px;letter-spacing:.16em;color:var(--ink-mute);margin-bottom:10px">更正鏈</div>
+              <div style="display:flex;flex-direction:column;border-left:1px solid var(--line-strong);padding-left:14px;gap:14px">
+                <div>
+                  <div style="font-family:var(--font-mono);font-size:10px;color:var(--ink-mute)">被取代</div>
+                  <div style="font-size:13px;color:var(--ink-soft);margin-top:2px">{{ note.supersededBy }}</div>
+                </div>
+                <div>
+                  <div style="font-family:var(--font-mono);font-size:10px;color:var(--zone-soft)">此筆記</div>
+                  <div style="font-size:13px;color:var(--ink-title);margin-top:2px">{{ note.title }}</div>
+                </div>
+                <div>
+                  <div style="font-family:var(--font-mono);font-size:10px;color:var(--ink-mute)">取代了</div>
+                  <div style="font-size:13px;color:var(--ink-mute);margin-top:2px;text-decoration:line-through">{{ note.supersedes }}</div>
+                </div>
+              </div>
+            </div>
+            <div>
+              <div style="font-family:var(--font-mono);font-size:10px;letter-spacing:.16em;color:var(--ink-mute);margin-bottom:10px">反向連結 · 3</div>
+              <div style="display:flex;flex-direction:column;gap:8px;font-size:13px">
+                <a href="#">MCP recall 回傳契約</a>
+                <a href="#">agent_memory_spike 遷入清單</a>
+                <a href="#">9/21 交接：hook 重構</a>
+              </div>
+            </div>
+            <div>
+              <div style="font-family:var(--font-mono);font-size:10px;letter-spacing:.16em;color:var(--ink-mute);margin-bottom:10px">版本</div>
+              <div style="display:flex;flex-direction:column;gap:6px;font-family:var(--font-mono);font-size:11px;color:var(--ink-mute)">
+                <span>v4 · 人 · 2 小時前</span><span>v3 · claude-code · 9/24</span><span>v2 · claude-code · 9/22</span><span>v1 · codex · 9/21</span>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isNew }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;flex-wrap:wrap;gap:40px">
+          <div style="flex:1 1 480px;max-width:680px;min-width:0">
+            <div style="font-family:var(--font-mono);font-size:10px;letter-spacing:.22em;color:var(--zone-soft)">NEW NOTE</div>
+            <h1 style="font-family:var(--font-display);font-weight:500;font-size:42px;margin:6px 0 20px;color:var(--ink-title)">新增筆記</h1>
+            <div style="display:flex;align-items:center;gap:14px;padding:14px 16px;background:var(--zone-tint);border:1px solid var(--zone-stroke);border-radius:4px;margin-bottom:20px">
+              <span style="width:34px;height:34px;flex:none;border-radius:50%;background:var(--zone-main);color:#fff;display:flex;align-items:center;justify-content:center;font-family:var(--font-mono);font-size:14px">{{ sp.glyph }}</span>
+              <div style="flex:1">
+                <div style="font-family:var(--font-mono);font-size:9px;letter-spacing:.22em;color:var(--ink-mute)">將寫入</div>
+                <div style="font-weight:600;font-size:15px;color:var(--ink-title)">{{ sp.en }} · {{ sp.name }} / {{ currentVaultName }}</div>
+              </div>
+              <button onClick="{{ toggleSpaceMenu }}" style="background:none;border:none;color:var(--ink-soft);font-size:12px;cursor:pointer;font-family:var(--font-sans)">換位置</button>
+            </div>
+            <input value="PreToolUse 注入預算調整為 800 字" style="width:100%;box-sizing:border-box;padding:12px 14px;background:var(--bg-card);border:1px solid var(--line-strong);border-radius:8px;color:var(--ink-title);font-family:var(--font-serif-tc);font-size:20px;font-weight:600;outline:none">
+            <textarea style="margin-top:12px;width:100%;min-height:260px;box-sizing:border-box;padding:16px;background:var(--bg-sunken);border:1px solid var(--line-strong);border-radius:8px;color:var(--ink);font-family:var(--font-mono);font-size:13px;line-height:1.8;outline:none;resize:vertical">實測 600 字時常把 anchor 相符的 concept 擠掉，改成 800 字。
+
+相關：[[PreToolUse hook 注入的字數預算]]</textarea>
+            <div style="margin-top:12px;font-family:var(--font-mono);font-size:10px;letter-spacing:.12em;color:var(--ink-mute)">摘要會在儲存後於背景產生；產生前以首段頂替</div>
+          </div>
+          <div style="flex:1 1 260px;max-width:340px;padding-top:28px">
+            <div style="border:1px solid rgba(213,182,24,.5);border-radius:4px;overflow:hidden">
+              <div style="padding:14px 16px;background:rgba(213,182,24,.08);border-bottom:1px solid rgba(213,182,24,.3)">
+                <div style="font-family:var(--font-mono);font-size:10px;letter-spacing:.16em;color:var(--uep-gold)">疑似重複 · 3</div>
+                <div style="font-size:13px;color:var(--ink-soft);margin-top:4px">改寫既有筆記，或照樣新增。</div>
+              </div>
+              <sc-for list="{{ dupes }}" as="d" hint-placeholder-count="3">
+                <div style="padding:14px 16px;border-bottom:1px solid var(--line)">
+                  <div style="display:flex;justify-content:space-between;gap:8px">
+                    <span style="font-family:var(--font-serif-tc);font-weight:600;font-size:14px;color:var(--ink-title)">{{ d.title }}</span>
+                    <span style="font-family:var(--font-mono);font-size:11px;color:var(--uep-gold)">{{ d.sim }}</span>
+                  </div>
+                  <div style="font-size:12px;color:var(--ink-mute);margin-top:4px;font-family:var(--font-mono)">{{ d.meta }}</div>
+                  <button onClick="{{ d.open }}" style="margin-top:8px;background:none;border:none;padding:0;color:var(--zone-soft);font-size:12px;cursor:pointer;font-family:var(--font-sans)">改寫這則 →</button>
+                </div>
+              </sc-for>
+              <div style="padding:14px 16px">
+                <x-import component-from-global-scope="UEPImaginarySpaceDesignSystem_6b2a32.Button" variant="outline" onClick="{{ createAnyway }}" hint-size="100px,36px">照樣新增</x-import>
+              </div>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isDocs }}" hint-placeholder-val="{{ false }}">
+        <div style="max-width:1100px">
+          <div style="font-family:var(--font-mono);font-size:10px;letter-spacing:.22em;color:var(--zone-soft)">DOCUMENTS · {{ sp.en }} / {{ currentVaultName }}</div>
+          <h1 style="font-family:var(--font-display);font-weight:500;font-size:42px;margin:6px 0 24px;color:var(--ink-title)">文件</h1>
+          <div style="padding:28px;border:1px dashed var(--zone-stroke);border-radius:8px;display:flex;align-items:center;gap:20px;background:var(--bg-soft)">
+            <span style="font-family:var(--font-mono);font-size:26px;color:var(--zone-soft)">+</span>
+            <div style="flex:1">
+              <div style="font-weight:600;color:var(--ink-title)">把檔案拖到這裡</div>
+              <div style="font-family:var(--font-mono);font-size:11px;color:var(--ink-mute);margin-top:4px">md · txt · pdf · docx · pptx · json · yaml · toml　同名檔案會成為新版本</div>
+            </div>
+            <x-import component-from-global-scope="UEPImaginarySpaceDesignSystem_6b2a32.Button" variant="outline" size="sm" hint-size="90px,32px">選擇檔案</x-import>
+          </div>
+          <div style="display:grid;grid-template-columns:minmax(0,1fr) 70px 80px 240px 110px;gap:16px;padding:10px 14px;margin-top:28px;border-bottom:1px solid var(--line-strong);font-family:var(--font-mono);font-size:10px;letter-spacing:.14em;color:var(--ink-mute)">
+            <span>檔名</span><span>類型</span><span>大小</span><span>抽取狀態</span><span style="text-align:right">版本</span>
+          </div>
+          <sc-for list="{{ docs }}" as="d" hint-placeholder-count="6">
+            <div style="display:grid;grid-template-columns:minmax(0,1fr) 70px 80px 240px 110px;gap:16px;padding:14px;border-bottom:1px solid var(--line);align-items:center">
+              <button onClick="{{ d.open }}" style="background:none;border:none;padding:0;text-align:left;cursor:pointer;color:var(--ink-title);font-size:14px;font-family:var(--font-sans);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" style-hover="color:var(--zone-soft)">{{ d.name }}</button>
+              <span style="font-family:var(--font-mono);font-size:11px;color:var(--ink-mute);text-transform:uppercase">{{ d.type }}</span>
+              <span style="font-family:var(--font-mono);font-size:11px;color:var(--ink-mute)">{{ d.size }}</span>
+              <div style="display:flex;flex-direction:column;gap:4px">
+                <div style="display:flex;align-items:center;gap:8px">
+                  <span style="width:7px;height:7px;border-radius:50%;background:{{ d.statusColor }}"></span>
+                  <span style="font-size:13px;color:{{ d.statusColor }}">{{ d.statusLabel }}</span>
+                  <sc-if value="{{ d.failed }}" hint-placeholder-val="{{ false }}">
+                    <button style="margin-left:auto;background:none;border:1px solid var(--line-strong);color:var(--ink-soft);font-size:11px;padding:2px 8px;border-radius:999px;cursor:pointer;font-family:var(--font-sans)">重試</button>
+                  </sc-if>
+                </div>
+                <span style="font-size:12px;color:var(--ink-mute)">{{ d.detail }}</span>
+              </div>
+              <span style="font-family:var(--font-mono);font-size:11px;color:var(--ink-mute);text-align:right">{{ d.version }}</span>
+            </div>
+          </sc-for>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isDoc }}" hint-placeholder-val="{{ false }}">
+        <div>
+          <div style="font-family:var(--font-mono);font-size:10px;letter-spacing:.22em;color:var(--ink-mute);display:flex;gap:8px">
+            <button onClick="{{ goDocs }}" style="background:none;border:none;padding:0;color:var(--zone-soft);font:inherit;letter-spacing:inherit;cursor:pointer">{{ sp.en }} / agent_memory_spike / 文件</button><span>/</span><span>PPTX · v1 · 14 投影片</span>
+          </div>
+          <h1 style="font-family:var(--font-display);font-weight:500;font-size:42px;margin:6px 0 24px;color:var(--ink-title)">hook-flow.pptx</h1>
+          <div style="display:grid;grid-template-columns:220px minmax(0,760px);gap:40px">
+            <div style="display:flex;flex-direction:column;border-left:1px solid var(--line)">
+              <sc-for list="{{ slides }}" as="s" hint-placeholder-count="8">
+                <button onClick="{{ s.pick }}" style="display:flex;gap:10px;padding:7px 12px;margin-left:-1px;border:none;border-left:2px solid {{ s.bar }};background:{{ s.bg }};color:{{ s.color }};cursor:pointer;text-align:left;font-size:13px;font-family:var(--font-sans)" style-hover="background:var(--zone-tint)">
+                  <span style="font-family:var(--font-mono);font-size:11px;color:var(--ink-mute);width:20px">{{ s.n }}</span><span>{{ s.title }}</span>
+                </button>
+              </sc-for>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:20px">
+              <div style="display:flex;gap:12px;align-items:center;padding:10px 14px;border:1px solid var(--zone-stroke);background:var(--zone-tint);border-radius:4px;font-size:13px">
+                <span style="font-family:var(--font-mono);font-size:10px;letter-spacing:.14em;color:var(--zone-soft)">FROM RECALL</span>
+                <span style="color:var(--ink-soft)">從檢索「{{ query }}」跳到投影片 6</span>
+              </div>
+              <sc-for list="{{ slideBlocks }}" as="b" hint-placeholder-count="3">
+                <section style="padding:22px 24px;border:1px solid {{ b.border }};background:{{ b.bg }}">
+                  <div style="font-family:var(--font-mono);font-size:10px;letter-spacing:.16em;color:var(--ink-mute)">SLIDE {{ b.n }}</div>
+                  <h3 style="font-family:var(--font-serif-tc);font-size:19px;font-weight:600;margin:8px 0 10px;color:var(--ink-title)">{{ b.title }}</h3>
+                  <p style="margin:0;font-family:var(--font-serif-tc);font-size:15px;line-height:1.95;color:var(--ink-soft);text-wrap:pretty">{{ b.text }}</p>
+                </section>
+              </sc-for>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isVaults }}" hint-placeholder-val="{{ false }}">
+        <div style="max-width:1100px">
+          <div style="display:flex;justify-content:space-between;align-items:flex-end">
+            <div>
+              <div style="font-family:var(--font-mono);font-size:10px;letter-spacing:.22em;color:var(--zone-soft)">VAULTS · {{ sp.en }} SPACE</div>
+              <h1 style="font-family:var(--font-display);font-weight:500;font-size:42px;margin:6px 0 0;color:var(--ink-title)">Vault</h1>
+            </div>
+            <x-import component-from-global-scope="UEPImaginarySpaceDesignSystem_6b2a32.Button" variant="gold" onClick="{{ toggleCreate }}" hint-size="110px,40px">+ 建立 vault</x-import>
+          </div>
+          <sc-if value="{{ creating }}" hint-placeholder-val="{{ false }}">
+            <div style="margin-top:20px;display:grid;grid-template-columns:1fr 1fr auto;gap:12px;align-items:end;padding:18px;border:1px solid var(--zone-stroke);background:var(--zone-tint);border-radius:4px">
+              <label style="display:flex;flex-direction:column;gap:6px"><span style="font-family:var(--font-mono);font-size:10px;letter-spacing:.14em;color:var(--ink-mute)">KEY</span><input placeholder="github.com/org/repo 或主題名" style="padding:10px 12px;background:var(--bg-sunken);border:1px solid var(--line-strong);border-radius:8px;color:var(--ink);font-family:var(--font-mono);font-size:13px;outline:none"></label>
+              <label style="display:flex;flex-direction:column;gap:6px"><span style="font-family:var(--font-mono);font-size:10px;letter-spacing:.14em;color:var(--ink-mute)">顯示名稱</span><input style="padding:10px 12px;background:var(--bg-sunken);border:1px solid var(--line-strong);border-radius:8px;color:var(--ink);font-size:14px;outline:none"></label>
+              <x-import component-from-global-scope="UEPImaginarySpaceDesignSystem_6b2a32.Button" variant="zone" hint-size="80px,40px">建立於 {{ sp.en }}</x-import>
+            </div>
+          </sc-if>
+          <div style="display:grid;grid-template-columns:minmax(0,1.6fr) 70px 70px 110px 120px 60px;gap:16px;padding:10px 14px;margin-top:28px;border-bottom:1px solid var(--line-strong);font-family:var(--font-mono);font-size:10px;letter-spacing:.14em;color:var(--ink-mute)">
+            <span>名稱 / KEY</span><span style="text-align:right">筆記</span><span style="text-align:right">文件</span><span>最近更新</span><span>來源</span><span></span>
+          </div>
+          <sc-for list="{{ vaults }}" as="v" hint-placeholder-count="4">
+            <div style="display:grid;grid-template-columns:minmax(0,1.6fr) 70px 70px 110px 120px 60px;gap:16px;padding:14px;border-bottom:1px solid var(--line);align-items:center" style-hover="background:var(--zone-tint)">
+              <div style="min-width:0">
+                <div style="font-weight:600;color:var(--ink-title)">{{ v.name }}</div>
+                <div style="font-family:var(--font-mono);font-size:11px;color:var(--ink-mute);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ v.key }}</div>
+              </div>
+              <span style="font-family:var(--font-mono);font-size:12px;text-align:right">{{ v.notes }}</span>
+              <span style="font-family:var(--font-mono);font-size:12px;text-align:right">{{ v.docs }}</span>
+              <span style="font-family:var(--font-mono);font-size:11px;color:var(--ink-mute)">{{ v.updated }}</span>
+              <span style="font-size:12px;color:var(--ink-soft)">{{ v.source }}</span>
+              <button onClick="{{ v.maint }}" style="background:none;border:none;color:var(--ink-mute);font-size:12px;cursor:pointer;font-family:var(--font-sans)" style-hover="color:var(--zone-soft)">維護 →</button>
+            </div>
+          </sc-for>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isMaint }}" hint-placeholder-val="{{ false }}">
+        <div style="max-width:900px">
+          <div style="font-family:var(--font-mono);font-size:10px;letter-spacing:.22em;color:var(--zone-soft)">MAINTENANCE · {{ sp.en }} / {{ maintVault.key }}</div>
+          <h1 style="font-family:var(--font-display);font-weight:500;font-size:42px;margin:6px 0 8px;color:var(--ink-title)">{{ maintVault.name }}</h1>
+          <div style="font-family:var(--font-mono);font-size:11px;color:var(--ink-mute)">{{ maintVault.notes }} 筆記 · {{ maintVault.docs }} 文件 · {{ maintVault.source }}</div>
+
+          <section style="margin-top:40px">
+            <h2 style="font-family:var(--font-serif-tc);font-size:20px;font-weight:600;margin:0 0 4px;color:var(--ink-title)">別名與重新導向</h2>
+            <p style="margin:0 0 16px;font-size:13px;color:var(--ink-mute)">repo 改名後，把新 key 導向這個 vault。舊 key 保留為別名，agent 用任一名稱都能寫入同一處。</p>
+            <div style="border:1px solid var(--line)">
+              <div style="display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--line)">
+                <span style="font-family:var(--font-mono);font-size:9px;letter-spacing:.14em;color:var(--zone-soft);width:60px">主 KEY</span>
+                <span style="font-family:var(--font-mono);font-size:13px;color:var(--ink-title)">{{ maintVault.key }}</span>
+              </div>
+              <sc-for list="{{ aliases }}" as="a" hint-placeholder-count="2">
+                <div style="display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--line)">
+                  <span style="font-family:var(--font-mono);font-size:9px;letter-spacing:.14em;color:var(--ink-mute);width:60px">別名</span>
+                  <span style="font-family:var(--font-mono);font-size:13px;color:var(--ink-soft);flex:1">{{ a.key }} <span style="color:var(--ink-mute)">→ 本 vault</span></span>
+                  <span style="font-family:var(--font-mono);font-size:10px;color:var(--ink-mute)">{{ a.note }}</span>
+                  <button style="background:none;border:none;color:var(--ink-mute);cursor:pointer;font-family:var(--font-mono)">✕</button>
+                </div>
+              </sc-for>
+              <div style="display:flex;gap:10px;padding:12px 16px;background:var(--bg-soft)">
+                <input placeholder="新 key，例如 github.com/uep/lore-vault-v2" style="flex:1;padding:9px 12px;background:var(--bg-sunken);border:1px solid var(--line-strong);border-radius:8px;color:var(--ink);font-family:var(--font-mono);font-size:13px;outline:none">
+                <x-import component-from-global-scope="UEPImaginarySpaceDesignSystem_6b2a32.Button" variant="zone" hint-size="100px,38px">導向此 vault</x-import>
+              </div>
+            </div>
+            <div style="margin-top:10px;font-size:12px;color:var(--ink-mute)">同名 repo 以組織區分：<span style="font-family:var(--font-mono);color:var(--ink-soft)">uep/chatroom</span> 與 <span style="font-family:var(--font-mono);color:var(--ink-soft)">forks/chatroom</span> 是兩個 vault。</div>
+          </section>
+
+          <section style="margin-top:40px">
+            <h2 style="font-family:var(--font-serif-tc);font-size:20px;font-weight:600;margin:0 0 4px;color:var(--ink-title)">移到其他 space</h2>
+            <p style="margin:0 0 16px;font-size:13px;color:var(--ink-mute)">筆記、文件與別名一起搬移。之後在原 space 檢索不到。</p>
+            <div style="display:flex;gap:10px">
+              <sc-for list="{{ moveTargets }}" as="m" hint-placeholder-count="2">
+                <button data-zone="{{ m.zone }}" style="display:flex;align-items:center;gap:10px;padding:10px 16px;border:1px solid var(--zone-stroke);background:none;border-radius:999px;color:var(--ink);cursor:pointer;font-family:var(--font-sans)" style-hover="background:var(--zone-tint)">
+                  <span style="font-family:var(--font-mono);font-size:13px;color:var(--zone-soft)">{{ m.glyph }}</span>移到 {{ m.en }} · {{ m.name }}
+                </button>
+              </sc-for>
+            </div>
+          </section>
+
+          <section style="margin-top:40px">
+            <h2 style="font-family:var(--font-serif-tc);font-size:20px;font-weight:600;margin:0 0 4px;color:var(--ink-title)">墓碑</h2>
+            <p style="margin:0 0 16px;font-size:13px;color:var(--ink-mute)">已刪除的筆記留下紀錄，重新匯入時不會復活。</p>
+            <sc-for list="{{ tombstones }}" as="t" hint-placeholder-count="3">
+              <div style="display:flex;align-items:center;gap:16px;padding:12px 0;border-bottom:1px solid var(--line)">
+                <span style="font-family:var(--font-mono);color:var(--ink-mute)">✝</span>
+                <span style="flex:1;color:var(--ink-soft);text-decoration:line-through;text-decoration-color:var(--line-strong)">{{ t.title }}</span>
+                <span style="font-family:var(--font-mono);font-size:11px;color:var(--ink-mute)">{{ t.meta }}</span>
+                <x-import component-from-global-scope="UEPImaginarySpaceDesignSystem_6b2a32.Button" variant="outline" size="sm" hint-size="60px,30px">復原</x-import>
+              </div>
+            </sc-for>
+          </section>
+
+          <section style="margin-top:40px;padding:20px;border:1px solid rgba(248,113,113,.4);border-radius:4px">
+            <h2 style="font-family:var(--font-serif-tc);font-size:20px;font-weight:600;margin:0 0 4px;color:#f87171">刪除整個 vault</h2>
+            <p style="margin:0 0 16px;font-size:13px;color:var(--ink-soft)">{{ maintVault.notes }} 則筆記會轉為墓碑，{{ maintVault.docs }} 份文件與其抽取段落會移除。</p>
+            <sc-if value="{{ notConfirming }}" hint-placeholder-val="{{ true }}">
+              <x-import component-from-global-scope="UEPImaginarySpaceDesignSystem_6b2a32.Button" variant="outline" onClick="{{ askDelete }}" hint-size="120px,40px">刪除這個 vault…</x-import>
+            </sc-if>
+            <sc-if value="{{ confirming }}" hint-placeholder-val="{{ false }}">
+              <div style="display:flex;flex-direction:column;gap:10px">
+                <span style="font-size:13px;color:var(--ink-soft)">輸入 <span style="font-family:var(--font-mono);color:var(--ink-title)">{{ maintVault.key }}</span> 確認：</span>
+                <div style="display:flex;gap:10px">
+                  <input value="{{ confirmText }}" onChange="{{ onConfirmText }}" style="flex:1;padding:9px 12px;background:var(--bg-sunken);border:1px solid rgba(248,113,113,.5);border-radius:8px;color:var(--ink);font-family:var(--font-mono);font-size:13px;outline:none">
+                  <button disabled="{{ cannotDelete }}" style="padding:0 18px;border-radius:999px;border:1px solid #f87171;background:{{ deleteBg }};color:{{ deleteColor }};opacity:{{ deleteOpacity }};cursor:pointer;font-family:var(--font-sans)">永久刪除</button>
+                  <button onClick="{{ cancelDelete }}" style="background:none;border:none;color:var(--ink-mute);cursor:pointer;font-family:var(--font-sans)">取消</button>
+                </div>
+              </div>
+            </sc-if>
+          </section>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isHealth }}" hint-placeholder-val="{{ false }}">
+        <div style="max-width:1100px">
+          <div style="font-family:var(--font-mono);font-size:10px;letter-spacing:.22em;color:var(--zone-soft)">DOCTOR · 全系統對帳 · 09/26 14:02</div>
+          <h1 style="font-family:var(--font-display);font-weight:500;font-size:42px;margin:6px 0 24px;color:var(--ink-title)">系統健康</h1>
+          <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;background:var(--line);border:1px solid var(--line)">
+            <sc-for list="{{ healthCounts }}" as="c" hint-placeholder-count="4">
+              <div style="background:var(--bg);padding:18px 20px">
+                <div style="font-family:var(--font-mono);font-size:10px;letter-spacing:.16em;color:{{ c.color }}">{{ c.label }}</div>
+                <div style="font-family:var(--font-display);font-size:40px;line-height:1.1;color:{{ c.color }};margin-top:4px">{{ c.n }}</div>
+              </div>
+            </sc-for>
+          </div>
+
+          <div style="display:flex;flex-wrap:wrap;gap:40px;margin-top:36px"><div style="flex:1 1 480px;min-width:0">
+            <div>
+              <sc-for list="{{ checkGroups }}" as="g" hint-placeholder-count="4">
+                <div style="margin-bottom:28px">
+                  <div style="font-family:var(--font-mono);font-size:10px;letter-spacing:.16em;color:var(--ink-mute);padding-bottom:8px;border-bottom:1px solid var(--line-strong)">{{ g.name }}</div>
+                  <sc-for list="{{ g.checks }}" as="c" hint-placeholder-count="2">
+                    <div style="display:grid;grid-template-columns:52px minmax(0,1fr) auto;gap:12px;padding:12px 10px;border-bottom:1px solid var(--line);align-items:start;background:{{ c.rowBg }};border-left:2px solid {{ c.bar }}">
+                      <span style="font-family:var(--font-mono);font-size:10px;letter-spacing:.12em;color:{{ c.color }};padding-top:2px">{{ c.label }}</span>
+                      <div>
+                        <div style="font-weight:600;color:var(--ink-title);font-size:14px">{{ c.name }}</div>
+                        <div style="font-size:13px;color:var(--ink-soft);margin-top:2px">{{ c.desc }}</div>
+                      </div>
+                      <span style="font-family:var(--font-mono);font-size:13px;color:{{ c.color }};text-align:right">{{ c.count }}</span>
+                    </div>
+                  </sc-for>
+                </div>
+              </sc-for>
+            </div></div>
+            <div style="flex:1 1 260px;max-width:360px;display:flex;flex-direction:column;gap:28px">
+              <div>
+                <div style="font-family:var(--font-mono);font-size:10px;letter-spacing:.16em;color:var(--ink-mute);margin-bottom:12px">背景補算</div>
+                <sc-for list="{{ backfill }}" as="b" hint-placeholder-count="2">
+                  <div style="margin-bottom:16px">
+                    <div style="display:flex;justify-content:space-between;font-size:13px"><span>{{ b.name }}</span><span style="font-family:var(--font-mono);color:var(--ink-mute)">{{ b.done }} / {{ b.total }}</span></div>
+                    <div style="height:3px;background:var(--line);margin-top:8px"><div style="height:3px;width:{{ b.pct }};background:var(--zone-soft)"></div></div>
+                    <div style="display:flex;justify-content:space-between;margin-top:6px;font-family:var(--font-mono);font-size:11px">
+                      <span style="color:var(--ink-mute)">待補 {{ b.pending }}</span>
+                      <span style="color:#f87171">失敗 {{ b.failed }} · <button style="background:none;border:none;padding:0;color:#f87171;text-decoration:underline;cursor:pointer;font:inherit">重試</button></span>
+                    </div>
+                  </div>
+                </sc-for>
+              </div>
+              <div>
+                <div style="font-family:var(--font-mono);font-size:10px;letter-spacing:.16em;color:var(--ink-mute);margin-bottom:12px">服務狀態</div>
+                <div style="display:flex;flex-direction:column;gap:10px;font-size:13px">
+                  <div style="display:flex;justify-content:space-between"><span>最近備份</span><span style="font-family:var(--font-mono);color:var(--ink-soft)">09/26 03:00 · 184 MB</span></div>
+                  <div style="display:flex;justify-content:space-between"><span>語意模型</span><span style="font-family:var(--font-mono);color:{{ modelColor }}">{{ modelState }}</span></div>
+                </div>
+              </div>
+              <div>
+                <div style="font-family:var(--font-mono);font-size:10px;letter-spacing:.16em;color:var(--ink-mute);margin-bottom:12px">收料新鮮度</div>
+                <sc-for list="{{ machines }}" as="m" hint-placeholder-count="3">
+                  <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--line);font-size:13px">
+                    <span style="display:flex;gap:8px;align-items:center"><span style="width:7px;height:7px;border-radius:50%;background:{{ m.color }}"></span><span style="font-family:var(--font-mono)">{{ m.name }}</span></span>
+                    <span style="font-family:var(--font-mono);font-size:11px;color:{{ m.textColor }}">{{ m.last }}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isMemory }}" hint-placeholder-val="{{ false }}">
+        <div style="max-width:1100px">
+          <div style="font-family:var(--font-mono);font-size:10px;letter-spacing:.22em;color:var(--zone-soft)">MEMORY LAYER · 唯讀</div>
+          <h1 style="font-family:var(--font-display);font-weight:500;font-size:42px;margin:6px 0 8px;color:var(--ink-title)">記憶層</h1>
+          <p style="margin:0 0 24px;font-size:13px;color:var(--ink-mute)">從 episode 蒸餾出模型容易犯錯的地方。agent 編輯相符錨點的檔案時自動注入。</p>
+          <div style="display:flex;flex-wrap:wrap;gap:40px">
+            <div style="flex:1 1 480px;min-width:0">
+              <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">
+                <sc-for list="{{ conceptChips }}" as="c" hint-placeholder-count="4">
+                  <button onClick="{{ c.pick }}" style="padding:5px 12px;border-radius:999px;border:1px solid {{ c.border }};background:{{ c.bg }};color:{{ c.color }};font-size:12px;cursor:pointer;font-family:var(--font-sans)">{{ c.label }}</button>
+                </sc-for>
+              </div>
+              <sc-for list="{{ concepts }}" as="c" hint-placeholder-count="5">
+                <div style="padding:18px 0;border-bottom:1px solid var(--line);display:flex;flex-wrap:wrap;gap:12px 24px">
+                  <div style="flex:1 1 320px;min-width:0">
+                    <div style="font-family:var(--font-serif-tc);font-size:16px;line-height:1.7;color:var(--ink-title)">{{ c.text }}</div>
+                    <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;align-items:center">
+                      <span style="font-family:var(--font-mono);font-size:10px;letter-spacing:.1em;padding:2px 7px;border:1px solid var(--zone-stroke);color:var(--zone-soft);border-radius:3px">{{ c.scope }}</span>
+                      <span style="font-family:var(--font-mono);font-size:11px;color:var(--ink-mute)">{{ c.anchor }}</span>
+                    </div>
+                  </div>
+                  <div style="flex:0 0 110px;text-align:right">
+                    <div style="font-family:var(--font-display);font-size:26px;line-height:1;color:{{ c.color }}">{{ c.score }}</div>
+                    <div style="height:3px;background:var(--line);margin:8px 0 6px"><div style="height:3px;width:{{ c.pct }};background:{{ c.color }};margin-left:auto"></div></div>
+                    <div style="font-family:var(--font-mono);font-size:10px;color:var(--ink-mute)">{{ c.hits }}</div>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+            <div style="flex:1 1 260px;max-width:360px">
+              <div style="font-family:var(--font-mono);font-size:10px;letter-spacing:.16em;color:var(--ink-mute);margin-bottom:12px">收料概況 · EPISODES</div>
+              <sc-for list="{{ episodes }}" as="e" hint-placeholder-count="5">
+                <div style="display:grid;grid-template-columns:minmax(0,1fr) 50px;gap:8px;padding:10px 0;border-bottom:1px solid var(--line)">
+                  <div style="min-width:0">
+                    <div style="font-size:13px;color:var(--ink)">{{ e.project }}</div>
+                    <div style="font-family:var(--font-mono);font-size:10px;color:var(--ink-mute);margin-top:2px">{{ e.machine }} · {{ e.last }}</div>
+                  </div>
+                  <span style="font-family:var(--font-mono);font-size:13px;text-align:right;color:var(--ink-soft)">{{ e.n }}</span>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isSettings }}" hint-placeholder-val="{{ false }}">
+        <div style="max-width:560px">
+          <div style="font-family:var(--font-mono);font-size:10px;letter-spacing:.22em;color:var(--zone-soft)">CONNECTION</div>
+          <h1 style="font-family:var(--font-display);font-weight:500;font-size:42px;margin:6px 0 28px;color:var(--ink-title)">連線設定</h1>
+          <label style="display:flex;flex-direction:column;gap:6px;margin-bottom:18px"><span style="font-family:var(--font-mono);font-size:10px;letter-spacing:.14em;color:var(--ink-mute)">服務位址</span><input value="https://pm.uep.local" style="padding:11px 12px;background:var(--bg-sunken);border:1px solid var(--line-strong);border-radius:8px;color:var(--ink);font-family:var(--font-mono);font-size:13px;outline:none"></label>
+          <label style="display:flex;flex-direction:column;gap:6px;margin-bottom:22px"><span style="font-family:var(--font-mono);font-size:10px;letter-spacing:.14em;color:var(--ink-mute)">存取金鑰</span><input type="password" value="lv_4f8a2c91e0b7d3" style="padding:11px 12px;background:var(--bg-sunken);border:1px solid var(--line-strong);border-radius:8px;color:var(--ink);font-family:var(--font-mono);font-size:13px;outline:none"></label>
+          <div style="display:flex;gap:10px">
+            <x-import component-from-global-scope="UEPImaginarySpaceDesignSystem_6b2a32.Button" variant="gold" onClick="{{ runTest }}" hint-size="100px,40px">測試連線</x-import>
+            <x-import component-from-global-scope="UEPImaginarySpaceDesignSystem_6b2a32.Button" variant="outline" hint-size="80px,40px">儲存</x-import>
+          </div>
+          <sc-if value="{{ tested }}" hint-placeholder-val="{{ false }}">
+            <div style="margin-top:24px;border:1px solid var(--line);font-family:var(--font-mono);font-size:12px">
+              <sc-for list="{{ testRows }}" as="t" hint-placeholder-count="4">
+                <div style="display:flex;gap:12px;padding:10px 14px;border-bottom:1px solid var(--line)">
+                  <span style="color:{{ t.color }};width:16px">{{ t.mark }}</span><span style="flex:1;color:var(--ink-soft)">{{ t.label }}</span><span style="color:var(--ink-mute)">{{ t.val }}</span>
+                </div>
+              </sc-for>
+            </div>
+          </sc-if>
+          <div style="margin-top:14px;font-family:var(--font-mono);font-size:10px;letter-spacing:.12em;color:var(--ink-mute)">站台參數會在下次載入時生效</div>
+        </div>
+      </sc-if>
+
+    </main>
+  </div>
+
+  <sc-if value="{{ hasToast }}" hint-placeholder-val="{{ false }}">
+    <div style="position:fixed;right:24px;bottom:24px;z-index:300;display:flex;gap:12px;align-items:center;padding:12px 18px;background:var(--bg-card);border:1px solid var(--line-strong);border-radius:10px;box-shadow:0 0 0 1px rgba(213,182,24,.1),0 16px 40px rgba(0,0,0,.4);font-size:13px">
+      <span style="color:#34d399;font-family:var(--font-mono)">✓</span>{{ toast }}
+    </div>
+  </sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;theme&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;dark&quot;,&quot;light&quot;],&quot;default&quot;:&quot;dark&quot;,&quot;tsType&quot;:&quot;'dark'|'light'&quot;},&quot;degraded&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:false,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;系統狀態&quot;}}">
+const SPACES = {
+  dev: { zone: 'concepts', glyph: '>', name: '專案開發', en: 'DEV', desc: '專案決策、踩坑、交接' },
+  lore: { zone: 'history', glyph: '❖', name: '世界觀', en: 'LORE', desc: '設定、角色、年表' },
+  personal: { zone: 'echoes', glyph: '•', name: '私人', en: 'PERSONAL', desc: '私人筆記與日記' },
+};
+const VAULTS = {
+  dev: [
+    { key: 'github.com/uep/lore-vault', name: 'Lore Vault', notes: 212, docs: 4, updated: '2 小時前', source: '手動建立' },
+    { key: 'github.com/Unforgettableeternalproject/Eternity', name: 'Eternity', notes: 486, docs: 12, updated: '昨天 23:14', source: '收料自動建立' },
+    { key: 'github.com/uep/chatroom', name: 'Chatroom', notes: 131, docs: 2, updated: '3 天前', source: '管線建立' },
+    { key: 'github.com/uep/agent-memory-spike', name: 'agent_memory_spike', notes: 74, docs: 3, updated: '09/12', source: '收料自動建立' },
+    { key: 'github.com/forks/chatroom', name: 'forks/chatroom', notes: 9, docs: 0, updated: '08/30', source: '收料自動建立' },
+  ],
+  lore: [
+    { key: 'lore/marginal-world', name: '邊際世界 · 總設定', notes: 318, docs: 9, updated: '昨天', source: '手動建立' },
+    { key: 'lore/characters', name: '角色誌', notes: 144, docs: 3, updated: '4 天前', source: '手動建立' },
+    { key: 'lore/chronology', name: '年表', notes: 61, docs: 1, updated: '09/02', source: '管線建立' },
+  ],
+  personal: [
+    { key: 'personal/journal', name: '日記', notes: 402, docs: 0, updated: '今天 08:10', source: '手動建立' },
+    { key: 'personal/reading', name: '閱讀筆記', notes: 88, docs: 6, updated: '09/19', source: '手動建立' },
+  ],
+};
+const QUERIES = { dev: 'hook 注入 上下文預算 truncate', lore: 'U.E.P 記憶 回音 起源', personal: '閱讀 清單 2026' };
+const RESULTS = {
+  dev: [
+    { id: 'n1', kind: 'note', title: 'PreToolUse hook 注入的字數預算', src: 'summary', summary: '注入上限 600 字，超過時依校準分數由低到高捨棄 concept；截斷一律在結尾標註剩餘筆數。', vault: 'Lore Vault', updated: '2 小時前', match: '語意 .82' },
+    { kind: 'doc', title: 'ARCHITECTURE.md — MCP recall 回傳契約', loc: '§ 4.2', src: 'lead', summary: 'recall 只回傳標題與摘要，全文需以 get_note 另取；每次回傳附剩餘預算與被截斷筆數。', vault: 'Lore Vault', updated: '09/24', match: '混合 .77' },
+    { id: 'n3', kind: 'note', title: 'Open Notebook search 的 notebook_id 參數無效', src: 'summary', summary: '舊 MCP 的 search 忽略 notebook_id，結果混雜其他專案；新 recall 以 vault 為硬性範圍。', vault: 'Lore Vault', updated: '09/18', match: '語意 .71' },
+    { kind: 'doc', title: 'hook-flow.pptx — SessionStart 與 UserPromptSubmit 的注入時機', loc: '投影片 6', src: 'lead', summary: 'SessionStart 注入 repo 範圍 concept；UserPromptSubmit 只在偵測到檔案路徑時注入。', vault: 'agent_memory_spike', updated: '09/12', match: '混合 .69' },
+    { id: 'n5', kind: 'note', title: 'Stop hook 收料格式 v2', src: 'lead', summary: 'Stop hook 將 transcript 切成 episode，每筆帶 machine、repo、turn 範圍與 token 數。', vault: 'agent_memory_spike', updated: '09/10', match: '關鍵字' },
+    { id: 'n6', kind: 'note', title: 'useDesktopIslandViewport 已存在，勿重寫', src: 'summary', summary: 'apps/uep 的島嶼視窗尺寸邏輯已集中在此 hook；新元件應直接引用。', vault: 'Eternity', updated: '09/08', match: '語意 .58' },
+  ],
+  lore: [
+    { id: 'l1', kind: 'note', title: 'Echo Memory 的起源', src: 'summary', summary: 'U.E.P 在第三次時空跳躍後開始收集回音，作為記憶殘片的保存形式。', vault: '邊際世界 · 總設定', updated: '昨天', match: '語意 .80' },
+    { kind: 'doc', title: '世界觀設定集 v3.pdf — 記憶與回音', loc: 'p. 12', src: 'lead', summary: '回音不是聲音，是被時空保存下來的一段意圖。收藏間依共鳴強度排列。', vault: '邊際世界 · 總設定', updated: '09/20', match: '混合 .74' },
+    { id: 'l3', kind: 'note', title: 'U.E.P 角色卡：記憶缺損的範圍', src: 'lead', summary: '她記得所有故事，但不記得自己從哪裡來。', vault: '角色誌', updated: '4 天前', match: '關鍵字' },
+  ],
+  personal: [
+    { id: 'p1', kind: 'note', title: '2026 閱讀清單', src: 'lead', summary: '上半年讀完 11 本，下半年想補技術寫作與科幻短篇。', vault: '閱讀筆記', updated: '09/19', match: '語意 .79' },
+    { id: 'p2', kind: 'note', title: '九月第三週', src: 'summary', summary: '搬家後第一週，Lore Vault 的設計簡報寫完。', vault: '日記', updated: '09/21', match: '語意 .52' },
+  ],
+};
+const EXTRA_NOTES = {
+  dev: [
+    { id: 'n7', title: '9/21 交接：hook 重構', src: 'summary', summary: 'hook 共用 client 移到 lore_vault.hooks；舊路徑保留一版相容。', author: 'claude-code', tags: ['handoff', 'hooks'], updated: '09/21' },
+    { id: 'n8', title: 'Docker 映像不要把 .env 打包進去', src: 'lead', summary: '.dockerignore 已排除 .env；CI 會檢查映像內無此檔。', author: '人', tags: ['docker'], updated: '09/15' },
+  ],
+  lore: [], personal: [],
+};
+const NOTE_META = {
+  n1: { author: '人', tags: ['hooks', 'budget', 'decision'], version: 4, supersedes: '注入預算 400 字（09/20 刪除）', supersededBy: '尚無' },
+};
+const TAGS = { dev: ['全部', 'decision', 'hooks', 'budget', 'mcp', 'handoff'], lore: ['全部', '設定', '角色', '年表'], personal: ['全部', '閱讀', '日記'] };
+const DOCS = [
+  { name: 'ARCHITECTURE.md', type: 'md', size: '48 KB', status: 'done', detail: '42 段落', version: 'v3 · 取代 v2' },
+  { name: 'hook-flow.pptx', type: 'pptx', size: '2.1 MB', status: 'done', detail: '14 投影片', version: 'v1', open: true },
+  { name: 'open-notebook-export.pdf', type: 'pdf', size: '6.4 MB', status: 'fail', detail: '無文字層：掃描影像，需 OCR', version: 'v1' },
+  { name: '遷移清單-0918.docx', type: 'docx', size: '88 KB', status: 'run', detail: '抽取中 · 62%', version: 'v2 · 取代 v1' },
+  { name: 'vendor-contract.pdf', type: 'pdf', size: '1.2 MB', status: 'fail', detail: '檔案已加密，無法讀取', version: 'v1' },
+  { name: 'config.example.toml', type: 'toml', size: '3 KB', status: 'done', detail: '1 段落', version: 'v1' },
+];
+const SLIDES = ['封面', '為什麼需要 hook', '四個掛點', '收料流程', 'Episode 切分', '注入時機', '字數預算', '校準分數', '失敗模式', '健康警示', '遷入計畫', '待裁決', '附錄 A', '附錄 B'];
+const SLIDE_TEXT = {
+  5: 'Stop hook 在每輪對話結束時切出 episode，依 machine 與 repo 歸檔。不保存工具輸出全文，只保存摘要與 token 數。',
+  6: 'SessionStart 注入 repo 範圍的 concept；UserPromptSubmit 只在偵測到檔案路徑時注入，PreToolUse 則比對編輯目標的錨點。三者共用同一套預算計算。',
+  7: 'SessionStart 1,200 字、PreToolUse 600 字、UserPromptSubmit 400 字。超出時捨棄校準分數最低者，並在結尾標註剩餘筆數。',
+};
+const CHECKS = (deg) => [
+  { name: '儲存', checks: [
+    { s: 'pass', name: 'SQLite 完整性', desc: 'integrity_check ok', count: '1' },
+    { s: 'warn', name: '筆記與全文索引對帳', desc: '3 筆筆記不在 FTS 索引中', count: '3' },
+    { s: 'pass', name: '墓碑一致性', desc: '所有墓碑都對應不到現存筆記', count: '41' },
+  ]},
+  { name: '檢索', checks: [
+    deg ? { s: 'fail', name: '語意模型', desc: 'bge-m3 @ localhost:11434 無回應，recall 已降級為關鍵字', count: '—' }
+        : { s: 'pass', name: '語意模型', desc: 'bge-m3 已暖機，平均 38ms', count: '—' },
+    { s: 'warn', name: '向量覆蓋率', desc: '112 筆筆記尚無向量', count: '112' },
+  ]},
+  { name: '背景補算', checks: [
+    { s: 'warn', name: '摘要佇列', desc: '38 筆待產生，目前以首段頂替', count: '38' },
+    { s: 'fail', name: '失敗任務', desc: '4 筆摘要產生逾時（> 60s）', count: '4' },
+  ]},
+  { name: '文件', checks: [
+    { s: 'fail', name: '抽取失敗', desc: 'open-notebook-export.pdf 無文字層；vendor-contract.pdf 已加密', count: '2' },
+  ]},
+  { name: '記憶層', checks: [
+    { s: 'warn', name: '收料新鮮度', desc: 'laptop-uep 已 52 小時未收料', count: '1' },
+    { s: 'pass', name: 'hook 健康', desc: '四個 hook 最近 24 小時皆有回報', count: '4' },
+  ]},
+  { name: '備份', checks: [
+    { s: 'pass', name: '本機備份', desc: '09/26 03:00 完成', count: '184MB' },
+    { s: 'skipped', name: '異地副本', desc: '未設定目的地', count: '—' },
+  ]},
+];
+const STATUS = {
+  pass: { label: 'PASS', color: '#34d399' },
+  warn: { label: 'WARN', color: '#d5b618' },
+  fail: { label: 'FAIL', color: '#f87171' },
+  skipped: { label: 'SKIP', color: 'var(--ink-mute)' },
+};
+const CONCEPTS = [
+  { text: 'hook 輸出必須是單行 JSON，否則 Claude Code 會靜默忽略', scope: 'agent_memory_spike', anchor: 'hook_pretooluse.py · main', score: .95, hits: '命中 38 · 誤報 2' },
+  { text: '這個 repo 已有 useDesktopIslandViewport，不要重寫', scope: 'Eternity', anchor: 'apps/uep/src/hooks/useDesktopIslandViewport.ts', score: .91, hits: '命中 20 · 誤報 2' },
+  { text: 'PowerShell 腳本組路徑用 Join-Path，避免反斜線跳脫', scope: '通用', anchor: '*.ps1', score: .84, hits: '命中 11 · 誤報 2' },
+  { text: 'client:only 元件無法讀取 Astro.locals', scope: 'Eternity', anchor: 'apps/uep/astro.config.mjs', score: .78, hits: '命中 7 · 誤報 2' },
+  { text: 'uv run 前不要手動啟用 venv', scope: '通用', anchor: 'pyproject.toml', score: .66, hits: '命中 4 · 誤報 2' },
+  { text: '測試用 fake_service，不要打真的服務', scope: 'Lore Vault', anchor: 'tests/fake_service.py', score: .41, hits: '命中 2 · 誤報 3 · 校準不足' },
+];
+const EPISODES = [
+  { project: 'Lore Vault', machine: 'desktop-main', last: '3 分鐘前', n: 1284 },
+  { project: 'Eternity', machine: 'desktop-main', last: '昨天 23:10', n: 3910 },
+  { project: 'Chatroom', machine: 'desktop-main', last: '3 天前', n: 642 },
+  { project: 'Eternity', machine: 'laptop-uep', last: '52 小時前', n: 815 },
+  { project: 'agent_memory_spike', machine: 'laptop-uep', last: '09/12', n: 377 },
+];
+
+class Component extends DCLogic {
+  state = { screen: 'search', space: 'dev', vault: 'all', query: QUERIES.dev, noteId: 'n1', noteMode: 'read', spaceMenu: false, theme: null, tag: '全部', time: '全部', slide: 6, maintIdx: 0, confirming: false, confirmText: '', creating: false, conceptScope: '全部', tested: false, toast: '' };
+
+  go(screen, extra) { this.setState({ screen, spaceMenu: false, ...(extra || {}) }); }
+  flash(msg) { this.setState({ toast: msg }); clearTimeout(this._t); this._t = setTimeout(() => this.setState({ toast: '' }), 2600); }
+
+  renderVals() {
+    const st = this.state;
+    const degraded = this.props.degraded ?? false;
+    const theme = st.theme || this.props.theme || 'dark';
+    const sp = SPACES[st.space];
+    const vaultsRaw = VAULTS[st.space];
+    const tint = (on) => ({ bg: on ? 'var(--zone-tint)' : 'transparent', border: on ? 'var(--zone-stroke)' : 'var(--line-strong)', color: on ? 'var(--ink-title)' : 'var(--ink-soft)' });
+    const curVault = vaultsRaw.find(v => v.key === st.vault);
+    const currentVaultName = curVault ? curVault.name : '全部 vault';
+    const srcTag = (src) => src === 'summary'
+      ? { srcLabel: '摘要', srcColor: 'var(--zone-soft)', srcBorder: 'var(--zone-stroke)' }
+      : { srcLabel: '首段', srcColor: 'var(--uep-gold)', srcBorder: 'rgba(213,182,24,.5)' };
+
+    const openNote = (id) => () => this.go('note', { noteId: id, noteMode: 'read' });
+    const raw = RESULTS[st.space].filter(r => !curVault || r.vault === curVault.name);
+    const results = raw.filter(r => !degraded || r.match === '關鍵字' || r.kind === 'note' || true).map((r, i) => ({
+      ...r, ...srcTag(r.src),
+      typeLabel: r.kind === 'note' ? 'NOTE' : 'DOC · 段落',
+      typeColor: r.kind === 'note' ? 'var(--zone-soft)' : 'var(--ink-soft)',
+      loc: r.loc || '',
+      match: degraded ? '關鍵字' : r.match,
+      matchColor: degraded ? 'var(--uep-gold)' : 'var(--ink-mute)',
+      open: r.kind === 'note' ? openNote(r.id) : () => this.go('doc', { slide: 6 }),
+    }));
+
+    const allNotes = [
+      ...RESULTS[st.space].filter(r => r.kind === 'note').map(r => ({ ...r, ...(NOTE_META[r.id] || {}), author: (NOTE_META[r.id] || {}).author || 'claude-code', tags: (NOTE_META[r.id] || {}).tags || ['mcp'] })),
+      ...EXTRA_NOTES[st.space].map(n => ({ ...n, vault: 'Lore Vault' })),
+    ];
+    const notesList = allNotes
+      .filter(n => st.tag === '全部' || (n.tags || []).includes(st.tag))
+      .map(n => ({ ...n, ...srcTag(n.src), tagText: (n.tags || []).map(t => '#' + t).join(' '), authorColor: n.author === '人' ? 'var(--uep-gold)' : 'var(--ink-soft)', open: openNote(n.id) }));
+
+    const nRaw = allNotes.find(n => n.id === st.noteId) || allNotes[0] || RESULTS.dev[0];
+    const meta = NOTE_META[nRaw.id] || {};
+    const note = {
+      ...nRaw, ...srcTag(nRaw.src),
+      srcNote: nRaw.src === 'summary' ? 'LLM 背景產生 · 09/26 12:04' : '摘要尚未產生，暫以正文首段頂替',
+      version: meta.version || 1,
+      author: meta.author || nRaw.author || 'claude-code',
+      authorColor: (meta.author || nRaw.author) === '人' ? 'var(--uep-gold)' : 'var(--ink-soft)',
+      tagText: (meta.tags || nRaw.tags || []).map(t => '#' + t).join(' '),
+      supersedes: meta.supersedes || '無', supersededBy: meta.supersededBy || '尚無',
+    };
+
+    const failCount = CHECKS(degraded).flatMap(g => g.checks).filter(c => c.s === 'fail').length;
+    const navDefs = [
+      ['search', '◎', '檢索'], ['notes', '¶', '筆記'], ['docs', '▤', '文件'], ['memory', '✦', '記憶層'],
+      ['vaults', '▦', 'Vault'], ['maint', '↻', '維護'], ['health', '✓', '系統健康'], ['settings', '⇄', '連線設定'],
+    ];
+    const activeNav = { note: 'notes', new: 'notes', doc: 'docs' }[st.screen] || st.screen;
+    const nav = navDefs.map(([k, g, l]) => ({
+      glyph: g, label: l, go: () => this.go(k),
+      bar: activeNav === k ? 'var(--zone-soft)' : 'transparent',
+      bg: activeNav === k ? 'var(--zone-tint)' : 'transparent',
+      color: activeNav === k ? 'var(--ink-title)' : 'var(--ink-soft)',
+      hasBadge: k === 'health' && failCount > 0, badge: failCount,
+    }));
+
+    const vaults = vaultsRaw.map((v, i) => ({
+      ...v,
+      bar: st.vault === v.key ? 'var(--zone-soft)' : 'transparent',
+      bg: st.vault === v.key ? 'var(--zone-tint)' : 'transparent',
+      pick: () => this.setState({ vault: st.vault === v.key ? 'all' : v.key }),
+      maint: () => this.go('maint', { maintIdx: i, confirming: false, confirmText: '' }),
+    }));
+    const vaultChips = [{ key: 'all', label: '本 space 全部' }, ...vaultsRaw.map(v => ({ key: v.key, label: v.name }))]
+      .map(c => ({ ...c, ...tint(st.vault === c.key), pick: () => this.setState({ vault: c.key }) }));
+
+    const spaces = Object.entries(SPACES).map(([k, s]) => ({
+      ...s, count: VAULTS[k].length + ' vaults',
+      bg: k === st.space ? 'var(--zone-tint)' : 'transparent',
+      border: k === st.space ? 'var(--zone-stroke)' : 'transparent',
+      pick: () => {
+        if (k === st.space) return this.setState({ spaceMenu: false });
+        this.setState({ space: k, vault: 'all', query: QUERIES[k], tag: '全部', spaceMenu: false, screen: st.screen === 'note' ? 'notes' : st.screen, maintIdx: 0 });
+        this.flash('已切換至 ' + s.en + ' · ' + s.name);
+      },
+    }));
+
+    const maintVault = vaultsRaw[st.maintIdx] || vaultsRaw[0];
+    const counts = { pass: 0, warn: 0, fail: 0, skipped: 0 };
+    const checkGroups = CHECKS(degraded).map(g => ({
+      name: g.name,
+      checks: g.checks.map(c => { counts[c.s]++; const S = STATUS[c.s]; const hot = c.s === 'fail' || c.s === 'warn';
+        return { ...c, ...S, rowBg: c.s === 'fail' ? 'rgba(248,113,113,.06)' : 'transparent', bar: hot ? S.color : 'transparent' }; }),
+    }));
+    checkGroups.sort((a, b) => (b.checks.some(c => c.s === 'fail') ? 1 : 0) - (a.checks.some(c => c.s === 'fail') ? 1 : 0));
+    const healthCounts = ['fail', 'warn', 'pass', 'skipped'].map(k => ({ label: STATUS[k].label, color: STATUS[k].color, n: counts[k] }));
+
+    const conceptScopes = ['全部', '通用', 'Eternity', 'Lore Vault', 'agent_memory_spike'];
+    const concepts = CONCEPTS.filter(c => st.conceptScope === '全部' || c.scope === st.conceptScope).map(c => ({
+      ...c, score: c.score.toFixed(2), pct: Math.round(c.score * 100) + '%',
+      color: c.score >= .75 ? 'var(--zone-soft)' : c.score >= .6 ? 'var(--ink-soft)' : '#d5b618',
+    }));
+
+    const confirmOk = st.confirmText === maintVault.key;
+    const otherSpaces = Object.entries(SPACES).filter(([k]) => k !== st.space).map(([, s]) => s);
+
+    return {
+      theme, zone: sp.zone, sp, spaces, spaceMenuOpen: st.spaceMenu,
+      toggleSpaceMenu: () => this.setState({ spaceMenu: !st.spaceMenu }),
+      toggleTheme: () => this.setState({ theme: theme === 'dark' ? 'light' : 'dark' }),
+      themeGlyph: theme === 'dark' ? '☀' : '☾',
+      nav, vaults, currentVaultName,
+      goSettings: () => this.go('settings'), goHealth: () => this.go('health'), goVaults: () => this.go('vaults', { creating: true }),
+      goNotes: () => this.go('notes'), goNew: () => this.go('new'), goDocs: () => this.go('docs'), goMaint: () => this.go('maint'),
+      isSearch: st.screen === 'search', isNotes: st.screen === 'notes', isNote: st.screen === 'note', isNew: st.screen === 'new',
+      isDocs: st.screen === 'docs', isDoc: st.screen === 'doc', isVaults: st.screen === 'vaults', isMaint: st.screen === 'maint',
+      isHealth: st.screen === 'health', isMemory: st.screen === 'memory', isSettings: st.screen === 'settings',
+      degraded, query: st.query, onQuery: e => this.setState({ query: e.target.value }),
+      modeLabel: degraded ? 'KEYWORD ONLY' : 'HYBRID · FTS + 語意',
+      vaultChips, results, truncated: st.space === 'dev' ? 7 : 2,
+      resultCountLabel: results.length + ' 筆結果 · ' + (curVault ? curVault.name : '本 space 全部 vault'),
+      tagChips: TAGS[st.space].map(t => ({ label: t, ...tint(st.tag === t), pick: () => this.setState({ tag: t }) })),
+      timeChips: ['7 天', '30 天', '全部'].map(t => ({ label: t, ...tint(st.time === t), pick: () => this.setState({ time: t }) })),
+      notesList, notesShown: notesList.length, notesTotal: curVault ? curVault.notes : vaultsRaw.reduce((a, v) => a + v.notes, 0),
+      note, isRich: nRaw.id === 'n1', notRich: nRaw.id !== 'n1',
+      noteRead: st.noteMode === 'read', noteEdit: st.noteMode === 'edit', noteConflict: st.noteMode === 'conflict',
+      startEdit: () => this.setState({ noteMode: 'edit' }), cancelEdit: () => this.setState({ noteMode: 'read' }),
+      saveEdit: () => this.setState({ noteMode: 'conflict' }),
+      resolveMerge: () => { this.setState({ noteMode: 'read' }); this.flash('已合併並存為 v6'); },
+      resolveMine: () => { this.setState({ noteMode: 'read' }); this.flash('已以你的版本存為 v6，v5 保留於歷史'); },
+      resolveTheirs: () => { this.setState({ noteMode: 'read' }); this.flash('已捨棄修改，顯示 v5'); },
+      openOld: e => { e.preventDefault(); this.go('maint'); },
+      editText: '# ' + note.title + '\n\n| PreToolUse | 800 字 | 依校準分數由低到高捨棄 |\n\n截斷一律在結尾標註剩餘筆數，並附上被捨棄 concept 的 id。\n\n相關：[[MCP recall 回傳契約]]',
+      dupes: [
+        { title: 'PreToolUse hook 注入的字數預算', sim: '相似 .91', meta: 'Lore Vault · v4 · 2 小時前', open: openNote('n1') },
+        { title: 'MCP recall 回傳契約', sim: '相似 .63', meta: 'ARCHITECTURE.md § 4.2', open: () => this.go('doc') },
+        { title: '9/21 交接：hook 重構', sim: '相似 .57', meta: 'Lore Vault · claude-code', open: openNote('n7') },
+      ],
+      createAnyway: () => { this.go('notes'); this.flash('已新增至 ' + sp.en + ' / ' + currentVaultName); },
+      docs: DOCS.map(d => ({ ...d,
+        statusLabel: { done: '完成', run: '處理中', fail: '失敗' }[d.status],
+        statusColor: { done: '#34d399', run: '#60a5fa', fail: '#f87171' }[d.status],
+        failed: d.status === 'fail', open: () => d.open && this.go('doc', { slide: 6 }) })),
+      slides: SLIDES.map((t, i) => { const n = i + 1, on = st.slide === n; return { n, title: t, bar: on ? 'var(--zone-soft)' : 'transparent', bg: on ? 'var(--zone-tint)' : 'transparent', color: on ? 'var(--ink-title)' : 'var(--ink-soft)', pick: () => this.setState({ slide: n }) }; }),
+      slideBlocks: [5, 6, 7].map(n => ({ n, title: SLIDES[n - 1], text: SLIDE_TEXT[n], border: st.slide === n ? 'var(--zone-stroke)' : 'var(--line)', bg: st.slide === n ? 'var(--zone-tint)' : 'transparent' })),
+      creating: st.creating, toggleCreate: () => this.setState({ creating: !st.creating }),
+      maintVault,
+      aliases: st.space === 'dev' && st.maintIdx === 0
+        ? [{ key: 'github.com/uep/pm-rebuild', note: '09/14 改名' }, { key: 'github.com/uep/project-memory', note: '09/02 改名' }]
+        : [{ key: maintVault.key.replace(/[^/]+$/, 'old-name'), note: '手動新增' }],
+      moveTargets: otherSpaces,
+      tombstones: [
+        { title: '注入預算 400 字', meta: '人 · 09/20 · 被取代' },
+        { title: 'MCP 契約草稿（重複）', meta: 'codex · 09/17' },
+        { title: 'Open Notebook 匯入測試', meta: '人 · 09/05' },
+      ],
+      confirming: st.confirming, notConfirming: !st.confirming,
+      askDelete: () => this.setState({ confirming: true, confirmText: '' }),
+      cancelDelete: () => this.setState({ confirming: false }),
+      confirmText: st.confirmText, onConfirmText: e => this.setState({ confirmText: e.target.value }),
+      cannotDelete: !confirmOk, deleteBg: confirmOk ? '#f87171' : 'transparent', deleteColor: confirmOk ? '#14151a' : '#f87171', deleteOpacity: confirmOk ? 1 : .4,
+      healthCounts, checkGroups,
+      backfill: [
+        { name: '摘要', done: 2374, total: 2412, pending: 38, failed: 4, pct: '98%' },
+        { name: '向量', done: 2300, total: 2412, pending: 112, failed: 0, pct: '95%' },
+      ],
+      modelState: degraded ? '無回應 · 已降級' : '已暖機 · 38ms',
+      modelColor: degraded ? '#f87171' : '#34d399',
+      machines: [
+        { name: 'desktop-main', last: '3 分鐘前', color: '#34d399', textColor: 'var(--ink-mute)' },
+        { name: 'laptop-uep', last: '52 小時前', color: '#d5b618', textColor: '#d5b618' },
+        { name: 'ci-runner', last: '6 小時前', color: '#34d399', textColor: 'var(--ink-mute)' },
+      ],
+      conceptChips: conceptScopes.map(s => ({ label: s, ...tint(st.conceptScope === s), pick: () => this.setState({ conceptScope: s }) })),
+      concepts, episodes: EPISODES,
+      tested: st.tested, runTest: () => this.setState({ tested: true }),
+      testRows: [
+        { mark: '✓', color: '#34d399', label: '服務可達', val: '42ms' },
+        { mark: '✓', color: '#34d399', label: '金鑰有效', val: '讀寫' },
+        { mark: '✓', color: '#34d399', label: '資料庫', val: 'schema v7' },
+        degraded ? { mark: '✕', color: '#f87171', label: '語意模型', val: '無回應' } : { mark: '✓', color: '#34d399', label: '語意模型', val: '已暖機' },
+      ],
+      hasToast: !!st.toast, toast: st.toast,
+    };
+  }
+}
+</script>
+</body>
+</html>

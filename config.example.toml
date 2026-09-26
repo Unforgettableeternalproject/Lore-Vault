@@ -101,3 +101,20 @@ stuck_seconds = 3600.0
 extract_timeout = 60.0
 # 抽取子行程的虛擬記憶體上限（MB，只在 Linux 生效；0 = 不限制）
 extract_memory_mb = 1024
+
+[ui]
+# 使用者 UI（A21）。登入用 DB 內的 UI 帳號密碼（A23）：`python -m lore_vault.cli.admin
+# ui-set-password --user <名稱>` 設定；全域失敗 3 次即鎖定、需 `ui-unlock --yes` 人工解鎖（規則固定）
+# Vite 建置產物目錄（含 index.html）；未設定 = 不提供 /ui 靜態檔（/ui/api/* 仍可用）
+# static_dir = "C:/path/to/Lore-Vault/ui/app/dist"
+# session cookie 帶 Secure（名稱為 __Host-lv_session）；只有用非 localhost 的 http 開發時才關閉
+cookie_secure = true
+# session 絕對期限（小時）與閒置期限（分鐘）；session 只存在服務記憶體，重啟即失效
+session_absolute_hours = 12.0
+session_idle_minutes = 60.0
+# 同時存在的 session 上限（超過淘汰最舊）
+max_sessions = 32
+# 登入紀錄保留天數（過期的在服務啟動與每次登入嘗試時清除）
+login_log_retention_days = 90.0
+# 受信任代理（逗號分隔 IP／CIDR）：直接連線來源在清單內時才採信 CF-Connecting-IP（登入紀錄的來源）；空 = 一律用直接連線來源
+trusted_proxies = ""

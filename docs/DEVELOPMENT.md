@@ -96,12 +96,18 @@ export LORE_VAULT_API_ENRICH_WORKER=false          # 選用：不在服務內跑
 uv run uvicorn --factory lore_vault.api.app:create_app --host 127.0.0.1 --port 8000
 ```
 
-- 所有 `/v1/*`（含 `/v1/openapi.json`）都要 `Authorization: Bearer <token>`，本機也一樣；
-  只有 `GET /healthz` 免認證（只回 `{"ok": true}`，不碰資料庫）。
+- 所有 `/v1/*`（含 `/v1/openapi.json`）都要認證，本機也一樣：`Authorization: Bearer <token>`，
+  或 UI 的 session cookie ＋ `X-Lore-Vault-UI: 1`（見「UI 開發與建置」）。免認證的只有
+  `GET /healthz`（只回 `{"ok": true}`，不碰資料庫）與 `/ui`、`/ui/*`（靜態檔與登入端點）。
 - 端點為 RPC 式、一律 `POST` + JSON body，一對一對應 MCP 工具：
   `/v1/vault_resolve`、`/v1/recall`、`/v1/get`、`/v1/list`、`/v1/write`、`/v1/update`、
   `/v1/status`，另有 `/v1/vaults`（明確建 vault；`write` 不會自動建）。
   錯誤格式統一為 `{"error": {"code", "message", ...}}`。
+- 作者（A22，schema v12）：`/v1/write`、`/v1/update` 接受 `author`（寫入者自報名，未填存 null、不代填）；
+  `principal` 由認證中介層依憑證判定（`api.principals`，放進 ASGI scope，路由以 `principal_of` 取，缺少即 500），
+  **body 帶 `principal`／`updated_by_principal` 一律 422**（`extra="forbid"`，不寫入）。
+  服務層 `notes.write`／`notes.update` 的 `principal` 是必填 keyword；儲存層 `insert_note` 拒收缺 principal 的 Note，
+  `update_note_if(editor=(名稱, principal))` 寫 `updated_by*`（省略 `editor`＝作者欄位不動，只給內部呼叫）
 - 啟動時（lifespan）遷移資料庫，之後每個請求各開一條連線（WAL + busy_timeout）。
 - 背景補算 worker 預設在同一程序內以執行緒執行（`[api] enrich_worker`）；
   關閉路徑：SIGTERM 經 tini 轉給 uvicorn → lifespan 結束 → worker `stop()`，
@@ -157,8 +163,8 @@ stdout 是 MCP 協定通道，log 一律寫 stderr（UTF-8）。設定錯誤時�
 `space(action, value?)`、`vault_resolve(cwd?, create?, display?, space?, key?)`、
 `recall(query, vault, kinds?, limit?, budget?)`、
 `get(vault, ids, budget?)`、`list(vault, since?, topics?, cursor?, limit?, kinds?)`、
-`write(vault, title, body, topics?, links?, supersedes?)`、
-`update(vault, id, expected_updated, title?, body?, topics?, links?, supersedes?)`、
+`write(vault, title, body, topics?, links?, supersedes?, author?)`、
+`update(vault, id, expected_updated, title?, body?, topics?, links?, supersedes?, author?)`、
 `upload(path, vault?)`、`status(vault?)`（共 9 個）。
 
 - **目前 space**（A18）：殼行程持有、只在記憶體，新行程一律 `dev`；`space(action="set", value=...)`
@@ -240,9 +246,10 @@ token 放在 repo 外的 env 檔，不寫進 `.claude.json`：
 |---|---|
 | `delete-note --space SPACE --vault KEY --id NOTE_ID [--reason TEXT] [--yes]` | 刪單則 note（vault 在該 space 內解析，可用別名；`--space` 必填） |
 | `delete-vault --key KEY [--force] [--reason TEXT] [--yes]` | 刪整個 vault；只接受正式 key。vault 內有 note、文件或 episode／concept／injection 時必須 `--force`；文件一併刪並各寫文件墓碑 |
-| `delete-document --space SPACE --vault KEY --id DOC_ID [--reason TEXT] [--yes]` | 刪單份文件：chunk、chunk_fts、向量（CASCADE）、抽取／補算紀錄（CASCADE），寫 `document_tombstones`。blob 不刪（其他 vault／版本可能共用），沒人引用時 doctor `documents.orphan_blobs` 回報。指向它的新版本改指向它的前一版；刪的是現行版本時前一版同交易回到索引（向量由 worker 補）。不提供 undelete：要恢復就重新上傳 |
-| `undelete-note --id NOTE_ID [--yes]` | 移除墓碑；下次重跑匯入時該 note 會匯回 |
+| `delete-document --space SPACE --vault KEY --id DOC_ID [--reason TEXT] [--yes]` | 刪單份文件：chunk、chunk_fts、向量（CASCADE）、抽取／補算紀錄（CASCADE），寫 `document_tombstones`。blob 不刪（其他 vault／版本可能共用），沒人引用時 doctor `documents.orphan_blobs` 回報。指向它的新版本改指向它的前一版；刪的是現行版本時前一版同交易回到索引（向量由 worker 補）。CLI 不提供 undelete（HTTP `document_undelete` 可在原始檔仍在時復原，見下） |
+| `undelete-note --id NOTE_ID [--yes]` | 取消刪除。墓碑有內容快照（schema v12 起刪除的）→ 以原 id、原內容還原（FTS 同交易重建，向量由服務背景補算），所屬 vault 已刪除則拒絕（先重建 vault）；v12 前的舊墓碑 → 只移除墓碑，下次重跑匯入時該 note 會匯回。dry-run 以 `has_snapshot` 顯示走哪條 |
 | `gc-blobs [--blob-dir DIR] [--min-age-hours N] [--yes]` | 清理孤兒 blob 與中斷遺留的暫存檔，見下方「blob 清理」 |
+| `purge-tombstones --older-than-days N [--kinds note,document] [--yes]` | 永久清除刪除時間早於 N 天前（`0` = 全部）的墓碑，見下方「墓碑清除」 |
 | `set-space --key KEY --space SPACE [--yes]` | 把 vault 換到另一個 space（A19）；只接受正式 key。前綴規則與建立時相同：目標非 dev 時 key 與別名都必須以 `<space>/` 開頭，不合即拒（dry-run 就擋，不改 key）。換完後 MCP 殼的降級快照要等下次快照更新才反映 |
 
 - 預設 dry-run：stdout 印 JSON（`mode`、`vault`、`counts`、`note_ids`、`requires_force`），
@@ -251,12 +258,16 @@ token 放在 repo 外的 env 檔，不寫進 `.claude.json`：
   一併刪；刪完核對實際筆數與規劃、檢查無孤兒向量／補算列，不符整段 rollback
 - **墓碑**（schema v5 `note_tombstones`，刻意無外鍵）：每則被刪的 note 寫一筆（note id、vault、
   對帳清單記載的來源與來源 id、刪除時間、`--reason`）；`delete-vault --force` 為其下每則 note 各寫一筆。
-  匯入對帳清單（`import_sources`／`import_vault_counts`）不動
+  schema v12 起另存刪除當下的完整內容（`snapshot` JSON：title、body、summary、topics、links、supersedes、
+  作者欄位、created、updated），供取消刪除還原；還原時 vault 以墓碑的 `vault` 欄為準（`set-space` 會改寫它，
+  快照裡的 vault 不改）。墓碑內容保留在 DB，直到以 `purge-tombstones` 明確清除（不做自動清除）。
+  刪除時匯入對帳清單（`import_sources`／`import_vault_counts`）不動
 - 重跑 `import_on import`：有墓碑的 note 跳過、不匯回，報告 `skipped.deleted` 與 `deleted_skipped` 列出；
   來源 note 全部有墓碑的 vault 不重建（`vaults.deleted_skipped`）。已知缺口：沒有 note 的空 vault 刪除不寫墓碑，
   若 mapping 仍有該本會被重建
 - `import.on_reconcile`：清單有、note 沒有、有墓碑 → 刻意刪除（`counts.deleted`，只報告）；沒有墓碑 → 漏筆（fail）。
-  來源筆數核對改為「實際 + 刻意刪除 = 來源」。`undelete-note` 後、重匯前 doctor 會顯示漏筆，重匯即恢復綠
+  來源筆數核對改為「實際 + 刻意刪除 = 來源」。舊墓碑 `undelete-note` 後、重匯前 doctor 會顯示漏筆，重匯即恢復綠；
+  有快照的還原後 note 與匯入時相同（`updated` 未變），重匯視為 unchanged
 - 服務執行中可直接用（WAL + busy_timeout；與匯入工具同樣直接寫 DB）。快照快取以內容指紋判斷，刪除後下次拉取即更新
 
 容器內：
@@ -267,9 +278,52 @@ docker exec lore-vault python -m lore_vault.cli.admin delete-vault --key folder/
 docker exec lore-vault python -m lore_vault.cli.admin delete-note --space dev --vault folder/x --id note:abc --yes
 ```
 
+UI 管理端點（`api.manage`，契約見 docs/ARCHITECTURE.md「UI 管理端點」）是上述指令的 HTTP 版，沿用
+`storage.admin` 的規劃／執行函式，加上兩段式確認 token 與 space 硬範圍；另有 CLI 沒有的
+`document_undelete`（schema v11：`document_tombstones` 補 filename／mime／size_bytes／version，
+v11 前的舊墓碑不能復原）與 `document_retry`（`documents.manual_retries`，每份上限
+`storage.manage.MAX_MANUAL_RETRIES` = 3）。對帳：
+
+- `vaults.alias_integrity`：別名等於某 vault 的正式 key、或指向不存在的 vault 為 fail
+- `tombstones.disjoint`：同一 id 同時在墓碑與現行 notes／documents 為 fail（undelete 必須同交易刪墓碑）
+- `tombstones.note_snapshots`（schema v12）：note 墓碑的內容快照不是合法 JSON、`$.id` 與墓碑不符或缺還原
+  必要欄位為 fail（不比對 `$.vault`，理由同上）
+- `tombstones.summary`（資訊項）：note／文件墓碑筆數、note 快照總位元組（UTF-8）、最舊一筆年齡
+  （`counts.oldest_age_seconds`）。預設永遠 pass；設了門檻才 warn、永不 fail：設定
+  `database.tombstone_warn_age_days`（最舊一筆超過幾天）、`database.tombstone_warn_bytes`（快照總量），
+  0 = 不警告（預設）；doctor CLI 對應 `--tombstones-warn-age-days`／`--tombstones-warn-bytes`
+- `notes.attribution`（schema v12，A22）：有 note 缺 `principal`／`updated_by_principal` 為 fail；
+  counts 另列未具名（`author` 為 null）筆數
+- `ui.login_lock`（schema v13，A23）：UI 登入鎖定中為 fail（附鎖定時間，需 `cli.admin ui-unlock --yes`）；
+  尚無 UI 帳號為 warn；counts 列目前失敗次數與近 24 小時的失敗／鎖定中嘗試／成功次數。v13 前的庫為 skipped
+  （測試：`tests/storage/test_ui_login.py`）
+- 前兩項有破壞資料變紅的測試（`tests/storage/test_manage_checks.py`），後兩項見
+  `tests/api/test_authorship.py`；跨 space 洩漏與拿掉保護會紅見
+  `tests/api/test_manage_leak.py`
+
 space 對帳（分類 `space`，schema v7；DB 沒有 CHECK，只能靠對帳）：`space.valid_values`
 （`vaults.space` 不在 `dev`／`lore`／`personal` 即 fail）、`space.key_prefix_agreement`（非 dev 的 key
 或別名未以 `<space>/` 開頭即 fail）。兩項都有「手動改 DB 後變紅」的測試（`tests/storage/test_space_filter.py`）。
+
+### 墓碑清除（`purge-tombstones`）
+
+- 預設 dry-run：印 `cutoff`（now − N 天）、`kinds`、`counts`（`note_tombstones`、`document_tombstones`、
+  `import_manifest_rows`）、`snapshot_bytes`、最舊／最新刪除時間與警語；不印 id、標題或內文。`--yes` 才清除，
+  在單一交易內重新規劃再刪、核對筆數，不符整段 rollback；輸出 `purged` 為實際筆數
+- `--kinds` 逗號分隔（`note`、`document`，預設兩者）；未知值或空字串、負數天數為參數錯誤（exit 2）
+- **不可逆**：note 墓碑連同內容快照一起刪，之後 `undelete-note`／HTTP `note_undelete` 與 `document_undelete`
+  都回 404 `not_found`，墓碑列表也不再出現
+- **不再擋重新匯入**：被清除的匯入 note，重跑 `import_on import` 會匯回來。為了讓 `import.on_reconcile` 維持綠，
+  同一交易內移除它的對帳清單列（`import_sources`）並把該來源、該 vault 的 `import_vault_counts.source_count`
+  減一（對帳視為從未匯入）；重跑匯入時 `record_manifest` 整批重建清單與筆數。只刪墓碑、不處理清單會讓對帳變紅
+  （`tests/cli/test_admin_purge.py` 有對照測試）
+- 文件墓碑清除後原始檔 blob 不在此刪除（blob 引用本來只看 `documents`），之後由 `gc-blobs` 回收
+- 不做自動清除；需要提醒時設 `tombstones.summary` 的門檻
+
+```bash
+docker exec lore-vault python -m lore_vault.cli.admin purge-tombstones --older-than-days 90          # dry-run
+docker exec lore-vault python -m lore_vault.cli.admin purge-tombstones --older-than-days 90 --yes
+```
 
 ### blob 清理（`gc-blobs`）
 
@@ -518,3 +572,134 @@ KEY=VALUE、只用標準庫解析；行程環境變數中同名鍵優先。
   - `documents.backlog`：待抽取文件與缺向量 chunk，最舊一筆等超過 1 小時為 warn
   - 以上每項都有「破壞資料後變紅／黃」的測試（`tests/storage/test_document_checks.py`）
 - `/v1/status` 另附 `documents: {enabled, worker, backlog}`；文件 worker 起不來（fatal）時 `ok: false`
+
+## UI 開發與建置（A21）
+
+前端在 `ui/app/`（Preact + Vite + TypeScript），建置產物由服務在 `/ui` 提供（同源，無 CORS）。
+設計稿與設計系統原檔在 `ui/design-source/`（僅供參考）；`ui/app/src/styles/ds/` 是設計系統
+`tokens/*.css` 與 `components/components.css` 的**原樣複製**（檔頭註明來源；更新設計系統時整檔重新複製，
+不直接修改），`tokens/fonts.css` 不複製——它 `@import` Google Fonts，改為 `src/fonts.ts` 以 fontsource
+自託管（CSP 維持 `font-src 'self'`；只載用到的字重，拉丁字型只取 latin 子集，建置時濾掉 woff 只留 woff2）。
+
+| 用途 | 指令（在 `ui/app/`） |
+|---|---|
+| 安裝相依（依 `package-lock.json`） | `npm ci` |
+| 開發（Vite dev server，API 轉到本機服務） | `npm run dev` |
+| 建置到 `ui/app/dist/` | `npm run build`（先跑 typecheck） |
+| lint + typecheck | `npm run lint` |
+| 單元測試（vitest） | `npm test` |
+| E2E（Playwright，含 axe 與手機 profile） | `npm run build && npm run e2e`（首次需 `npx playwright install --only-shell chromium`） |
+| **一鍵全檢**（repo 沒有 CI，提交前跑這個） | `npm run check`＝`lint` → `test` → `build` → `e2e`，任一步失敗即停 |
+
+### 本機開發
+
+1. 照「啟動 API（本機開發）」在 `127.0.0.1:8000` 跑服務（`ui.static_dir` 可不設）
+2. `npm run dev`：`/v1`、`/ui/api` 由 Vite proxy 轉到 `LORE_VAULT_DEV_API`（預設 `http://127.0.0.1:8000`），
+   瀏覽器開 `http://localhost:5173/ui/`。同源 proxy 讓 cookie 行為與正式部署一致
+3. 或直接由服務提供建置產物：`npm run build` 後設 `LORE_VAULT_UI_STATIC_DIR=<repo>/ui/app/dist`，開
+   `http://localhost:8000/ui/`
+
+`ui.cookie_secure` 預設開（cookie 名 `__Host-lv_session`）；瀏覽器把 `http://localhost` 視為安全來源，
+本機多半不用關。只有用非 localhost 的 http 位址開發時才設 `LORE_VAULT_UI_COOKIE_SECURE=false`
+（cookie 名改為 `lv_session`）。
+
+### 身分驗證
+
+- 登入用 DB 內的 **UI 帳號密碼**（A23，schema v13 `ui_accounts`；不再以 API token 當登入金鑰）。
+  `POST /ui/api/login` 成功後發 session cookie：HttpOnly、SameSite=Strict、Path=/、Secure（可設定）、
+  Max-Age = 絕對期限。API token 的 Bearer 路徑不變
+- 作者（A22／A23）：session 的 principal = 登入帳號的 username（`UEPBernie`，與 Eternity 帳號一致），
+  `GET /ui/api/session` 回 `principal` 與 `display_name`；UI 寫入記在該 principal 下，前端在 body 帶
+  `author: <display_name>`（`Xavier (Bernie)`）。服務端不強制 author、只記錄，也不代填。
+  Bearer 路徑的 principal 仍由 `api.principals` 對照（唯一的 token → `UEPBernie`）
+- session 只存在服務記憶體（以 sha256(session id) 為鍵）：**服務重啟即全部失效**，重新登入即可。
+  期限：絕對 `ui.session_absolute_hours`（預設 12）、閒置 `ui.session_idle_minutes`（預設 60）；
+  同時上限 `ui.max_sessions`（預設 32，超過淘汰最舊）
+- CSRF：cookie 認證的請求（含登入、登出）一律要求 `X-Lore-Vault-UI: 1`，外加 SameSite=Strict；
+  服務不回 CORS 標頭，跨站頁面帶不出自訂標頭。帶 `Authorization` 的請求只走 bearer、不看 cookie
+- 鎖定規則（A23，固定、不做設定項）：失敗計數是**全域**的（不分來源 IP），累計 3 次即鎖定；鎖定後
+  所有登入一律 423（含正確密碼，且不再比對密碼），只能人工解鎖。未鎖定時計數在 Asia/Taipei 換日歸零；
+  鎖定不因換日解除；登入成功**不**歸零。計數與鎖定存在 DB（`ui_login_state`），服務重啟不解鎖、不歸零。
+  每次失敗回應帶剩餘次數。先前的依 IP 限流與退避設定已移除（`ui.login_*` 四個鍵，設定檔留著會拒絕啟動）
+- 登入紀錄：每次嘗試記一列 `ui_login_log`（時間、來源 IP、嘗試的 username、結果 success／bad_credentials／
+  locked／no_account，人工解鎖另記 unlock；**不記密碼**）。保留 `ui.login_log_retention_days`（預設 90）天，
+  過期的在服務啟動與每次嘗試時清除
+- 來源 IP（只用於登入紀錄與 log）：預設用直接連線位址。`ui.trusted_proxies`（逗號分隔 IP／CIDR）設定後，
+  只有來自這些位址的請求才採信 `CF-Connecting-IP`；不看 `X-Forwarded-For`
+- `/ui` 回應帶嚴格 CSP（`default-src 'self'`、無 `unsafe-inline`、`frame-ancestors 'none'`）、
+  `X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`、`X-Frame-Options: DENY` 等；
+  `/ui/api/*` 另加 `Cache-Control: no-store`，`index.html` 為 `no-cache`
+
+### UI 帳號：設定密碼、查看紀錄、解鎖
+
+密碼**不經過 agent**：只能由本人在主機的互動終端機輸入（getpass 兩次、至少 12 字元）；指令拒絕
+`--password` 參數、不讀環境變數，stdin 不是終端機（pipe、agent 代跑）也拒絕。
+`cli.admin` 不遷移資料庫：服務要先以新版啟動一次、升到 schema v13，才能設定帳號。
+
+```powershell
+# 建立帳號或更新密碼（容器內一定要 -it）；--display 省略時新帳號用 username、既有帳號保留原值
+docker exec -it lore-vault python -m lore_vault.cli.admin ui-set-password --user UEPBernie --display "Xavier (Bernie)"
+# 鎖定狀態、目前失敗次數、剩餘次數、帳號清單
+docker exec lore-vault python -m lore_vault.cli.admin ui-lock-status
+# 最近的登入紀錄（新到舊，預設 50 筆）
+docker exec lore-vault python -m lore_vault.cli.admin ui-login-log --limit 20
+# 人工解鎖（預設 dry-run；--yes 才解鎖、歸零計數並寫一筆 unlock 紀錄）
+docker exec lore-vault python -m lore_vault.cli.admin ui-unlock --yes
+```
+
+username 儲存保留大小寫、比對不分大小寫（`uepbernie` 也能登入同一帳號）。改密碼不會解鎖。
+doctor `ui.login_lock`：鎖定中為 fail（附鎖定時間）；尚無帳號為 warn；近 24 小時失敗次數列在計數。
+查詢與解鎖都在 `storage.ui_login`（`lock_status`／`login_log`／`unlock`），日後接 HTTP 管理端點沿用。
+
+E2E 以 `ui/app/e2e/seed_account.py` 在臨時資料庫預先建立測試帳號（只給 Playwright 用）；整個 E2E
+只能在 `login.spec.ts` 錯一次密碼，多錯會把後面的 spec 鎖在外面。
+
+### API client 慣例（給畫面卡）
+
+`src/lib/api.ts` 的 `createApiClient`：非 2xx 一律丟 `ApiError`（`status`、`code`、`message`、原始 `body`、
+`retryAfter`），非 JSON 回應與網路失敗也轉成 `ApiError`；資料端點 401 會通知 App 回登入頁。成功回應附
+`notices`（`degraded`／`truncated`／`omitted`／`unsupported_kinds`／`missing`／`unavailable`，含巢狀項目），
+原始資料不刪改——**畫面必須呈現 notices**，不能只取 `data`。
+
+### E2E
+
+`playwright.config.ts` 先以 `uv run python ui/app/e2e/seed_account.py` 在臨時資料庫建立測試專用 UI 帳號
+（`e2e/constants.ts` 的 `E2E_USER`／`E2E_PASSWORD`／`E2E_DISPLAY`，經 `E2E_UI_*` 環境變數傳給腳本），再以
+`uv run uvicorn --factory lore_vault.api.app:create_app` 起一個臨時服務（port 5199），提供 `dist/`；不碰執行中的服務。環境（全部以環境變數注入，不讀使用者設定）：
+
+| 設定 | 值 | 目的 |
+|---|---|---|
+| `LORE_VAULT_CONFIG` | 空字串 | 不讀設定檔 |
+| `HOME`／`USERPROFILE` | 系統暫存目錄下的新目錄（`mkdtemp`） | 不碰家目錄 |
+| `LORE_VAULT_DATABASE_PATH` | 暫存目錄的 `lore.db` | 每次全新資料庫 |
+| `LORE_VAULT_API_TOKEN` | 固定測試 token（`e2e/constants.ts`） | 以 Bearer 建立測試資料（UI 登入改用帳號密碼） |
+| `LORE_VAULT_UI_STATIC_DIR` | `ui/app/dist` | 由服務提供建置產物 |
+| `LORE_VAULT_API_ENRICH_WORKER`／`LORE_VAULT_API_EMBEDDING_WARMUP` | `false` | 不跑摘要／向量補算、不暖機 |
+| `LORE_VAULT_API_DOCUMENT_WORKER` | `true` | **文件 worker 開啟**：上傳後真的抽取、切段、建索引 |
+| `LORE_VAULT_DOCUMENTS_BLOB_DIR` | 暫存目錄的 `blobs/` | 文件功能需要 blob 目錄 |
+| `LORE_VAULT_EMBEDDING_BASE_URL` | `http://127.0.0.1:9` | 語意模型指向不存在的位址：不論本機有沒有跑 Ollama，recall／查重都穩定走降級（lexical） |
+| `LORE_VAULT_EMBEDDING_QUERY_TIMEOUT`／`LORE_VAULT_EMBEDDING_TIMEOUT` | `0.5`／`1`（秒） | 降級快速發生，不拖慢測試 |
+
+登入 smoke 測試同時斷言頁面沒有任何 CSP 違規與 console 錯誤（其他規格用 `helpers.watchPage` 做同樣檢查）。
+
+規格與 project（`playwright.config.ts`）：
+
+| 規格 | project | 內容 |
+|---|---|---|
+| `login.spec.ts` | chromium | 登入（故意錯一次密碼）、App Shell、深淺色、space 切換、登出 |
+| `notes-docs.spec.ts` | chromium | 寫筆記（寫入前查重 → 照樣新增）→ 檢索（降級）→ 詳情；拖放上傳 → 抽取 → 跳到段落 |
+| `vault-maint.spec.ts` | chromium | 建 vault、別名、換 space、刪除、墓碑 |
+| `a11y.spec.ts` | chromium | 深淺兩主題逐畫面跑 axe（`@axe-core/playwright`，WCAG 2.1 A／AA 規則，含對話框、space 選單、三個 space 配色），斷言零違規；快捷鍵 |
+| `mobile.spec.ts` | mobile（`Pixel 7` 行動 profile，Chromium） | 抽屜導覽、觸控目標 ≥ 44px、抽屜開著時跑 axe；375／414／768／1280 寬度逐畫面沒有橫向捲動 |
+
+- **登入失敗計數是全域的**（A23，3 次即鎖定、成功不歸零）：同一個臨時服務上 `login.spec` 只能跑一次，
+  所以手機規格只放在 mobile project（`testMatch`），其餘規格只在 chromium project 跑；新規格不可以登入失敗
+- axe 掃描前以 `emulateMedia({ reducedMotion: 'reduce' })` 讓淡入動畫立即結束，否則會量到半透明的顏色
+- 暫存目錄 `lore-vault-e2e-*`（系統暫存）：只在 Playwright 主程序建立（經 `LORE_VAULT_E2E_SCRATCH` 交給 worker），
+  主程序結束時刪除；刪不掉的（Windows 上服務尚未放開 `lore.db`）在下次執行時清掉超過 10 分鐘的殘留
+
+### docker
+
+`Dockerfile` 多一個 `ui-builder` 階段（`node:22-slim`：`npm ci` → `npm run build`），執行階段只
+`COPY --from=ui-builder /ui/dist /app/ui`，node 不進最終映像；`docker/config.toml` 設 `ui.static_dir = "/app/ui"`。
+`.dockerignore` 放行 `ui/app/`，但排除 `node_modules`、`dist` 與測試產物。

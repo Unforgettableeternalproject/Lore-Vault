@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -19,7 +20,7 @@ from fastapi.testclient import TestClient
 from lore_vault.api.app import create_app
 from lore_vault.api.settings import ApiSettings
 from lore_vault.config import Config, EmbeddingConfig, Secret
-from lore_vault.storage import fts, vectors
+from lore_vault.storage import fts, ui_login, vectors
 from lore_vault.storage.db import connect
 
 DIM = 16
@@ -57,6 +58,33 @@ class SpaceClient(TestClient):
 
 TOKEN = "test-token-0123456789abcdef"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
+# UI 帳號（A23）：測試用固定值；scrypt 用便宜參數（參數存在列中，驗證照列中參數）
+UI_USER = "UEPBernie"
+UI_DISPLAY = "Xavier (Bernie)"
+UI_PASSWORD = "correct horse battery"
+UI_LOGIN = {"username": UI_USER, "password": UI_PASSWORD}
+CHEAP_SCRYPT = ui_login.ScryptParams(n=2**10, r=8, p=1)
+
+
+def seed_ui_account(
+    db_path: Path,
+    username: str = UI_USER,
+    password: str = UI_PASSWORD,
+    display: str | None = UI_DISPLAY,
+) -> None:
+    """在（會被遷移的）測試資料庫建立 UI 帳號；app 啟動前後呼叫都可以。"""
+    conn = connect(db_path)
+    try:
+        ui_login.set_password(
+            conn,
+            username,
+            password,
+            now=datetime.now(UTC),
+            display=display,
+            params=CHEAP_SCRYPT,
+        )
+    finally:
+        conn.close()
 
 
 def fake_vector(text: str) -> list[float]:

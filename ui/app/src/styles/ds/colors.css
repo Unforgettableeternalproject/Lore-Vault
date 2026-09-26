@@ -1,0 +1,72 @@
+/* 複製自 ui/design-source/_ds/…/tokens/colors.css（U.E.P 設計系統），請勿直接修改；更新設計系統時整檔重新複製。 */
+/* Brand foundation, surfaces, ink, accents. Values lifted verbatim from
+   apps/uep/src/styles/tokens.css. */
+:root{
+  /* Brand */
+  --uep-brown:#8a4423;
+  --uep-cream:#f7d07d;
+  --uep-slate:#3b4150;
+  --uep-stone:#b9b69b;
+  --uep-gold:#d5b618;
+  --uep-gold-soft:#e9cd3f;
+  --uep-gold-glow:rgba(213,182,24,.55);
+
+  /* Light surfaces */
+  --bg:#fafaf7;
+  --bg-soft:#f4f2eb;
+  --bg-card:#ffffff;
+  --bg-sunken:#eceae0;
+  --line:rgba(59,65,80,.1);
+  --line-strong:rgba(59,65,80,.2);
+
+  /* Ink */
+  --ink:#2a2620;
+  --ink-soft:#5c5749;
+  --ink-mute:#8a8474;
+  --ink-title:#1f1b14;
+  --ink-body:var(--ink);
+
+  /* Accent */
+  --accent:var(--uep-gold);
+  --accent-ink:#6e5c0f;
+
+  /* Hairline / void */
+  --hairline:rgba(31,27,20,.14);
+  --hairline-strong:rgba(31,27,20,.28);
+  --void:#fafaf7;
+  --void-deep:#f4f2eb;
+
+  /* Semantic aliases */
+  --text-body:var(--ink);
+  --text-title:var(--ink-title);
+  --text-mute:var(--ink-mute);
+  --surface-page:var(--bg);
+  --surface-card:var(--bg-card);
+  --surface-sunken:var(--bg-sunken);
+  --border-subtle:var(--line);
+  --border-strong:var(--line-strong);
+
+  /* Status (from UepToast) */
+  --status-success:#34d399;
+  --status-error:#f87171;
+  --status-warning:var(--uep-gold);
+  --status-info:#60a5fa;
+  --state-error-text:#b86060;
+}
+
+[data-theme='dark']{
+  --bg:#14151a;
+  --bg-soft:#1b1d24;
+  --bg-card:#20232c;
+  --bg-sunken:#0e0f13;
+  --line:rgba(255,255,255,.08);
+  --line-strong:rgba(255,255,255,.18);
+  --ink:#ece9df;
+  --ink-soft:#b3ae9f;
+  --ink-mute:#7a7669;
+  --ink-title:#ffffff;
+  --hairline:rgba(255,255,255,.1);
+  --hairline-strong:rgba(255,255,255,.22);
+  --void:#0e0f13;
+  --void-deep:#14151a;
+}

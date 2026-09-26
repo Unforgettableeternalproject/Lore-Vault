@@ -67,7 +67,7 @@ def test_v7_database_migrates_to_v8(db_path):
             "('folder/m', 'm', 'repo', ?)",
             (TS,),
         )
-        assert migrate(raw) == SCHEMA_VERSION == 10
+        assert migrate(raw) == SCHEMA_VERSION == len(migrate_mod.MIGRATIONS)
         names = {
             r[0]
             for r in raw.execute("SELECT name FROM sqlite_master WHERE type='table'")

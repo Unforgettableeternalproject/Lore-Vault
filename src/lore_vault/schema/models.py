@@ -106,6 +106,42 @@ class Vault(Record):
 
 # ── Note ─────────────────────────────────────────────────────────────
 
+# 作者契約（A22）：
+# - author：寫入者自報的身分名（agent 用角色名、UI 登入者為 `Xavier (Bernie)`）；
+#   未填為 None（對外顯示為未具名），服務端**不代填**
+# - principal：服務依憑證判定的主體，不可由請求指定。現階段唯一的憑證對應
+#   DEFAULT_PRINCIPAL；日後一 token 一 principal
+# - updated_by／updated_by_principal：最後一次寫入（建立或修改）的自報名與 principal
+# - 舊 PM 匯入的 note 標 AUTHOR_LEGACY；API／MCP 寫入者不可自稱 legacy
+AUTHOR_LEGACY = "legacy"
+# 與 Eternity 帳號一致（A23；v13 遷移把舊的 xavier 改寫成這個）
+DEFAULT_PRINCIPAL = "UEPBernie"
+AUTHOR_MAX_CHARS = 64
+_AUTHOR_FORBIDDEN_WS = frozenset(chr(c) for c in (9, 10, 13))  # tab, LF, CR
+
+
+def validate_author(value: object, field: str = "author") -> str | None:
+    """API／MCP 寫入者自報的名稱：None 保持 None（不代填）；字串去掉前後空白後
+    必須非空、單行、不超過 `AUTHOR_MAX_CHARS` 字，且不含禁用字元（同 `chars`）；
+    `legacy`（不分大小寫）保留給舊 PM 匯入，拒絕。"""
+    from .chars import check_text
+
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise fail("Note", field, f"必須是字串，得到 {type(value).__name__}")
+    check_text(field, value)
+    name = value.strip()
+    if not name:
+        raise fail("Note", field, "不可為空白；未具名請省略此欄位")
+    if any(ch in _AUTHOR_FORBIDDEN_WS for ch in name):
+        raise fail("Note", field, "必須是單行（不可含 tab、換行）")
+    if len(name) > AUTHOR_MAX_CHARS:
+        raise fail("Note", field, f"不可超過 {AUTHOR_MAX_CHARS} 字，得到 {len(name)}")
+    if name.casefold() == AUTHOR_LEGACY:
+        raise fail("Note", field, f"{AUTHOR_LEGACY!r} 保留給舊 PM 匯入，不可自稱")
+    return name
+
 
 @dataclass(frozen=True)
 class Note(Record):
@@ -124,6 +160,11 @@ class Note(Record):
     links: tuple[str, ...] = ()
     # 更正關係：這篇取代哪篇（不另建更正篇）
     supersedes: str | None = None
+    # 作者契約（A22）；儲存層要求 principal 非 None
+    author: str | None = None
+    principal: str | None = None
+    updated_by: str | None = None
+    updated_by_principal: str | None = None
 
     REQUIRED: ClassVar[frozenset[str]] = frozenset(
         {"id", "vault", "title", "body", "created", "updated"}
@@ -145,6 +186,8 @@ class Note(Record):
         opt_str("Note", "supersedes", self.supersedes)
         if self.supersedes == self.id:
             raise fail("Note", "supersedes", "不可取代自己")
+        for name in ("author", "principal", "updated_by", "updated_by_principal"):
+            opt_str("Note", name, getattr(self, name))
 
 
 def _ts(value: str) -> datetime:

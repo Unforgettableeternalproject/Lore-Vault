@@ -50,6 +50,7 @@ def add_note(conn):
         ts: str = TS,
     ) -> Note:
         note = Note(
+            principal="xavier",
             id=note_id,
             vault=vault,
             title=title,

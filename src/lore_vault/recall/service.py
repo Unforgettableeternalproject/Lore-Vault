@@ -5,9 +5,9 @@ kinds：`note`、`chunk`（文件段落，T-65）；`concept` 已知但尚未實
 note + chunk。note 與 chunk 各跑 lexical＋vector，四路一次送進 `rrf_fuse`（設計 5.2）。
 
 回傳契約（A4）：每項只有 `{id, kind, vault, title, summary, summary_source, score,
-updated}`，不含 body；全文走 `notes.get`。chunk 另帶 `document_id`、`chunk_id`
-（＝`id`）、`locator`；title 為文件檔名、summary 為該段摘錄（`summary_source:
-"excerpt"`），同樣受字數預算。
+updated}`（note 另帶 `author`，A22），不含 body；全文走 `notes.get`。
+chunk 另帶 `document_id`、`chunk_id`（＝`id`）、`locator`；title 為文件檔名、
+summary 為該段摘錄（`summary_source: "excerpt"`），同樣受字數預算。
 
 降級（D1 設計約束）：
 - embedder 沒設定、拋例外、逾時、回空／維度不符向量 → 只走 lexical，
@@ -92,6 +92,8 @@ class RecallItem:
     document_id: str | None = None
     chunk_id: str | None = None
     locator: dict[str, Any] | None = None
+    # 僅 kind="note"：寫入者自報名（A22；未具名為 None）
+    author: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -104,6 +106,8 @@ class RecallItem:
             "score": round(self.score, 6),
             "updated": self.updated,
         }
+        if self.kind == KIND_NOTE:
+            data["author"] = self.author
         if self.kind == KIND_CHUNK:
             data["document_id"] = self.document_id
             data["chunk_id"] = self.chunk_id
@@ -355,6 +359,7 @@ def _materialize(
                     source,
                     f.score,
                     note.updated,
+                    author=note.author,
                 )
             )
             continue

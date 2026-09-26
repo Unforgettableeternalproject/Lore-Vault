@@ -23,7 +23,7 @@ from typing import Any
 
 from lore_vault.documents import service as document_service
 from lore_vault.recall.embedder import REASON_UNAVAILABLE, Embedder, embed_text
-from lore_vault.schema import Note
+from lore_vault.schema import Note, validate_author
 from lore_vault.schema.chars import check_fields
 from lore_vault.storage import fts, vectors
 from lore_vault.storage.db import transaction
@@ -32,12 +32,14 @@ from lore_vault.storage.notes import (
     get_notes,
     insert_note,
     list_notes,
+    superseded_by,
     update_note_if,
 )
 from lore_vault.storage.timeutil import normalize_utc, utc_now
 from lore_vault.storage.vaults import resolve_read, resolve_write
 
-from .summary import display_summary
+from .links import merge_links, resolve_body_links
+from .summary import clip, display_summary
 from .text import embedding_text
 
 # ── 查重門檻 ────────────────────────────────────────────────────────
@@ -59,9 +61,20 @@ DEDUP_QUERY_TOKENS = 64
 
 DEFAULT_LIST_LIMIT = 50
 MAX_LIST_LIMIT = 200
+# list 的摘要預算：本頁 note 摘要字數總和上限（title 一律回、不計入，
+# 分頁不因預算少回）。依本頁公平分配（見 `_apply_list_budget`）；UI 可傳更大的值
+DEFAULT_LIST_BUDGET = 4000
+# 公平分配時每則摘要至少分到的字數；預算連這個都給不起的尾端 note 才省略
+LIST_MIN_SUMMARY_CHARS = 40
+# 預算用完後的 note：summary 為 null、summary_source 標這個值（不沿用實際來源）
+SOURCE_OMITTED = "omitted"
 # get 的預算：所有回傳 body 的字數總和上限（約 3–4 篇中型 note）
 DEFAULT_GET_BUDGET = 12000
 MAX_GET_IDS = 50
+# get 的 fields：full（預設，含全文）／meta（只回 metadata，不組裝全文）
+FIELDS_FULL = "full"
+FIELDS_META = "meta"
+GET_FIELDS = (FIELDS_FULL, FIELDS_META)
 
 _WHITESPACE = re.compile(r"\s+")
 
@@ -105,6 +118,12 @@ def _norm_title(title: str) -> str:
     return _WHITESPACE.sub(" ", title).strip().casefold()
 
 
+def _check_principal(principal: object) -> None:
+    """principal 由服務依憑證決定；缺少代表呼叫路徑漏接認證結果，是程式錯誤。"""
+    if not isinstance(principal, str) or not principal.strip():
+        raise TypeError("principal 必填（由服務依憑證判定，不可由請求指定）")
+
+
 def _str_list(name: str, values: Sequence[str]) -> tuple[str, ...]:
     if isinstance(values, str):
         raise TypeError(f"{name} 必須是清單，不可傳單一字串")
@@ -137,20 +156,37 @@ class DuplicateCandidate:
 
 @dataclass(frozen=True)
 class WriteResult:
-    note: Note
+    # dry_run 時為 None（沒有寫入）
+    note: Note | None
     duplicates: list[DuplicateCandidate] = field(default_factory=list)
     # 查重的向量那一路沒跑（embedder 不可用等）：只做了 lexical 查重
     dedup_degraded: bool = False
     dedup_reason: str | None = None
+    # 正文 `[[標題]]` 解析不到或歧義的連結（保留原文、不寫入 links）
+    unresolved_links: tuple[dict[str, Any], ...] = ()
+    dry_run: bool = False
+    # 實際（或 dry_run 時將會）存下的 vault key 與 links
+    vault: str = ""
+    links: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "id": self.note.id,
-            "vault": self.note.vault,
-            "updated": self.note.updated,
+        common = {
+            "vault": self.vault,
+            "links": list(self.links),
+            "unresolved_links": [dict(u) for u in self.unresolved_links],
             "duplicates": [d.to_dict() for d in self.duplicates],
             "dedup_degraded": self.dedup_degraded,
             "dedup_reason": self.dedup_reason,
+            "dry_run": self.dry_run,
+        }
+        if self.note is None:
+            return common
+        return {
+            "id": self.note.id,
+            "updated": self.note.updated,
+            "author": self.note.author,
+            "principal": self.note.principal,
+            **common,
         }
 
 
@@ -229,6 +265,8 @@ def write(
     body: str,
     *,
     space: str,
+    principal: str,
+    author: str | None = None,
     topics: Sequence[str] = (),
     links: Sequence[str] = (),
     supersedes: str | None = None,
@@ -238,6 +276,7 @@ def write(
     lexical_threshold: float = DEDUP_LEXICAL_THRESHOLD,
     note_id: str | None = None,
     now: str | None = None,
+    dry_run: bool = False,
 ) -> WriteResult:
     """新增 note，並回傳寫入前查到的疑似重複清單（由 agent 決定是否改用 update）。
 
@@ -247,7 +286,17 @@ def write(
     - `supersedes` 必須是同一 vault 內存在的 note；它本身不列入疑似重複
     - 任一欄位含控制字元（tab、LF、CR 以外的 C0）或孤立 surrogate：拋
       `InvalidCharacters`，不寫入
+    - 作者（A22）：`principal` 由呼叫端依憑證決定（HTTP 層取自認證結果，不可來自
+      請求）；`author` 是寫入者自報名，未填存 None、不代填（規則見
+      `schema.validate_author`）。建立時 `updated_by` 同 `author`
+    - 連結：正文的 `[[標題]]` 在同一 vault 內依標題解析（`notes.links`），唯一命中的
+      note id 併入 links（明確傳入的在前、去重）；解析不到或歧義的保留原文、不寫入，
+      列在 `unresolved_links`
+    - `dry_run=True`：驗證、範圍、supersedes 檢查、查重與連結解析都與正式寫入相同，
+      只在寫入前停下（不建列、不動索引）
     """
+    _check_principal(principal)
+    author = validate_author(author)
     topics = _str_list("topics", topics)
     links = _str_list("links", links)
     # 查重會把 title／body 組成 FTS 查詢，禁用字元要在那之前擋下
@@ -276,6 +325,19 @@ def write(
         lexical_threshold=lexical_threshold,
         exclude=[supersedes] if supersedes else (),
     )
+    parsed = resolve_body_links(conn, key, body, self_title=title)
+    links = merge_links(links, parsed.ids)
+    if dry_run:
+        return WriteResult(
+            None,
+            duplicates,
+            reason is not None,
+            reason,
+            parsed.unresolved,
+            dry_run=True,
+            vault=key,
+            links=links,
+        )
     stamp = normalize_utc(now) if now is not None else utc_now()
     note = Note(
         id=note_id or uuid.uuid4().hex,
@@ -288,9 +350,21 @@ def write(
         topics=topics,
         links=links,
         supersedes=supersedes,
+        author=author,
+        principal=principal,
+        updated_by=author,
+        updated_by_principal=principal,
     )
     stored = insert_note(conn, key, note, space=space)
-    return WriteResult(stored, duplicates, reason is not None, reason)
+    return WriteResult(
+        stored,
+        duplicates,
+        reason is not None,
+        reason,
+        parsed.unresolved,
+        vault=stored.vault,
+        links=stored.links,
+    )
 
 
 # ── update ──────────────────────────────────────────────────────────
@@ -303,12 +377,19 @@ class UpdateResult:
     summary_stale: bool
     # title 或 body 變了：舊 embedding 已刪，待背景重算
     embedding_stale: bool
+    # 這次有重新解析正文連結時，解析不到或歧義的 `[[標題]]`
+    unresolved_links: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.note.id,
             "vault": self.note.vault,
             "updated": self.note.updated,
+            "author": self.note.author,
+            "updated_by": self.note.updated_by,
+            "updated_by_principal": self.note.updated_by_principal,
+            "links": list(self.note.links),
+            "unresolved_links": [dict(u) for u in self.unresolved_links],
             "summary_stale": self.summary_stale,
             "embedding_stale": self.embedding_stale,
         }
@@ -324,6 +405,8 @@ def update(
     expected_updated: str,
     *,
     space: str,
+    principal: str,
+    author: str | None = None,
     title: str | None = None,
     body: str | None = None,
     topics: Sequence[str] | None = None,
@@ -335,7 +418,18 @@ def update(
     （附目前版本），不寫入任何東西。
 
     版本比對只在 `storage.notes.update_note_if` 一處（同一交易內）。
+    `author` 是這次修改者的自報名：寫進 `updated_by`（未填存 None，不沿用上一位），
+    `principal` 寫進 `updated_by_principal`；原作者 `author` 不變。
+
+    連結（與 write 同一套 `[[標題]]` 解析，同一交易內讀目前版本計算）：
+    - 有傳 `links`：links = 傳入值 ∪ 正文（新 body，未傳則目前 body）解析出的 id
+    - 沒傳 `links`、body 有變：links = (目前 links − 舊 body 解析出的 id) ∪ 新 body
+      解析出的 id。正文刪掉 `[[x]]` 後自動連結會消失，明確加的連結保留（但若它剛好
+      也寫在舊 body 的 `[[ ]]` 裡，視為自動連結一併移除）
+    - 兩者都沒有：links 不動、不重新解析（`unresolved_links` 為空）
     """
+    _check_principal(principal)
+    author = validate_author(author)
     if not isinstance(expected_updated, str) or not expected_updated:
         raise ValueError("expected_updated 必填（取自 get／write 回傳的 updated）")
     changes: dict[str, Any] = {}
@@ -360,16 +454,47 @@ def update(
             get_note(conn, key, changes["supersedes"], space=space)
         body_changed = "body" in changes and changes["body"] != current.body
         title_changed = "title" in changes and changes["title"] != current.title
+        unresolved: tuple[dict[str, Any], ...] = ()
+        if "links" in changes or body_changed:
+            parsed = resolve_body_links(
+                conn,
+                key,
+                changes.get("body", current.body),
+                self_id=note_id,
+                self_title=changes.get("title", current.title),
+            )
+            if "links" in changes:
+                base = changes["links"]
+            else:
+                stale = resolve_body_links(
+                    conn,
+                    key,
+                    current.body,
+                    self_id=note_id,
+                    self_title=current.title,
+                ).ids
+                base = tuple(i for i in current.links if i not in stale)
+            changes["links"] = merge_links(base, parsed.ids)
+            unresolved = parsed.unresolved
         if body_changed:
             changes["summary"] = None
         updated = update_note_if(
-            conn, key, note_id, expected_updated, changes, space=space, now=now
+            conn,
+            key,
+            note_id,
+            expected_updated,
+            changes,
+            space=space,
+            now=now,
+            editor=(author, principal),
         )
         if updated is None:
             raise VersionConflict(
                 get_note(conn, key, note_id, space=space), expected_updated
             )
-    return UpdateResult(updated, body_changed, body_changed or title_changed)
+    return UpdateResult(
+        updated, body_changed, body_changed or title_changed, unresolved
+    )
 
 
 # ── get ─────────────────────────────────────────────────────────────
@@ -405,13 +530,17 @@ def get(
     space: str,
     budget: int = DEFAULT_GET_BUDGET,
     documents_available: bool = True,
+    fields: str = FIELDS_FULL,
 ) -> GetResult:
     """批次取全文。`ids` 可混 note id、文件 id（`doc:…`，回整份文件文字）與
     chunk id（`chunk:…`，回該段全文），依前綴分派（T-66）。
 
     依傳入順序分配字數預算（note 的 body、文件／chunk 的 text）；超過時該項截斷、
     之後各項為空字串，並在該項標 `truncated: true`、`body_chars`／`text_chars`
-    為原文字數。
+    為原文字數。文件文字依 chunk 順序逐段取，預算用完就停（不先串全文）。
+    chunk 項目帶 `overlap`（開頭與前一段重疊的字數，段落起頭為 0）。
+    `fields="meta"`：只回 metadata——note 不含 `body`、文件／chunk 不含 `text`，
+    `body_chars`／`text_chars` 照給、不佔預算（`used_chars` 為 0）、不組裝全文。
     `documents_available=False`（降級讀快照）時文件／chunk id 列在 `unavailable`。
     """
     if isinstance(ids, str):
@@ -423,9 +552,14 @@ def get(
         raise ValueError(f"一次最多取 {MAX_GET_IDS} 則，得到 {len(unique)}")
     if isinstance(budget, bool) or not isinstance(budget, int) or budget <= 0:
         raise ValueError(f"budget 必須是正整數，得到 {budget!r}")
+    if fields not in GET_FIELDS:
+        raise ValueError(f"fields 必須是 {list(GET_FIELDS)} 之一，得到 {fields!r}")
+    meta_only = fields == FIELDS_META
     refs = [i for i in unique if document_service.is_document_ref(i)]
     note_ids = [i for i in unique if not document_service.is_document_ref(i)]
-    found = {n.id: n for n in get_notes(conn, vault, note_ids, space=space)}
+    notes = get_notes(conn, vault, note_ids, space=space)
+    found = {n.id: n for n in notes}
+    replaced = superseded_by(conn, notes)
     doc_items: dict[str, dict[str, Any]] = {}
     unavailable: list[str] = []
     if refs and documents_available:
@@ -438,42 +572,62 @@ def get(
     for item_id in unique:
         doc_item = doc_items.get(item_id)
         if doc_item is not None:
-            full = doc_item["text"]
-            text = full[:remaining]
-            truncated = len(text) < len(full)
-            remaining -= len(text)
-            any_truncated = any_truncated or truncated
-            items.append(
-                {
-                    **doc_item,
-                    "text": text,
-                    "text_chars": len(full),
-                    "truncated": truncated,
-                }
-            )
+            item = dict(doc_item)
+            if doc_item["kind"] == document_service.KIND_CHUNK:
+                full = item.pop("text")
+                total = len(full)
+                text = full[:remaining]
+            elif meta_only:
+                total = document_service.document_text_chars(conn, doc_item["id"])
+                text = ""
+            else:
+                text, total = document_service.document_text(
+                    conn, doc_item["id"], remaining
+                )
+            item["text_chars"] = total
+            if meta_only:
+                item["truncated"] = False
+            else:
+                truncated = len(text) < total
+                remaining -= len(text)
+                any_truncated = any_truncated or truncated
+                item["text"] = text
+                item["truncated"] = truncated
+            items.append(item)
             continue
         note = found.get(item_id)
         if note is None:
             continue
-        body = note.body[:remaining]
-        truncated = len(body) < len(note.body)
-        remaining -= len(body)
-        any_truncated = any_truncated or truncated
         summary, source = display_summary(note)
+        entry: dict[str, Any] = {
+            "id": note.id,
+            "kind": "note",
+            "vault": note.vault,
+            "title": note.title,
+            "summary": summary,
+            "summary_source": source,
+        }
+        if meta_only:
+            entry["truncated"] = False
+        else:
+            body = note.body[:remaining]
+            truncated = len(body) < len(note.body)
+            remaining -= len(body)
+            any_truncated = any_truncated or truncated
+            entry["body"] = body
+            entry["truncated"] = truncated
+        entry["body_chars"] = len(note.body)
         items.append(
             {
-                "id": note.id,
-                "kind": "note",
-                "vault": note.vault,
-                "title": note.title,
-                "summary": summary,
-                "summary_source": source,
-                "body": body,
-                "body_chars": len(note.body),
-                "truncated": truncated,
+                **entry,
                 "topics": list(note.topics),
                 "links": list(note.links),
                 "supersedes": note.supersedes,
+                "superseded_by": replaced.get(note.id),
+                "author": note.author,
+                "principal": note.principal,
+                "updated_by": note.updated_by,
+                "updated_by_principal": note.updated_by_principal,
                 "created": note.created,
                 "updated": note.updated,
             }
@@ -497,6 +651,15 @@ class ListResult:
     next_cursor: str | None
     # 要求了但這個模式下列不出來的種類（降級讀快照時的 document）
     unsupported_kinds: list[str] = field(default_factory=list)
+    # 摘要預算：本頁 note 摘要字數總和上限與實際用量
+    budget: int = DEFAULT_LIST_BUDGET
+    used_chars: int = 0
+    # 預算給不起下限、summary 被省略（`summary_source: "omitted"`）的 note 數
+    summaries_omitted: int = 0
+    # 超過配額被截短（項目標 `summary_truncated: true`）的 note 數
+    summaries_truncated: int = 0
+    # 有任何摘要被省略或截短
+    truncated: bool = False
 
     @property
     def has_more(self) -> bool:
@@ -508,6 +671,11 @@ class ListResult:
             "next_cursor": self.next_cursor,
             "has_more": self.has_more,
             "unsupported_kinds": self.unsupported_kinds,
+            "budget": self.budget,
+            "used_chars": self.used_chars,
+            "truncated": self.truncated,
+            "summaries_omitted": self.summaries_omitted,
+            "summaries_truncated": self.summaries_truncated,
         }
 
 
@@ -560,16 +728,26 @@ def list_(
     limit: int = DEFAULT_LIST_LIMIT,
     kinds: Sequence[str] | None = None,
     documents_available: bool = True,
+    budget: int = DEFAULT_LIST_BUDGET,
 ) -> ListResult:
     """標題清單，依 updated 由新到舊；note 與文件（`kinds` 預設兩者）合併分頁。
 
     `next_cursor` 非 None 代表還有下一頁。文件沒有 topics：指定 `topics` 時只列 note。
     `documents_available=False`（降級讀快照）時 document 列在 `unsupported_kinds`。
+
+    note 項目帶 `summary`／`summary_source`（規則同 recall：有 LLM 摘要用它，否則正文
+    首段頂替）與 `superseded_by`（同 vault 內取代它的 note，多則取 updated 最新者）。
+    摘要受 `budget` 限制（本頁 note 摘要字數總和；title 不計、項目一律回，分頁不受
+    影響），在本頁有摘要的 note 間公平分配；超過配額的截短並標
+    `summary_truncated: true`，連下限都給不起的尾端 note `summary: null`、
+    `summary_source: "omitted"`。規則見 `_apply_list_budget`。
     """
     if isinstance(limit, bool) or not isinstance(limit, int):
         raise TypeError("limit 必須是整數")
     if not 1 <= limit <= MAX_LIST_LIMIT:
         raise ValueError(f"limit 必須在 1–{MAX_LIST_LIMIT}，得到 {limit}")
+    if isinstance(budget, bool) or not isinstance(budget, int) or budget <= 0:
+        raise ValueError(f"budget 必須是正整數，得到 {budget!r}")
     wanted = _list_kinds(kinds)
     decoded = _decode_cursor(cursor) if cursor is not None else None
     unsupported: list[str] = []
@@ -586,6 +764,7 @@ def list_(
             cursor=decoded,
         )
         more = more or next_notes is not None
+        replaced = superseded_by(conn, notes)
         rows.extend(
             (
                 n.updated,
@@ -596,7 +775,13 @@ def list_(
                     "vault": n.vault,
                     "title": n.title,
                     "topics": list(n.topics),
+                    "author": n.author,
+                    "updated_by": n.updated_by,
+                    "supersedes": n.supersedes,
+                    "superseded_by": replaced.get(n.id),
                     "updated": n.updated,
+                    # 暫存：預算分配後換成 summary／summary_source
+                    "_note": n,
                 },
             )
             for n in notes
@@ -624,4 +809,91 @@ def list_(
         if more and page_rows
         else None
     )
-    return ListResult([r[2] for r in page_rows], next_cursor, unsupported)
+    items = [r[2] for r in page_rows]
+    used, omitted, clipped = _apply_list_budget(items, budget)
+    return ListResult(
+        items,
+        next_cursor,
+        unsupported,
+        budget=budget,
+        used_chars=used,
+        summaries_omitted=omitted,
+        summaries_truncated=clipped,
+        truncated=omitted > 0 or clipped > 0,
+    )
+
+
+def _apply_list_budget(
+    items: list[dict[str, Any]], budget: int
+) -> tuple[int, int, int]:
+    """替 note 項目填摘要（就地改寫、不重排）。回傳 (已用字數, 省略筆數, 截短筆數)。
+
+    分配對象是本頁有摘要文字的 note（LLM 摘要或首段頂替；`none` 與文件不佔預算）：
+    1. 全部放得下就全給。
+    2. 否則依頁序取前綴：每則的下限需求 = min(摘要長度, LIST_MIN_SUMMARY_CHARS)，
+       累加超過 budget 的那則起（尾端）全部省略；第一則就超過時仍納入（至少給一則，
+       截到 budget）。
+    3. 納入者之間 water-filling：配額 = floor(剩餘預算 / 剩餘人數)，由短到長處理，
+       摘要不超過配額的全給、用不完的額度留給後面的人；第一個超過配額的起全部取同一
+       配額，整除剩下的零頭依頁序各 +1。結果是決定性的，且 used ≤ budget。
+    被截短的摘要以 `clip` 截到配額（結尾「…」、含在配額內）並標 `summary_truncated`。
+    首段頂替本身有 160 字上限（`summary.lead`），那是呈現規則、不算預算截短。
+    """
+    summaries: dict[int, tuple[str | None, str]] = {}
+    for idx, item in enumerate(items):
+        note = item.pop("_note", None)
+        if note is not None:
+            summaries[idx] = display_summary(note)
+    candidates = [idx for idx, (text, _) in summaries.items() if text]
+    lengths = {idx: len(summaries[idx][0] or "") for idx in candidates}
+
+    included: list[int] = []
+    floor_used = 0
+    for idx in candidates:
+        need = min(lengths[idx], LIST_MIN_SUMMARY_CHARS)
+        if included and floor_used + need > budget:
+            break
+        included.append(idx)
+        floor_used += need
+    quotas = _fair_quotas(included, lengths, budget)
+
+    used = omitted = clipped = 0
+    for idx, (text, source) in summaries.items():
+        item = items[idx]
+        was_clipped = False
+        if text and idx not in quotas:
+            text, source = None, SOURCE_OMITTED
+            omitted += 1
+        elif text:
+            text, was_clipped = clip(text, quotas[idx])
+            clipped += was_clipped
+            used += len(text)
+        item["summary"] = text
+        item["summary_source"] = source
+        item["summary_truncated"] = was_clipped
+    return used, omitted, clipped
+
+
+def _fair_quotas(
+    included: list[int], lengths: dict[int, int], budget: int
+) -> dict[int, int]:
+    """water-filling：回傳每則的字數配額（index → 字數），總和 ≤ budget。"""
+    if sum(lengths[idx] for idx in included) <= budget:
+        return {idx: lengths[idx] for idx in included}
+    quotas: dict[int, int] = {}
+    remaining = budget
+    # 由短到長；同長依頁序（sorted 穩定）
+    ordered = sorted(included, key=lambda idx: lengths[idx])
+    for pos, idx in enumerate(ordered):
+        share = remaining // (len(ordered) - pos)
+        if lengths[idx] <= share:
+            quotas[idx] = lengths[idx]
+            remaining -= lengths[idx]
+            continue
+        # 這則起全部超過配額：同一配額，零頭依頁序各 +1
+        rest = sorted(ordered[pos:])
+        extra = remaining - share * len(rest)
+        for n, r in enumerate(rest):
+            quotas[r] = share + (1 if n < extra else 0)
+        break
+    return quotas

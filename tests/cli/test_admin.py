@@ -27,6 +27,7 @@ SOURCE = "open_notebook"
 
 def _note(vault: str, note_id: str, title: str) -> Note:
     return Note(
+        principal="xavier",
         id=note_id,
         vault=vault,
         title=title,
@@ -220,7 +221,7 @@ def test_delete_native_note_tombstone_has_no_source(db):
     _green(db)
 
 
-def test_undelete_removes_tombstone_and_reconcile_reports_missing(db):
+def _delete_a1(db) -> None:
     _run(
         db,
         "delete-note",
@@ -232,15 +233,55 @@ def test_undelete_removes_tombstone_and_reconcile_reports_missing(db):
         "note:a1",
         "--yes",
     )
+
+
+def test_undelete_restores_note_from_snapshot(db):
+    """v12 起的墓碑有內容快照：undelete 以原 id、原內容還原，對帳維持綠。"""
+    conn = connect(db)
+    try:
+        before = dict(
+            conn.execute("SELECT * FROM notes WHERE id = 'note:a1'").fetchone()
+        )
+    finally:
+        conn.close()
+    _delete_a1(db)
     code, result = _run(db, "undelete-note", "--id", "note:a1")
-    assert code == 0 and result["mode"] == "dry_run"
+    assert code == 0 and result["mode"] == "dry_run" and result["has_snapshot"] is True
     assert _table_counts(db)["note_tombstones"] == 1
     code, result = _run(db, "undelete-note", "--id", "note:a1", "--yes")
-    assert code == 0 and result["mode"] == "undeleted"
+    assert code == 0 and result["mode"] == "undeleted" and result["restored"] is True
+    assert "內文" not in json.dumps(result, ensure_ascii=False)
     assert _table_counts(db)["note_tombstones"] == 0
     conn = connect(db)
     try:
-        # 墓碑移除、尚未重匯：對帳顯示漏筆（重匯即補回）
+        after = dict(
+            conn.execute("SELECT * FROM notes WHERE id = 'note:a1'").fetchone()
+        )
+        result = imports.reconcile(conn, SOURCE)
+    finally:
+        conn.close()
+    # seq 是新的（FTS／向量關聯鍵），其餘逐欄相同
+    before.pop("seq"), after.pop("seq")
+    assert after == before
+    assert result.status == "pass"
+    assert _run(db, "undelete-note", "--id", "note:a1", "--yes")[0] == 1
+
+
+def test_undelete_old_tombstone_only_removes_it(db):
+    """v12 前沒有快照的舊墓碑：維持舊行為，只移除墓碑，對帳顯示漏筆（重匯即補回）。"""
+    _delete_a1(db)
+    conn = connect(db)
+    try:
+        conn.execute("UPDATE note_tombstones SET snapshot = NULL")
+    finally:
+        conn.close()
+    code, result = _run(db, "undelete-note", "--id", "note:a1")
+    assert code == 0 and result["has_snapshot"] is False
+    code, result = _run(db, "undelete-note", "--id", "note:a1", "--yes")
+    assert code == 0 and result["mode"] == "undeleted" and result["restored"] is False
+    assert _table_counts(db)["note_tombstones"] == 0
+    conn = connect(db)
+    try:
         result = imports.reconcile(conn, SOURCE)
     finally:
         conn.close()

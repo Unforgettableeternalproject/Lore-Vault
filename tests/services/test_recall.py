@@ -20,7 +20,7 @@ from .conftest import DIM, ConstantEmbedder, RaisingEmbedder
 A = "folder/a"
 B = "folder/b"
 ITEM_KEYS = {"id", "kind", "vault", "title", "summary", "summary_source", "score"}
-ITEM_KEYS |= {"updated"}
+ITEM_KEYS |= {"updated", "author"}
 
 
 @pytest.fixture

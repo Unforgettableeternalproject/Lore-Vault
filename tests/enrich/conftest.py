@@ -30,6 +30,7 @@ def add_note(conn):
     def add(note_id: str, title: str = "標題", body: str = "正文", **kw) -> Note:
         ts = kw.pop("ts", TS)
         note = Note(
+            principal="xavier",
             id=note_id,
             vault=VAULT,
             title=title,

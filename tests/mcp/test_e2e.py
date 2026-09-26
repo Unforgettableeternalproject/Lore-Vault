@@ -51,8 +51,14 @@ async def test_local_full_flow(app, project):
         vault = again["key"]
 
         wrote = await s.ok(
-            "write", vault=vault, title="快照降級設計", body="服務不可達時讀本地快照"
+            "write",
+            vault=vault,
+            title="快照降級設計",
+            body="服務不可達時讀本地快照",
+            author="Minka",
         )
+        # A22：author 由殼轉送；principal 由服務依憑證判定
+        assert (wrote["author"], wrote["principal"]) == ("Minka", "UEPBernie")
         recalled = await s.ok("recall", vault=vault, query="快照")
         assert [i["id"] for i in recalled["items"]] == [wrote["id"]]
         assert "body" not in recalled["items"][0]
@@ -72,7 +78,9 @@ async def test_local_full_flow(app, project):
             id=wrote["id"],
             expected_updated=wrote["updated"],
             title="快照降級設計（修訂）",
+            author="Novia",
         )
+        assert (updated["author"], updated["updated_by"]) == ("Minka", "Novia")
         # 用舊版本再改一次 → 版本衝突，附目前版本讓 agent 重試
         conflict = await s.err(
             "update",
