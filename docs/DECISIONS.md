@@ -19,6 +19,8 @@
 | A13 | 管線中需要 headless `claude -p` 的階段留在主機排程，不進容器；登入憑證不進容器。實查 `pipeline.py`：蒸餾、收斂、校準**三階段都**經 `adjudicate_to_file` 呼叫 `claude -p`，故整條管線留在主機，改經服務 HTTP 讀寫 episode／concept | 艾斯維爾 2026-09-25，主機常駐不關機；依據 T-03 |
 | A14 | 摘要由 LLM 非同步產生，細節見 D4 | 艾斯維爾 2026-09-26 同意 D4 提案 |
 | A15 | MCP 為各機器本地 stdio 殼、轉發服務 HTTP，並負責快照拉取與不可達降級；服務自帶 bearer token（本機也需帶），遠端再經 Cloudflare Access service token；`pm-proxy.py` 退役。對外沿用 `pm` 與 `pm-api` 子網域 | 艾斯維爾 2026-09-26 同意 D8 提案（先試做） |
+| A16 | U.E.P 接口（D6）不在本次範圍；使用者 UI 在目前部分完成後接著做，設計系統由艾斯維爾提供 | 艾斯維爾 2026-09-26 |
+| A17 | 管線寫回 concept 時，repo-scope 的 vault 歸屬：先依 `source_turns` 查來源 episode 的 vault（A），查不到再以 scope 比對 vault 的顯示名／別名（B），都失敗或有歧義則明確拒收不猜。同名 repo 以組織名區分（scope 寫成 `org/repo`）。repo 改名由之後的 UI 提供別名／重新導向管理 | 艾斯維爾 2026-09-26 |
 
 ## 待裁決
 
@@ -111,7 +113,7 @@ spike 接入跨機器架構——**艾斯維爾同意照以下草案試做**（�
 
 ### D6 對 U.E.P 的接口
 
-MCP、HTTP、或 Python 函式庫形式。等 D3 定案後再決定。
+**不在本次範圍（A16）。**
 
 ### D7 Embedding 模型
 
