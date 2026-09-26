@@ -12,6 +12,9 @@
 `principal` 由認證中介層依憑證判定（`api.principals`），body 帶 `principal` 與其他
 未知欄位一樣 422 拒絕。
 
+`POST /v1/ask`（D11）：recall 同一條檢索取 note 片段，交問答模型整理；模型失敗回
+明確錯誤碼（`ask_*`，見 `api.errors`），不回假成功。
+
 `POST /v1/documents`（T-67）是唯一的 multipart 端點：欄位 `file`、`vault`、`space`
 （必填）、`filename?`、`mime?`；大小上限在讀取 body 時就擋（413 `too_large`）。
 """
@@ -30,6 +33,7 @@ from starlette.datastructures import UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 
 from lore_vault import notes as notes_service
+from lore_vault.ask import service as ask_service
 from lore_vault.doctor import DoctorContext, default_registry
 from lore_vault.doctor.builtin import DEFAULT_BACKLOG_MAX_AGE
 from lore_vault.documents import service as document_service
@@ -102,6 +106,14 @@ class RecallRequest(_ScopedReq):
     limit: int = RECALL_DEFAULT_LIMIT
     budget: int = RECALL_DEFAULT_BUDGET
     mode: str = MODE_HYBRID
+
+
+class AskRequest(_ScopedReq):
+    question: str
+    vault: str | None = None
+    k: int = ask_service.DEFAULT_K
+    # 本輪只支援 note；chunk 列進 unsupported_kinds（文件問答另評估）
+    kinds: list[str] | None = None
 
 
 class GetRequest(_ScopedReq):
@@ -250,6 +262,26 @@ def recall(request: Request, req: RecallRequest) -> dict[str, Any]:
     return result.to_dict()
 
 
+@router.post("/ask")
+def ask(request: Request, req: AskRequest) -> dict[str, Any]:
+    """recall 的 note 片段交問答模型整理（D11）。檢索完就關連線，再呼叫模型：
+    模型呼叫可能要數秒到 `ask.timeout`，不佔著資料庫連線。"""
+    state = _state(request)
+    with state.connection() as conn:
+        context = ask_service.prepare(
+            conn,
+            req.question,
+            req.vault,  # type: ignore[arg-type]
+            space=req.space,  # type: ignore[arg-type]  # None → SpaceRequired
+            embedder=state.query_embedder,
+            dim=state.dim,
+            k=req.k,
+            kinds=req.kinds,
+            snippet_max_chars=state.settings.config.ask.snippet_max_chars,
+        )
+    return ask_service.generate(context, state.answerer).to_dict()
+
+
 @router.post("/get")
 def get(request: Request, req: GetRequest) -> dict[str, Any]:
     with _state(request).connection() as conn:
@@ -379,6 +411,9 @@ def status_(
                     "tombstones_warn_bytes": (
                         state.settings.config.database.tombstone_warn_bytes
                     ),
+                    # ask.provider：問答模型是否可用（只看有沒有建立用戶端，不打網路）
+                    "ask_configured": state.answerer is not None,
+                    "ask_model": state.settings.config.ask.model,
                 },
                 resources={"db": conn},
             )

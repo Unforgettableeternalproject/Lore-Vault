@@ -27,6 +27,7 @@ from lore_vault.enrich.worker import EnrichWorker
 from lore_vault.recall.embedder import Embedder
 
 if TYPE_CHECKING:
+    from lore_vault.ask.client import Answerer
     from lore_vault.documents.worker import DocumentWorker
 
 # token 最短長度：擋掉 "test"、"1234" 這類一看就猜得到的值
@@ -68,6 +69,11 @@ class ApiSettings:
     document_worker: bool | None = None
     # UI session 與登入限流用的時鐘（epoch 秒；None = time.time）
     clock: Callable[[], float] | None = None
+    # `/v1/ask` 的問答模型（D11）；None = 依 config.ask 與 openai_key 建立
+    # （沒有 key 時 ask 回 `ask_not_configured`）
+    answerer: Answerer | None = None
+    # 問答模型的 HTTP transport（預設 urllib）；只在 answerer 為 None 時使用
+    llm_transport: Transport | None = None
 
     @property
     def run_worker(self) -> bool:

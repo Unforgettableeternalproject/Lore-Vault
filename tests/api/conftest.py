@@ -29,6 +29,7 @@ SPACED_PATHS = frozenset(
         "/v1/vault_resolve",
         "/v1/vaults",
         "/v1/recall",
+        "/v1/ask",
         "/v1/get",
         "/v1/list",
         "/v1/write",
