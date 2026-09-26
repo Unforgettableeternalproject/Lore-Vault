@@ -707,3 +707,11 @@ def test_simplecookie_parses_login_cookie(ui):
     jar = SimpleCookie()
     jar.load(resp.headers["set-cookie"])
     assert SECURE_COOKIE in jar
+
+
+def test_root_redirects_to_ui(ui):
+    """經 pm 子網域打根路徑應導向 UI，而非 401。"""
+    resp = ui.get("/", follow_redirects=False)
+    assert resp.status_code == 307
+    assert resp.headers["location"] == "/ui/"
+    assert ui.post("/", follow_redirects=False).status_code == 401

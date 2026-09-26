@@ -76,6 +76,22 @@ class BearerAuthMiddleware:
         if scope["type"] not in ("http", "websocket"):  # lifespan
             await self.app(scope, receive, send)
             return
+        if (
+            scope["type"] == "http"
+            and scope["path"] == "/"
+            and scope.get("method") in ("GET", "HEAD")
+            and self._ui is not None
+        ):
+            # 經 pm 子網域進站的人預期看到 UI，而不是 401 JSON
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 307,
+                    "headers": [(b"location", b"/ui/"), (b"content-length", b"0")],
+                }
+            )
+            await send({"type": "http.response.body", "body": b""})
+            return
         if scope["type"] == "http" and is_public_path(scope["path"]):
             await self.app(scope, receive, send)
             return
