@@ -115,6 +115,11 @@ class GetRequest(_ScopedReq):
 class ListRequest(_ScopedReq):
     vault: str | None = None
     since: str | None = None
+    # updated 上界（含端點）；與 since 一起做日期區間
+    until: str | None = None
+    # 頁碼分頁：跳過前面幾筆（與 cursor 擇一）；with_total 另回總筆數
+    offset: int | None = Field(default=None, ge=0)
+    with_total: bool = False
     topics: list[str] | None = None
     cursor: str | None = None
     limit: int = DEFAULT_LIST_LIMIT
@@ -272,6 +277,9 @@ def list_(request: Request, req: ListRequest) -> dict[str, Any]:
             limit=req.limit,
             kinds=req.kinds,
             budget=req.budget,
+            until=req.until,
+            offset=req.offset,
+            with_total=req.with_total,
         )
     return result.to_dict()
 

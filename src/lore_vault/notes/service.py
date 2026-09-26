@@ -28,6 +28,7 @@ from lore_vault.schema.chars import check_fields
 from lore_vault.storage import fts, vectors
 from lore_vault.storage.db import transaction
 from lore_vault.storage.notes import (
+    count_listed_notes,
     get_note,
     get_notes,
     insert_note,
@@ -660,13 +661,17 @@ class ListResult:
     summaries_truncated: int = 0
     # 有任何摘要被省略或截短
     truncated: bool = False
+    # 要求 `with_total` 時：相同篩選下的總筆數（頁碼分頁用）；否則 None、不輸出
+    total: int | None = None
+    # 以 offset 分頁時的起點（回應照樣帶回）
+    offset: int | None = None
 
     @property
     def has_more(self) -> bool:
         return self.next_cursor is not None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data: dict[str, Any] = {
             "items": self.items,
             "next_cursor": self.next_cursor,
             "has_more": self.has_more,
@@ -677,6 +682,11 @@ class ListResult:
             "summaries_omitted": self.summaries_omitted,
             "summaries_truncated": self.summaries_truncated,
         }
+        if self.total is not None:
+            data["total"] = self.total
+        if self.offset is not None:
+            data["offset"] = self.offset
+        return data
 
 
 def _encode_cursor(cursor: tuple[str, str]) -> str:
@@ -729,6 +739,9 @@ def list_(
     kinds: Sequence[str] | None = None,
     documents_available: bool = True,
     budget: int = DEFAULT_LIST_BUDGET,
+    until: str | None = None,
+    offset: int | None = None,
+    with_total: bool = False,
 ) -> ListResult:
     """標題清單，依 updated 由新到舊；note 與文件（`kinds` 預設兩者）合併分頁。
 
@@ -741,6 +754,10 @@ def list_(
     影響），在本頁有摘要的 note 間公平分配；超過配額的截短並標
     `summary_truncated: true`，連下限都給不起的尾端 note `summary: null`、
     `summary_source: "omitted"`。規則見 `_apply_list_budget`。
+
+    頁碼分頁（UI）：`offset` 跳過前面幾筆（與 `cursor` 擇一），`with_total` 另回相同篩選
+    下的總筆數 `total`；`until` 與 `since` 一起限定 updated 區間（含端點）。
+    只列一種 kind 時 offset 直接下到 SQL；兩種合併時各取前 offset+limit 筆合併後再切。
     """
     if isinstance(limit, bool) or not isinstance(limit, int):
         raise TypeError("limit 必須是整數")
@@ -748,8 +765,22 @@ def list_(
         raise ValueError(f"limit 必須在 1–{MAX_LIST_LIMIT}，得到 {limit}")
     if isinstance(budget, bool) or not isinstance(budget, int) or budget <= 0:
         raise ValueError(f"budget 必須是正整數，得到 {budget!r}")
+    if offset is not None:
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise ValueError(f"offset 必須是非負整數，得到 {offset!r}")
+        if cursor is not None:
+            raise ValueError("offset 與 cursor 只能擇一")
     wanted = _list_kinds(kinds)
     decoded = _decode_cursor(cursor) if cursor is not None else None
+    skip = offset or 0
+    # 兩種 kind 合併時，offset 無法分別下到兩張表：各取前 skip+limit 筆，合併後再切
+    merged = (
+        LIST_KIND_NOTE in wanted and LIST_KIND_DOCUMENT in wanted and topics is None
+    )
+    fetch_limit, fetch_offset = (skip + limit, 0) if merged and skip else (limit, skip)
+    since_norm = normalize_utc(since) if since is not None else None
+    until_norm = normalize_utc(until) if until is not None else None
+    total = 0
     unsupported: list[str] = []
     rows: list[tuple[str, str, dict[str, Any]]] = []
     more = False
@@ -759,10 +790,16 @@ def list_(
             vault,
             space=space,
             since=since,
+            until=until,
             topics=topics,
-            limit=limit,
+            limit=fetch_limit,
             cursor=decoded,
+            offset=fetch_offset,
         )
+        if with_total:
+            total += count_listed_notes(
+                conn, vault, space=space, since=since, until=until, topics=topics
+            )
         more = more or next_notes is not None
         replaced = superseded_by(conn, notes)
         rows.extend(
@@ -792,16 +829,24 @@ def list_(
                 conn,
                 vault,
                 space=space,
-                since=normalize_utc(since) if since is not None else None,
-                limit=limit,
+                since=since_norm,
+                until=until_norm,
+                limit=fetch_limit,
                 cursor=decoded,
+                offset=fetch_offset,
             )
             more = more or next_docs is not None
             rows.extend(page)
+            if with_total:
+                total += document_service.count_since(
+                    conn, vault, space=space, since=since_norm, until=until_norm
+                )
         else:
             resolve_read(conn, vault, space=space)
             unsupported.append(LIST_KIND_DOCUMENT)
     rows.sort(key=lambda r: (r[0], r[1]), reverse=True)
+    if merged and skip:
+        rows = rows[skip:]
     more = more or len(rows) > limit
     page_rows = rows[:limit]
     next_cursor = (
@@ -820,6 +865,8 @@ def list_(
         summaries_omitted=omitted,
         summaries_truncated=clipped,
         truncated=omitted > 0 or clipped > 0,
+        total=total if with_total else None,
+        offset=offset,
     )
 
 

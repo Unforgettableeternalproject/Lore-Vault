@@ -42,7 +42,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Request
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from lore_vault.notes import InvalidCursor
 from lore_vault.schema import canonical_key
@@ -272,6 +272,11 @@ class ConceptQueryRequest(_ScopedReq):
     kind: str | None = None
     cursor: str | None = None
     limit: int = DEFAULT_PAGE
+    # updated 區間（含端點）與頁碼分頁（offset 與 cursor 擇一；with_total 另回總筆數）
+    since: str | None = None
+    until: str | None = None
+    offset: int = Field(default=0, ge=0)
+    with_total: bool = False
 
 
 class EpisodeSummaryRequest(_ScopedReq):
@@ -581,8 +586,31 @@ def concept_query(request: Request, req: ConceptQueryRequest) -> dict[str, Any]:
             kind=req.kind,
             limit=req.limit,
             cursor=cursor,  # type: ignore[arg-type]
+            since=req.since,
+            until=req.until,
+            offset=req.offset,
         )
-    return {"items": items, "next_cursor": _encode_cursor(next_cursor)}
+        total = (
+            store.count_concepts(
+                conn,
+                req.vault,
+                space=req.space,
+                scope=req.scope,
+                scope_state=req.scope_state,
+                kind=req.kind,
+                since=req.since,
+                until=req.until,
+            )
+            if req.with_total
+            else None
+        )
+    result: dict[str, Any] = {
+        "items": items,
+        "next_cursor": _encode_cursor(next_cursor),
+    }
+    if total is not None:
+        result["total"] = total
+    return result
 
 
 @router.post("/episode_summary")

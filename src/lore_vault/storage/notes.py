@@ -160,31 +160,25 @@ def get_note(conn: sqlite3.Connection, vault: str, note_id: str, *, space: str) 
     return found[0]
 
 
-def list_notes(
+def _note_filters(
     conn: sqlite3.Connection,
     vault: str,
     *,
     space: str,
-    since: str | None = None,
-    topics: Sequence[str] | None = None,
-    limit: int = 50,
-    cursor: tuple[str, str] | None = None,
-) -> tuple[list[Note], tuple[str, str] | None]:
-    """依 (updated, id) 由新到舊分頁。回傳 (本頁, 下一頁 cursor 或 None)。
-
-    `since`：只列 updated >= since 的 note（ISO-8601 UTC）。
-    `topics`：只列至少含其中一個 topic 的 note（大小寫精確比對）；在 SQL 內、
-    LIMIT 之前過濾，分頁不會因為事後過濾而少回。
-    """
+    since: str | None,
+    until: str | None,
+    topics: Sequence[str] | None,
+) -> tuple[list[str], list[Any]]:
     scope = resolve_read(conn, vault, space=space)
-    if limit <= 0:
-        raise ValueError(f"limit 必須大於 0，得到 {limit}")
     clause, params = vault_clause(scope, "vault")
     conditions = [clause]
     args: list[Any] = [*params]
     if since is not None:
         conditions.append("updated >= ?")
         args.append(normalize_utc(since))
+    if until is not None:
+        conditions.append("updated <= ?")
+        args.append(normalize_utc(until))
     if topics is not None:
         if isinstance(topics, str):
             raise TypeError("topics 必須是清單，不可傳單一字串")
@@ -196,19 +190,69 @@ def list_notes(
             f"({placeholders}))"
         )
         args.extend(topics)
+    return conditions, args
+
+
+def list_notes(
+    conn: sqlite3.Connection,
+    vault: str,
+    *,
+    space: str,
+    since: str | None = None,
+    until: str | None = None,
+    topics: Sequence[str] | None = None,
+    limit: int = 50,
+    cursor: tuple[str, str] | None = None,
+    offset: int = 0,
+) -> tuple[list[Note], tuple[str, str] | None]:
+    """依 (updated, id) 由新到舊分頁。回傳 (本頁, 下一頁 cursor 或 None)。
+
+    `since`／`until`：只列 since <= updated <= until 的 note（ISO-8601 UTC，含端點）。
+    `topics`：只列至少含其中一個 topic 的 note（大小寫精確比對）；在 SQL 內、
+    LIMIT 之前過濾，分頁不會因為事後過濾而少回。
+    `offset`：跳過前面幾筆（頁碼分頁用）；與 `cursor` 擇一。
+    """
+    if limit <= 0:
+        raise ValueError(f"limit 必須大於 0，得到 {limit}")
+    if offset < 0:
+        raise ValueError(f"offset 不可為負，得到 {offset}")
+    if offset and cursor is not None:
+        raise ValueError("offset 與 cursor 只能擇一")
+    conditions, args = _note_filters(
+        conn, vault, space=space, since=since, until=until, topics=topics
+    )
     if cursor is not None:
         conditions.append("(updated, id) < (?, ?)")
         args.extend(cursor)
     rows = conn.execute(
         f"""
         SELECT * FROM notes WHERE {" AND ".join(conditions)}
-        ORDER BY updated DESC, id DESC LIMIT ?
+        ORDER BY updated DESC, id DESC LIMIT ? OFFSET ?
         """,
-        (*args, limit + 1),
+        (*args, limit + 1, offset),
     ).fetchall()
     notes = [_row_to_note(row) for row in rows[:limit]]
     next_cursor = (notes[-1].updated, notes[-1].id) if len(rows) > limit else None
     return notes, next_cursor
+
+
+def count_listed_notes(
+    conn: sqlite3.Connection,
+    vault: str,
+    *,
+    space: str,
+    since: str | None = None,
+    until: str | None = None,
+    topics: Sequence[str] | None = None,
+) -> int:
+    """與 `list_notes` 相同篩選條件下的總筆數（頁碼分頁用）。"""
+    conditions, args = _note_filters(
+        conn, vault, space=space, since=since, until=until, topics=topics
+    )
+    row = conn.execute(
+        f"SELECT count(*) FROM notes WHERE {' AND '.join(conditions)}", args
+    ).fetchone()
+    return int(row[0])
 
 
 def superseded_by(conn: sqlite3.Connection, notes: Sequence[Note]) -> dict[str, str]:
