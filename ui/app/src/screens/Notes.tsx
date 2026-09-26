@@ -1,6 +1,7 @@
 // 筆記列表（T-80）：依目前 vault 篩選分頁瀏覽，標籤與時間篩選走 `/v1/list` 的 topics／since；
-// 標籤選項取自 `/v1/topics`（範圍內全部標籤與筆數）。摘要受 list 的 `budget` 限制：預算用完的
-// note 摘要被省略（summary_source: omitted），整頁的 truncated／summaries_omitted 以橫幅呈現並可放大預算。
+// 標籤選項取自 `/v1/topics`（範圍內全部標籤與筆數）。摘要受 list 的 `budget` 限制，後端在本頁公平分配：
+// 超過配額的摘要被截短（summary_truncated，列上標「截短」），連下限都給不起的尾端 note 摘要被省略
+// （summary_source: omitted）；整頁的 truncated／summaries_truncated／summaries_omitted 以橫幅呈現並可放大預算。
 // 作者（A22 author）沒有值時顯示「未具名」，最後修改者（updated_by）與作者不同時另外標出；
 // 更正鏈（supersedes／superseded_by）在列上標示。
 import { useEffect, useState } from 'preact/hooks';
@@ -11,8 +12,8 @@ import { authorLabel, daysAgoIso, describeError, formatTime, isAbort } from '../
 import { routePath } from '../lib/router';
 import type { ListResult, NoteListItem, TopicsResult } from '../lib/types';
 
-/** 列表每則摘要平均可用的字數：budget = 本頁筆數 × 此值（服務預設 4000／50 則過緊，列表會大量省略） */
-export const LIST_SUMMARY_CHARS = 160;
+/** 列表每則摘要平均可用的字數：budget = 本頁筆數 × 此值（摘要平均約 200 字；服務預設 4000／50 則每則只剩 80 字） */
+export const LIST_SUMMARY_CHARS = 280;
 /** 「顯示更多摘要」最多把預算放大到初始值的倍數 */
 const BUDGET_GROWTH_CAP = 8;
 const TIME_FILTERS = [
@@ -21,6 +22,14 @@ const TIME_FILTERS = [
   { id: '30d', label: '30 天', days: 30 },
 ] as const;
 type TimeId = (typeof TIME_FILTERS)[number]['id'];
+
+/** 截斷橫幅標題：分別列出截短與省略的筆數 */
+function truncatedTitle(page: ListResult<NoteListItem>): string {
+  const parts: string[] = [];
+  if (page.summaries_truncated) parts.push(`${page.summaries_truncated} 則摘要被截短`);
+  if (page.summaries_omitted) parts.push(`${page.summaries_omitted} 則的摘要沒有列出`);
+  return `摘要字數預算不足：本頁${parts.length ? ' ' + parts.join('、') : '有摘要被截短'}`;
+}
 
 export function Notes() {
   const { api, space, vault, vaults, navigate, limits } = useApp();
@@ -169,11 +178,7 @@ export function Notes() {
           tone="warn"
           label="TRUNCATED"
           testId="list-truncated"
-          title={
-            page.summaries_omitted
-              ? `摘要字數預算用完：本頁 ${page.summaries_omitted} 則的摘要沒有列出`
-              : '摘要字數預算用完：有一則摘要被截短'
-          }
+          title={truncatedTitle(page)}
           action={
             <button
               type="button"
@@ -185,7 +190,7 @@ export function Notes() {
             </button>
           }
         >
-          預算 {(page.budget ?? budget).toLocaleString()} 字、用掉 {(page.used_chars ?? 0).toLocaleString()} 字。筆記本身都有列出，只有摘要被省略或截短。
+          預算 {(page.budget ?? budget).toLocaleString()} 字、用掉 {(page.used_chars ?? 0).toLocaleString()} 字。預算平均分給本頁每則，筆記本身都有列出，只有摘要被截短或省略；完整內容請開啟筆記。
         </Banner>
       )}
 
@@ -239,6 +244,11 @@ export function Notes() {
                     <span class="lv-table__summary">
                       <SourceTag source={n.summary_source} />
                       <span>{n.summary ?? (n.summary_source === 'omitted' ? '（預算用完，未列出摘要）' : '')}</span>
+                      {n.summary_truncated && (
+                        <span class="lv-tag" data-testid="summary-truncated" title="摘要超過本頁平均分到的字數，已截短；開啟筆記看全文">
+                          截短
+                        </span>
+                      )}
                     </span>
                   )}
                   {vault === '*' && <span class="lv-table__sub">{vaultName({ vaults }, n.vault)}</span>}

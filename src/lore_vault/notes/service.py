@@ -62,9 +62,10 @@ DEDUP_QUERY_TOKENS = 64
 DEFAULT_LIST_LIMIT = 50
 MAX_LIST_LIMIT = 200
 # list 的摘要預算：本頁 note 摘要字數總和上限（title 一律回、不計入，
-# 分頁不因預算少回）。
-# 約 25 則首段頂替（≤160 字）；UI 可傳更大的值
+# 分頁不因預算少回）。依本頁公平分配（見 `_apply_list_budget`）；UI 可傳更大的值
 DEFAULT_LIST_BUDGET = 4000
+# 公平分配時每則摘要至少分到的字數；預算連這個都給不起的尾端 note 才省略
+LIST_MIN_SUMMARY_CHARS = 40
 # 預算用完後的 note：summary 為 null、summary_source 標這個值（不沿用實際來源）
 SOURCE_OMITTED = "omitted"
 # get 的預算：所有回傳 body 的字數總和上限（約 3–4 篇中型 note）
@@ -653,9 +654,11 @@ class ListResult:
     # 摘要預算：本頁 note 摘要字數總和上限與實際用量
     budget: int = DEFAULT_LIST_BUDGET
     used_chars: int = 0
-    # 預算用完、summary 被省略（`summary_source: "omitted"`）的 note 數；
-    # truncated=True 且 omitted 為 0 代表只截了一筆的摘要
+    # 預算給不起下限、summary 被省略（`summary_source: "omitted"`）的 note 數
     summaries_omitted: int = 0
+    # 超過配額被截短（項目標 `summary_truncated: true`）的 note 數
+    summaries_truncated: int = 0
+    # 有任何摘要被省略或截短
     truncated: bool = False
 
     @property
@@ -672,6 +675,7 @@ class ListResult:
             "used_chars": self.used_chars,
             "truncated": self.truncated,
             "summaries_omitted": self.summaries_omitted,
+            "summaries_truncated": self.summaries_truncated,
         }
 
 
@@ -734,8 +738,9 @@ def list_(
     note 項目帶 `summary`／`summary_source`（規則同 recall：有 LLM 摘要用它，否則正文
     首段頂替）與 `superseded_by`（同 vault 內取代它的 note，多則取 updated 最新者）。
     摘要受 `budget` 限制（本頁 note 摘要字數總和；title 不計、項目一律回，分頁不受
-    影響）：依本頁順序放入，第一則就超過時截斷該則，之後預算不足的 note
-    `summary: null`、`summary_source: "omitted"`。
+    影響），在本頁有摘要的 note 間公平分配；超過配額的截短並標
+    `summary_truncated: true`，連下限都給不起的尾端 note `summary: null`、
+    `summary_source: "omitted"`。規則見 `_apply_list_budget`。
     """
     if isinstance(limit, bool) or not isinstance(limit, int):
         raise TypeError("limit 必須是整數")
@@ -805,7 +810,7 @@ def list_(
         else None
     )
     items = [r[2] for r in page_rows]
-    used, omitted, truncated = _apply_list_budget(items, budget)
+    used, omitted, clipped = _apply_list_budget(items, budget)
     return ListResult(
         items,
         next_cursor,
@@ -813,36 +818,82 @@ def list_(
         budget=budget,
         used_chars=used,
         summaries_omitted=omitted,
-        truncated=truncated,
+        summaries_truncated=clipped,
+        truncated=omitted > 0 or clipped > 0,
     )
 
 
 def _apply_list_budget(
     items: list[dict[str, Any]], budget: int
-) -> tuple[int, int, bool]:
-    """依本頁順序替 note 項目填摘要（就地改寫）。回傳 (已用字數, 省略筆數, 是否截斷)。
+) -> tuple[int, int, int]:
+    """替 note 項目填摘要（就地改寫、不重排）。回傳 (已用字數, 省略筆數, 截短筆數)。
 
-    比照 recall 的預算：第一則就超過時截斷它的摘要（至少給一則），之後放不下的一律
-    省略、不在中間項目截摘要（避免看起來像完整摘要）。
+    分配對象是本頁有摘要文字的 note（LLM 摘要或首段頂替；`none` 與文件不佔預算）：
+    1. 全部放得下就全給。
+    2. 否則依頁序取前綴：每則的下限需求 = min(摘要長度, LIST_MIN_SUMMARY_CHARS)，
+       累加超過 budget 的那則起（尾端）全部省略；第一則就超過時仍納入（至少給一則，
+       截到 budget）。
+    3. 納入者之間 water-filling：配額 = floor(剩餘預算 / 剩餘人數)，由短到長處理，
+       摘要不超過配額的全給、用不完的額度留給後面的人；第一個超過配額的起全部取同一
+       配額，整除剩下的零頭依頁序各 +1。結果是決定性的，且 used ≤ budget。
+    被截短的摘要以 `clip` 截到配額（結尾「…」、含在配額內）並標 `summary_truncated`。
+    首段頂替本身有 160 字上限（`summary.lead`），那是呈現規則、不算預算截短。
     """
-    used = omitted = 0
-    exhausted = truncated = False
-    for item in items:
+    summaries: dict[int, tuple[str | None, str]] = {}
+    for idx, item in enumerate(items):
         note = item.pop("_note", None)
-        if note is None:
-            continue
-        summary, source = display_summary(note)
-        cost = len(summary or "")
-        if not exhausted and used + cost <= budget:
-            used += cost
-        elif not exhausted and used == 0:
-            summary, _ = clip(summary or "", budget)
-            used = len(summary)
-            exhausted = truncated = True
-        else:
-            exhausted = truncated = True
-            summary, source = None, SOURCE_OMITTED
+        if note is not None:
+            summaries[idx] = display_summary(note)
+    candidates = [idx for idx, (text, _) in summaries.items() if text]
+    lengths = {idx: len(summaries[idx][0] or "") for idx in candidates}
+
+    included: list[int] = []
+    floor_used = 0
+    for idx in candidates:
+        need = min(lengths[idx], LIST_MIN_SUMMARY_CHARS)
+        if included and floor_used + need > budget:
+            break
+        included.append(idx)
+        floor_used += need
+    quotas = _fair_quotas(included, lengths, budget)
+
+    used = omitted = clipped = 0
+    for idx, (text, source) in summaries.items():
+        item = items[idx]
+        was_clipped = False
+        if text and idx not in quotas:
+            text, source = None, SOURCE_OMITTED
             omitted += 1
-        item["summary"] = summary
+        elif text:
+            text, was_clipped = clip(text, quotas[idx])
+            clipped += was_clipped
+            used += len(text)
+        item["summary"] = text
         item["summary_source"] = source
-    return used, omitted, truncated
+        item["summary_truncated"] = was_clipped
+    return used, omitted, clipped
+
+
+def _fair_quotas(
+    included: list[int], lengths: dict[int, int], budget: int
+) -> dict[int, int]:
+    """water-filling：回傳每則的字數配額（index → 字數），總和 ≤ budget。"""
+    if sum(lengths[idx] for idx in included) <= budget:
+        return {idx: lengths[idx] for idx in included}
+    quotas: dict[int, int] = {}
+    remaining = budget
+    # 由短到長；同長依頁序（sorted 穩定）
+    ordered = sorted(included, key=lambda idx: lengths[idx])
+    for pos, idx in enumerate(ordered):
+        share = remaining // (len(ordered) - pos)
+        if lengths[idx] <= share:
+            quotas[idx] = lengths[idx]
+            remaining -= lengths[idx]
+            continue
+        # 這則起全部超過配額：同一配額，零頭依頁序各 +1
+        rest = sorted(ordered[pos:])
+        extra = remaining - share * len(rest)
+        for n, r in enumerate(rest):
+            quotas[r] = share + (1 if n < extra else 0)
+        break
+    return quotas

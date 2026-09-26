@@ -140,19 +140,23 @@ def test_list_summary_budget_omits_without_dropping_items(client):
     data = ok(post(client, "/v1/list", vault=DEV, budget=150))
     items = data["items"]
     assert len(items) == 4  # 預算不影響項目與分頁
-    assert items[0]["summary"] == "甲" * 100
-    assert [i["summary_source"] for i in items[1:]] == ["omitted"] * 3
-    assert all(i["summary"] is None for i in items[1:])
-    assert data["truncated"] is True and data["summaries_omitted"] == 3
-    assert data["used_chars"] == 100 and data["budget"] == 150
-    # 第一則就超過：截斷它（至少給一則），其餘省略
+    # 公平分配：下限 40 給得起前 3 則，150 平分各 50（截短標記），尾端 1 則省略
+    assert [i["summary"] for i in items[:3]] == ["甲" * 49 + "…"] * 3
+    assert [i["summary_truncated"] for i in items] == [True, True, True, False]
+    assert items[3]["summary_source"] == "omitted" and items[3]["summary"] is None
+    assert data["truncated"] is True
+    assert data["summaries_truncated"] == 3 and data["summaries_omitted"] == 1
+    assert data["used_chars"] == 150 and data["budget"] == 150
+    # 連第一則的下限都給不起：截斷它（至少給一則），其餘省略
     data = ok(post(client, "/v1/list", vault=DEV, budget=10))
     assert len(data["items"][0]["summary"]) == 10
     assert data["items"][0]["summary"].endswith("…")
-    assert data["summaries_omitted"] == 3
+    assert data["summaries_omitted"] == 3 and data["summaries_truncated"] == 1
     # 預算夠：不截
     data = ok(post(client, "/v1/list", vault=DEV))
     assert data["truncated"] is False and data["summaries_omitted"] == 0
+    assert data["summaries_truncated"] == 0
+    assert all(i["summary_truncated"] is False for i in data["items"])
     resp = post(client, "/v1/list", vault=DEV, budget=0)
     assert resp.status_code == 400 and code(resp) == "invalid_request"
 

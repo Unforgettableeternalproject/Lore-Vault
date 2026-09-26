@@ -976,6 +976,9 @@ def build_server(shell: Shell) -> MCPServer:
             "列出 vault 的 note 標題與文件（新到舊，分頁；文件含 status、error_code、"
             "version、superseded_by）。用來瀏覽或確認近期寫入與文件抽取狀態；"
             "找特定主題請用 recall。has_more=true 時用 next_cursor 取下一頁。"
+            "note 摘要受字數預算（預設 4000）限制，在本頁平均分配：過長的被截短"
+            "（結尾「…」、項目標 summary_truncated=true），預算連下限都給不起的尾端"
+            "note 摘要省略（summary_source=omitted）；要完整內容用 get 取該 id 的全文。"
         ),
         "write": (
             "寫入新的 note。回傳 id 與疑似重複清單（duplicates）；若與既有 note 重複，"

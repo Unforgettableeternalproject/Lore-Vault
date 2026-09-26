@@ -76,6 +76,35 @@ describe('筆記列表', () => {
     expect(callsTo('/v1/list').at(-1)!.body.budget).toBe((first.budget as number) * 2);
   });
 
+  it('摘要被截短：列上標「截短」，橫幅分列截短與省略筆數', async () => {
+    const { api } = makeApi({
+      '/v1/topics': topics,
+      '/v1/list': () =>
+        json({
+          items: [
+            item({ summary: '很長的摘要…', summary_source: 'summary', summary_truncated: true }),
+            item({ id: 'n2', title: '短的', summary: '短摘要', summary_source: 'summary', summary_truncated: false }),
+            item({ id: 'n3', title: '尾端', summary: null, summary_source: 'omitted', summary_truncated: false }),
+          ],
+          next_cursor: null,
+          has_more: false,
+          unsupported_kinds: [],
+          budget: 14000,
+          used_chars: 9,
+          truncated: true,
+          summaries_omitted: 1,
+          summaries_truncated: 1,
+        }),
+    });
+    renderWithApp(<Notes />, api);
+    const banner = await screen.findByTestId('list-truncated');
+    expect(banner.textContent).toContain('1 則摘要被截短');
+    expect(banner.textContent).toContain('1 則的摘要沒有列出');
+    const marks = screen.getAllByTestId('summary-truncated');
+    expect(marks).toHaveLength(1);
+    expect(marks[0]!.closest('[role="row"]')!.textContent).toContain('很長的摘要…');
+  });
+
   it('更正鏈：被取代與更正版在列上標示', async () => {
     const { api } = makeApi({
       '/v1/topics': topics,

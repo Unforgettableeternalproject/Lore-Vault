@@ -119,7 +119,8 @@ class ListRequest(_ScopedReq):
     cursor: str | None = None
     limit: int = DEFAULT_LIST_LIMIT
     kinds: list[str] | None = None
-    # 本頁 note 摘要字數總和上限（title 不計；超過的 summary 為 null）
+    # 本頁 note 摘要字數總和上限（title 不計；公平分配，超過配額的截短、
+    # 連下限都給不起的尾端 summary 為 null）
     budget: int = DEFAULT_LIST_BUDGET
 
 

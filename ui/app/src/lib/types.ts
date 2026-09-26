@@ -169,6 +169,8 @@ export interface NoteListItem {
   updated_by?: string | null;
   summary?: string | null;
   summary_source?: SummarySource;
+  /** 摘要超過本頁公平分配的配額而被截短（結尾「…」）；完整內容用 get */
+  summary_truncated?: boolean;
   supersedes?: string | null;
   superseded_by?: string | null;
 }
@@ -183,9 +185,12 @@ export interface ListResult<T = ListItem> {
   /** 本頁 note 摘要字數預算與用量；項目與分頁不受預算影響 */
   budget?: number;
   used_chars?: number;
+  /** 有任何摘要被截短或省略 */
   truncated?: boolean;
-  /** 預算用完、摘要被省略（summary_source: omitted）的 note 數 */
+  /** 預算連下限都給不起、摘要被省略（summary_source: omitted）的尾端 note 數 */
   summaries_omitted?: number;
+  /** 超過配額、摘要被截短（summary_truncated）的 note 數 */
+  summaries_truncated?: number;
 }
 
 /** `POST /v1/topics` */

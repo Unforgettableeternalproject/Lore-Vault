@@ -393,3 +393,114 @@ def test_list_filters_topics_inside_the_query(vaults, add_note):
 def test_list_rejects_bad_cursor(vaults, cursor):
     with pytest.raises(InvalidCursor):
         list_(vaults, A, space="dev", cursor=cursor)
+
+
+# ── list 摘要預算：公平分配 ──────────────────────────────────────────
+
+
+def _add_summaries(add_note, lengths, *, lead=False):
+    """依頁序（新到舊）建 note；第 i 則摘要為 `lengths[i]` 個字。回傳頁序的 id。"""
+    ids = [f"s{i:02d}" for i in range(len(lengths))]
+    for i, (note_id, n) in enumerate(zip(ids, lengths, strict=True)):
+        text = chr(0x4E00 + i) * n
+        add_note(
+            A,
+            note_id,
+            f"標題 {i}",
+            text if lead else "正文",
+            summary=None if lead else text,
+            embed=False,
+            # 越前面越新
+            ts=f"2026-09-01T00:00:{59 - i:02d}.000Z",
+        )
+    return ids
+
+
+def _page(vaults, budget, limit=50):
+    result = list_(vaults, A, space="dev", budget=budget, limit=limit, kinds=["note"])
+    return result, {i["id"]: i for i in result.items}
+
+
+def test_list_budget_is_shared_fairly_across_long_summaries(vaults, add_note):
+    ids = _add_summaries(add_note, [300] * 20)
+    result, by_id = _page(vaults, 4000)
+    # 依序分配時第 14 則起全部 omitted；公平分配每則都有開頭
+    assert result.summaries_omitted == 0
+    assert result.summaries_truncated == 20 and result.truncated is True
+    for i, note_id in enumerate(ids):
+        item = by_id[note_id]
+        assert item["summary_source"] == "summary"
+        assert item["summary_truncated"] is True
+        assert len(item["summary"]) == 200
+        assert item["summary"] == chr(0x4E00 + i) * 199 + "…"
+    assert result.used_chars == 4000
+    data = result.to_dict()
+    assert data["summaries_truncated"] == 20 and data["summaries_omitted"] == 0
+
+
+def test_list_budget_redistributes_unused_share(vaults, add_note):
+    ids = _add_summaries(add_note, [500, 10, 500, 20])
+    result, by_id = _page(vaults, 401)
+    # 配額 100：10、20 全給，剩 371 由兩則長的平分（185），零頭 1 給頁序在前者
+    assert [len(by_id[i]["summary"]) for i in ids] == [186, 10, 185, 20]
+    assert [by_id[i]["summary_truncated"] for i in ids] == [True, False, True, False]
+    assert result.used_chars == 401
+    assert (result.summaries_truncated, result.summaries_omitted) == (2, 0)
+
+
+def test_list_budget_omits_tail_only_below_floor(vaults, add_note):
+    ids = _add_summaries(add_note, [100] * 5)
+    result, by_id = _page(vaults, 130)
+    # 下限 40：只給得起前 3 則，130 平分（44／43／43），尾端 2 則省略
+    assert [len(by_id[i]["summary"] or "") for i in ids] == [44, 43, 43, 0, 0]
+    assert [by_id[i]["summary_source"] for i in ids[3:]] == ["omitted"] * 2
+    assert all(by_id[i]["summary_truncated"] is False for i in ids[3:])
+    assert (result.summaries_truncated, result.summaries_omitted) == (3, 2)
+    assert result.used_chars == 130 and result.truncated is True
+
+
+def test_list_floor_counts_short_summaries_at_their_length(vaults, add_note):
+    ids = _add_summaries(add_note, [100, 10, 10, 100])
+    result, by_id = _page(vaults, 60)
+    # 短摘要的下限需求就是它的長度（40+10+10），不會被無謂省略
+    assert [len(by_id[i]["summary"] or "") for i in ids] == [40, 10, 10, 0]
+    assert by_id[ids[3]]["summary_source"] == "omitted"
+    assert (result.summaries_truncated, result.summaries_omitted) == (1, 1)
+
+
+def test_list_budget_below_floor_still_gives_first_note(vaults, add_note):
+    ids = _add_summaries(add_note, [100, 100])
+    result, by_id = _page(vaults, 10)
+    assert by_id[ids[0]]["summary"] == chr(0x4E00) * 9 + "…"
+    assert by_id[ids[0]]["summary_truncated"] is True
+    assert by_id[ids[1]]["summary_source"] == "omitted"
+    assert (result.summaries_truncated, result.summaries_omitted) == (1, 1)
+
+
+def test_list_lead_follows_same_budget_rule(vaults, add_note):
+    ids = _add_summaries(add_note, [160, 160], lead=True)
+    result, by_id = _page(vaults, 100)
+    for i, note_id in enumerate(ids):
+        item = by_id[note_id]
+        assert item["summary_source"] == "lead"
+        assert item["summary"] == chr(0x4E00 + i) * 49 + "…"
+        assert item["summary_truncated"] is True
+    assert (result.summaries_truncated, result.summaries_omitted) == (2, 0)
+
+
+def test_list_notes_without_summary_take_no_share(vaults, add_note):
+    add_note(A, "empty", "空", "", embed=False, ts="2026-09-02T00:00:00.000Z")
+    add_note(A, "full", "滿", "正文", summary="甲" * 100, embed=False)
+    result, by_id = _page(vaults, 60)
+    assert by_id["empty"]["summary_source"] == "none"
+    assert by_id["empty"]["summary_truncated"] is False
+    assert len(by_id["full"]["summary"]) == 60
+    assert (result.summaries_truncated, result.summaries_omitted) == (1, 0)
+
+
+def test_list_budget_fits_everything_marks_nothing(vaults, add_note):
+    _add_summaries(add_note, [100, 50])
+    result, by_id = _page(vaults, 150)
+    assert all(i["summary_truncated"] is False for i in result.items)
+    assert result.truncated is False and result.used_chars == 150
+    assert (result.summaries_truncated, result.summaries_omitted) == (0, 0)
