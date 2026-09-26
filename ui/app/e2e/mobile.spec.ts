@@ -89,6 +89,20 @@ test('抽屜導覽、觸控目標與檢索', async ({ page }) => {
   // 深淺色、登出在抽屜底部
   await page.getByRole('button', { name: '開啟導覽選單' }).click();
   await expect(page.getByRole('button', { name: '切換為淺色' })).toBeVisible();
+  // 三顆是圖示按鈕：有名稱與 title、排成一列、觸控目標 ≥ 44px
+  const tools = page.getByRole('group', { name: '介面工具' }).getByRole('button');
+  await expect(tools).toHaveCount(3);
+  const tops = new Set<number>();
+  for (const [i, name] of ['切換為淺色', '快捷鍵說明', '登出'].entries()) {
+    const btn = tools.nth(i);
+    await expect(btn).toHaveAccessibleName(name);
+    await expect(btn).toHaveAttribute('title', new RegExp(name));
+    const box = (await btn.boundingBox())!;
+    expect(box.height).toBeGreaterThanOrEqual(44);
+    expect(box.width).toBeGreaterThanOrEqual(44);
+    tops.add(Math.round(box.y));
+  }
+  expect(tops.size).toBe(1);
   await page.getByRole('button', { name: '切換為淺色' }).click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
   // 點遮罩關閉

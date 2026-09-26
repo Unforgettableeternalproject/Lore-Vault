@@ -114,6 +114,7 @@ button { font: inherit; }
   color: var(--lv-gold-text);
 }
 .lv-icon-btn { min-width: 44px; justify-content: center; }
+.lv-icon { display: block; flex: none; }
 
 /* ── 啟動與登入 ───────────────────────────────────────── */
 .lv-boot {
@@ -961,7 +962,8 @@ details.lv-check > .lv-check__head { cursor: pointer; }
     transition: transform var(--dur-panel) var(--ease-out), visibility 0s;
   }
   .lv-scrim { display: block; position: fixed; inset: 0; z-index: 150; background: rgba(0, 0, 0, .45); }
-  .lv-sidebar__tools { display: flex; flex-wrap: wrap; gap: 8px; }
+  .lv-sidebar__tools { display: flex; gap: 8px; }
+  .lv-sidebar__tools .lv-icon-btn { width: 44px; height: 44px; padding: 0; }
   .lv-write-target { margin-top: 0; }
 
   .lv-main { padding: 20px var(--gutter-mobile) 64px; }

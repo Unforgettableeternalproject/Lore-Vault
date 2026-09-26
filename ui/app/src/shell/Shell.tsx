@@ -353,15 +353,28 @@ export function Shell({ api, principal, author, limits, theme, onToggleTheme, de
               </div>
               {vault === ALL && <div class="lv-write-target__hint">寫入與上傳前需選定單一 vault</div>}
             </div>
-            <div class="lv-sidebar__tools">
-              <button type="button" class="btn-outline btn-outline--sm" onClick={onToggleTheme}>
-                {theme === 'dark' ? '切換為淺色' : '切換為深色'}
+            {/* 抽屜底部工具：圖示按鈕排成一列，名稱走 aria-label、滑鼠提示走 title */}
+            <div class="lv-sidebar__tools" role="group" aria-label="介面工具">
+              <button
+                type="button"
+                class="btn-outline btn-outline--sm lv-icon-btn"
+                onClick={onToggleTheme}
+                aria-label={theme === 'dark' ? '切換為淺色' : '切換為深色'}
+                title={theme === 'dark' ? '切換為淺色' : '切換為深色'}
+              >
+                <span aria-hidden="true">{theme === 'dark' ? '☀' : '☾'}</span>
               </button>
-              <button type="button" class="btn-outline btn-outline--sm" onClick={() => setHelpOpen(true)}>
-                快捷鍵說明
+              <button
+                type="button"
+                class="btn-outline btn-outline--sm lv-icon-btn"
+                onClick={() => setHelpOpen(true)}
+                aria-label="快捷鍵說明"
+                title="快捷鍵說明（?）"
+              >
+                <span aria-hidden="true">?</span>
               </button>
-              <button type="button" class="btn-outline btn-outline--sm" onClick={onLogout}>
-                登出
+              <button type="button" class="btn-outline btn-outline--sm lv-icon-btn" onClick={onLogout} aria-label="登出" title="登出">
+                <LogoutIcon />
               </button>
             </div>
           </aside>
@@ -479,6 +492,16 @@ function ScreenView({
     case 'settings':
       return <Settings theme={theme} onToggleTheme={onToggleTheme} onLogout={onLogout} />;
   }
+}
+
+/** 登出圖示（門＋向外箭頭）；沒有合適的字型符號，用 inline SVG（CSP 只禁 style 屬性，不禁 SVG 元素） */
+function LogoutIcon() {
+  return (
+    <svg class="lv-icon" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">
+      <path d="M6 2.5H3.5a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1H6" fill="none" stroke="currentColor" stroke-width="1.4" />
+      <path d="M10 5l3 3-3 3M13 8H6.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square" />
+    </svg>
+  );
 }
 
 function describeDegraded(notice: Notice): string {
