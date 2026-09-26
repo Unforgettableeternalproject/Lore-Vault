@@ -31,7 +31,7 @@ function vault(overrides: Partial<VaultSummary> = {}): VaultSummary {
 const noGraves: Handler = () => json({ items: [], next_cursor: null });
 
 describe('換 space（A20）', () => {
-  it('dev vault：兩個目標都停用並說明 A20，不會送出搬移', async () => {
+  it('dev vault：兩個目標都停用並說明原因（不寫內部編號），不會送出搬移', async () => {
     const dev = vault({ key: 'github.com/org/repo', display: 'Repo', space: 'dev' });
     const { api, callsTo } = makeApi({ '/v1/tombstones': noGraves });
     renderWithApp(<Maint vaultKey={dev.key} />, api, { vaults: [dev] });
@@ -39,7 +39,8 @@ describe('換 space（A20）', () => {
     const personal = screen.getByRole('button', { name: /移到 PERSONAL/ });
     expect((lore as HTMLButtonElement).disabled).toBe(true);
     expect((personal as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.getByTestId('move-a20').textContent).toContain('A20');
+    expect(screen.getByTestId('move-a20').textContent).toContain('dev 的 vault 不能移到其他 space');
+    expect(screen.getByTestId('move-a20').textContent).not.toMatch(/\bA\d+\b/);
     fireEvent.click(lore);
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(callsTo('/v1/vault_move_space')).toHaveLength(0);

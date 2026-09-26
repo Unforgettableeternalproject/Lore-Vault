@@ -5,7 +5,7 @@ import { useEffect, useState } from 'preact/hooks';
 
 import { Banner, ErrorState, Loading } from '../components/ui';
 import { useApp } from '../lib/context';
-import { describeError, formatTime, isAbort } from '../lib/format';
+import { describeError, formatTime, isAbort, stripInternalRefs } from '../lib/format';
 import {
   EPISODE_STALE_HOURS,
   STATUS_LABEL,
@@ -240,7 +240,7 @@ function CheckRow({ check, client = false }: { check: DoctorCheck; client?: bool
       <span class={`lv-check__status lv-check__status--${tone}`}>{label}</span>
       <span class="lv-check__main">
         <span class="lv-check__name lv-mono">{check.name}</span>
-        <span class="lv-check__desc">{clientSkip ? check.description || check.summary : check.summary || check.description}</span>
+        <span class="lv-check__desc">{stripInternalRefs(clientSkip ? check.description || check.summary : check.summary || check.description)}</span>
       </span>
     </>
   );
@@ -260,7 +260,7 @@ function CheckRow({ check, client = false }: { check: DoctorCheck; client?: bool
     >
       <summary class="lv-check__head">{head}</summary>
       <div class="lv-check__body">
-        {check.description && check.summary && <p class="lv-muted lv-small">{check.description}</p>}
+        {check.description && check.summary && <p class="lv-muted lv-small">{stripInternalRefs(check.description)}</p>}
         {Object.keys(check.counts).length > 0 && (
           <ul class="lv-plan__counts">
             {Object.entries(check.counts).map(([k, n]) => (
@@ -294,7 +294,7 @@ function BacklogView({ title, backlog, worker }: { title: string; backlog: Backl
         <span>{title}</span>
         <span class={'lv-mono ' + (bad ? 'lv-text-error' : 'lv-muted')}>{backlog.status.toUpperCase()}</span>
       </div>
-      <p class="lv-small">{backlog.summary}</p>
+      <p class="lv-small">{stripInternalRefs(backlog.summary)}</p>
       {entries.length > 0 && (
         <ul class="lv-plan__counts">
           {entries.map(([k, n]) => (
@@ -317,11 +317,11 @@ function BacklogView({ title, backlog, worker }: { title: string; backlog: Backl
 
 function BackupView({ check }: { check: DoctorCheck | null }) {
   if (!check) return <span class="lv-muted">服務未回報備份檢查</span>;
-  if (check.status === 'skipped') return <span class="lv-muted">未檢查：{check.summary}</span>;
+  if (check.status === 'skipped') return <span class="lv-muted">未檢查：{stripInternalRefs(check.summary)}</span>;
   const last = parseBackupDetail(check.details.find((d) => d.startsWith('最近一次')) ?? null);
   return (
     <span class={check.status === 'pass' ? undefined : 'lv-text-error'}>
-      {check.summary}
+      {stripInternalRefs(check.summary)}
       {last && (
         <span class="lv-status__raw" data-testid="health-backup-last">
           最近一次：{last.time}

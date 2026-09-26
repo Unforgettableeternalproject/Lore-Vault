@@ -315,8 +315,8 @@ function MoveSection({ vault }: { vault: VaultSummary }) {
       {targets.some((id) => !moveAllowed(space.id, id)) && (
         <p class="lv-hint lv-hint--inline" id="maint-move-a20" data-testid="move-a20">
           {space.id === 'dev'
-            ? 'dev 的 vault 不能移到其他 space（A20）：dev 綁 repo 與收料、記憶層只屬於 dev，與 lore／personal 不互相轉換。'
-            : '不能移到 dev（A20）：dev 綁 repo 與收料，只允許 lore 與 personal 互換。'}
+            ? 'dev 的 vault 不能移到其他 space：dev 綁 repo 與收料、記憶層只屬於 dev，與 lore／personal 不互相轉換。'
+            : '不能移到 dev：dev 綁 repo 與收料，只允許 lore 與 personal 互換。'}
         </p>
       )}
       {target && (
@@ -485,7 +485,7 @@ export function TombstoneSection({ vault }: { vault: string }) {
         </button>
       </div>
       <p class="lv-section__desc">
-        已刪除的筆記與文件留下紀錄，重新匯入時不會復活。v12 起刪除的筆記保留內容快照可完整還原；舊墓碑只能移除墓碑、內容靠重新匯入。
+        已刪除的筆記與文件留下紀錄，重新匯入時不會復活。較新的刪除會保留內容快照，可完整還原；舊版墓碑沒有快照，只能移除墓碑、內容靠重新匯入。
       </p>
       {resultEntries.length > 0 && (
         <ul class="lv-stack lv-restore-results" data-testid="restore-results">

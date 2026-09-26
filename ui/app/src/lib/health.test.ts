@@ -18,3 +18,21 @@ describe('parseBackupDetail', () => {
     expect(parseBackupDetail(null)).toBeNull();
   });
 });
+
+describe('stripInternalRefs', () => {
+  it('去掉服務文字裡的內部編號與版本階段，保留說明', async () => {
+    const { stripInternalRefs } = await import('./format');
+    expect(stripInternalRefs('每則 note 都有 principal 與 updated_by_principal（A22）')).toBe(
+      '每則 note 都有 principal 與 updated_by_principal',
+    );
+    expect(stripInternalRefs('不允許 lore → dev：dev 與 lore／personal 之間不互相轉換（A20）。')).toBe(
+      '不允許 lore → dev：dev 與 lore／personal 之間不互相轉換。',
+    );
+    expect(stripInternalRefs('只允許互換（A20：dev 不與其他 space 轉換）')).toBe('只允許互換（dev 不與其他 space 轉換）');
+    expect(stripInternalRefs('資料庫尚無 UI 登入表（schema v13 前）')).toBe('資料庫尚無 UI 登入表（舊版資料庫）');
+    expect(stripInternalRefs('缺少 documents.warnings 欄（schema 未遷移到 v10）')).toBe('缺少 documents.warnings 欄（schema 未遷移到最新版）');
+    expect(stripInternalRefs('墓碑缺檔名／格式（v11 前刪除）')).toBe('墓碑缺檔名／格式（舊版刪除）');
+    // 一般內容不動
+    expect(stripInternalRefs('pytest 2267、Flutter 1459 全綠；dev 預設')).toBe('pytest 2267、Flutter 1459 全綠；dev 預設');
+  });
+});

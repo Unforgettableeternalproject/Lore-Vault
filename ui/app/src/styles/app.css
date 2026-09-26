@@ -861,7 +861,6 @@ details.lv-check > .lv-check__head { cursor: pointer; }
 /* 寬鬆版 key-value（連線設定）：固定標籤欄寬、拉開行距與欄距；手機改上下堆疊 */
 .lv-kv--roomy { grid-template-columns: minmax(96px, 150px) minmax(0, 1fr); gap: 14px 32px; font-size: 14px; line-height: 1.6; }
 .lv-kv--roomy dt { font-size: var(--lv-fs-meta); padding-top: 3px; }
-.lv-kv__note { display: block; margin-top: 4px; font-size: var(--lv-fs-meta); color: var(--ink-mute); }
 .lv-settings .lv-section { margin-top: 40px; padding-top: 28px; }
 .lv-settings .lv-section__title { margin-bottom: 18px; }
 .lv-settings .lv-hint { max-width: 72ch; margin-top: 22px; }
