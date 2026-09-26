@@ -733,8 +733,6 @@ button.lv-wikilink { background: none; border: none; border-bottom: 1px dashed v
 .lv-section__title { font-family: var(--font-serif-tc); font-weight: 600; font-size: 19px; margin: 0 0 6px; color: var(--ink-title); }
 .lv-section__desc { margin: 0 0 14px; font-size: 13px; line-height: 1.7; color: var(--ink-soft); }
 .lv-section--danger { border-top-color: color-mix(in srgb, var(--status-error) 45%, transparent); }
-.lv-pick-list a { color: var(--ink); text-decoration: none; }
-.lv-pick-list a:hover { color: var(--lv-zone-text); }
 
 .lv-alias-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); }
 .lv-alias { display: grid; grid-template-columns: 64px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
@@ -749,14 +747,44 @@ button.lv-wikilink { background: none; border: none; border-bottom: 1px dashed v
 }
 .lv-move-target:disabled { cursor: not-allowed; opacity: .45; border-style: dashed; background: none; color: var(--ink-mute); }
 
-.lv-graves { list-style: none; margin: 0; padding: 0; }
-.lv-grave { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; gap: 12px; align-items: start; padding: 12px 4px; border-bottom: 1px solid var(--line); }
-.lv-grave__mark { color: var(--ink-mute); }
-.lv-grave__main { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
-.lv-grave__title { font-family: var(--font-serif-tc); font-size: 15px; color: var(--ink-title); overflow-wrap: anywhere; }
-.lv-grave__meta { color: var(--ink-mute); overflow-wrap: anywhere; }
-.lv-grave__warn { color: var(--lv-error-text); }
+/* 維護頁：vault 卡片 */
+.lv-section__stat { font-family: var(--font-mono); font-size: 11px; color: var(--ink-mute); }
+.lv-vcards { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.lv-vcard {
+  height: 100%; box-sizing: border-box; display: flex; flex-direction: column; gap: 10px; padding: 16px 18px;
+  border: 1px solid var(--line-strong); border-top: 2px solid var(--zone-stroke, var(--line-strong));
+  border-radius: var(--lv-radius-control); background: var(--bg-soft); color: var(--ink); text-decoration: none;
+  transition: border-color .2s, background .2s;
+}
+.lv-vcard:hover, .lv-vcard:focus-visible { border-color: var(--zone-stroke, var(--uep-gold)); background: var(--zone-tint); color: var(--ink); --ink-mute: var(--ink-soft); }
+.lv-vcard__head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+.lv-vcard__name { font-family: var(--font-serif-tc); font-weight: 600; font-size: 16px; color: var(--ink-title); overflow-wrap: anywhere; min-width: 0; }
+.lv-vcard__key { color: var(--ink-mute); line-height: 1.5; }
+.lv-vcard__stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.lv-vcard__stat { display: flex; flex-direction: column; gap: 2px; padding: 8px 0; }
+.lv-vcard__stat + .lv-vcard__stat { border-left: 1px solid var(--line); padding-left: 12px; }
+.lv-vcard__n { font-family: var(--font-display); font-size: 24px; line-height: 1.1; color: var(--ink-title); }
+.lv-vcard__k { font-family: var(--font-mono); font-size: 10px; letter-spacing: .14em; color: var(--ink-mute); }
+.lv-vcard__foot { margin-top: auto; display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--ink-mute); }
+.lv-vcard__go { color: var(--lv-zone-text); font-family: var(--font-mono); font-size: 11px; white-space: nowrap; }
+
+/* 維護頁：墓碑 */
+.lv-graves { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.lv-grave {
+  display: grid; grid-template-columns: 56px minmax(0, 1fr) auto; gap: 14px; align-items: start; padding: 14px 16px;
+  border: 1px solid var(--line); border-left: 3px solid var(--line-strong); border-radius: var(--lv-radius-control); background: var(--bg-soft);
+}
+.lv-grave[data-state='ok'] { border-left-color: var(--status-success); }
+.lv-grave[data-state='old'] { border-left-color: var(--uep-gold); }
+.lv-grave[data-state='blocked'] { border-left-color: var(--status-error); }
+.lv-grave__main { min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.lv-grave__title { font-family: var(--font-serif-tc); font-size: 15px; font-weight: 600; color: var(--ink-title); overflow-wrap: anywhere; }
+.lv-grave__meta { display: flex; flex-wrap: wrap; gap: 6px; }
 .lv-grave__state { color: var(--ink-soft); }
+.lv-grave[data-state='ok'] .lv-grave__state { color: var(--lv-success-text); }
+.lv-grave[data-state='old'] .lv-grave__state { color: var(--lv-gold-text); }
+.lv-grave[data-state='blocked'] .lv-grave__state { color: var(--lv-error-text); }
+.lv-graves__empty { border: 1px dashed var(--line-strong); }
 .lv-restore-results { list-style: none; margin: 0 0 12px; padding: 0; }
 
 .lv-nav__badge {
@@ -1025,6 +1053,12 @@ details.lv-check > .lv-check__head { cursor: pointer; }
   .lv-concept { grid-template-columns: minmax(0, 1fr); }
   .lv-concept__side { flex-direction: row; flex-wrap: wrap; gap: 6px; align-items: center; }
   .lv-alias { grid-template-columns: minmax(0, 1fr) auto; }
+  .lv-vcards { grid-template-columns: minmax(0, 1fr); }
+  .lv-vcard { padding: 12px 14px; gap: 8px; }
+  .lv-vcard__n { font-size: 20px; }
+  .lv-vcard__stat { padding: 6px 0; }
+  .lv-grave { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .lv-grave > .btn-outline { justify-self: start; }
   .lv-alias__tag { grid-column: 1 / -1; }
   .lv-kbd-list__row { grid-template-columns: 72px minmax(0, 1fr); }
   .lv-kv--roomy { grid-template-columns: minmax(0, 1fr); gap: 4px; }

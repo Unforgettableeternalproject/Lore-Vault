@@ -2,7 +2,7 @@
 // `/ui/maint/<key>` 針對單一 vault；`/ui/maint` 列出本 space 的 vault 與全 space 墓碑（刪除 vault 後回到這裡）。
 import { useEffect, useState } from 'preact/hooks';
 
-import { ErrorState, Loading, TwoPhaseConfirm, TwoPhaseDelete } from '../components/ui';
+import { Badge, ErrorState, Loading, TwoPhaseConfirm, TwoPhaseDelete } from '../components/ui';
 import { useApp } from '../lib/context';
 import { describeError, formatTime, isAbort } from '../lib/format';
 import { routePath } from '../lib/router';
@@ -26,28 +26,33 @@ export function Maint({ vaultKey }: { vaultKey: string | null }) {
       <section class="lv-screen lv-screen--wide">
         <div class="lv-eyebrow">MAINTENANCE · {space.en}</div>
         <h1 class="lv-title">維護</h1>
-        <section class="lv-section">
-          <h2 class="lv-section__title">選擇 vault</h2>
+        <section class="lv-section" aria-labelledby="maint-pick">
+          <div class="lv-section__head">
+            <h2 class="lv-section__title" id="maint-pick">
+              選擇 vault
+            </h2>
+            {vaults.items.length > 0 && (
+              <span class="lv-section__stat" data-testid="maint-totals">
+                {vaults.items.length} 個 vault · {vaults.items.reduce((n, v) => n + v.note_count, 0)} 筆記 ·{' '}
+                {vaults.items.reduce((n, v) => n + (v.document_count ?? 0), 0)} 文件
+              </span>
+            )}
+          </div>
+          <p class="lv-section__desc">別名與重新導向、換 space、刪除都針對單一 vault；點卡片進入。</p>
           {vaults.loading && vaults.items.length === 0 && <Loading />}
           {vaults.error && <ErrorState error={`vault 列表載入失敗：${vaults.error}`} />}
           {!vaults.loading && !vaults.error && vaults.items.length === 0 && (
-            <p class="lv-muted">這個 space 還沒有 vault。</p>
+            <div class="zone-state lv-empty">這個 space 還沒有 vault。</div>
           )}
-          <ul class="lv-side-list lv-pick-list">
-            {vaults.items.map((v) => (
-              <li key={v.key}>
-                <a
-                  href={routePath('maint', [v.key])}
-                  onClick={(e) => {
-                    e.preventDefault();
-                    navigate(routePath('maint', [v.key]));
-                  }}
-                >
-                  {v.display} <span class="lv-mono lv-muted">{v.key}</span>
-                </a>
-              </li>
-            ))}
-          </ul>
+          {vaults.items.length > 0 && (
+            <ul class="lv-vcards" aria-label={`${space.en} 的 vault`}>
+              {vaults.items.map((v) => (
+                <li key={v.key}>
+                  <VaultCard vault={v} onOpen={() => navigate(routePath('maint', [v.key]))} />
+                </li>
+              ))}
+            </ul>
+          )}
         </section>
         <TombstoneSection vault="*" />
       </section>
@@ -90,6 +95,50 @@ export function Maint({ vaultKey }: { vaultKey: string | null }) {
       <TombstoneSection vault={vault.key} />
       <DeleteSection vault={vault} />
     </section>
+  );
+}
+
+// ── vault 卡片（維護入口）──
+
+function VaultCard({ vault, onOpen }: { vault: VaultSummary; onOpen: () => void }) {
+  return (
+    <a
+      class="lv-vcard"
+      href={routePath('maint', [vault.key])}
+      data-maint-vault={vault.key}
+      onClick={(e) => {
+        e.preventDefault();
+        onOpen();
+      }}
+    >
+      <span class="lv-vcard__head">
+        <span class="lv-vcard__name">{vault.display}</span>
+        <Badge tone="tag" label="來源">
+          {originLabel(vault.origin)}
+        </Badge>
+      </span>
+      <span class="lv-vcard__key lv-mono">{vault.key}</span>
+      <span class="lv-vcard__stats">
+        <span class="lv-vcard__stat">
+          <span class="lv-vcard__n">{vault.note_count}</span>
+          <span class="lv-vcard__k">筆記</span>
+        </span>
+        <span class="lv-vcard__stat">
+          <span class="lv-vcard__n">{vault.document_count ?? '—'}</span>
+          <span class="lv-vcard__k">文件</span>
+        </span>
+        <span class="lv-vcard__stat">
+          <span class="lv-vcard__n">{vault.aliases.length}</span>
+          <span class="lv-vcard__k">別名</span>
+        </span>
+      </span>
+      <span class="lv-vcard__foot">
+        <span>{vault.last_updated ? `最近更新 ${formatTime(vault.last_updated)}` : '尚無內容'}</span>
+        <span class="lv-vcard__go" aria-hidden="true">
+          維護 →
+        </span>
+      </span>
+    </a>
   );
 }
 
@@ -414,6 +463,8 @@ export function TombstoneSection({ vault }: { vault: string }) {
   };
 
   const resultEntries = Object.entries(outcomes).filter(([key]) => !items.some((x) => `${x.kind}:${x.id}` === key));
+  const noteCount = items.filter((t) => t.kind !== 'document').length;
+  const docCount = items.length - noteCount;
 
   return (
     <section class="lv-section" aria-labelledby="maint-graves">
@@ -421,6 +472,12 @@ export function TombstoneSection({ vault }: { vault: string }) {
         <h2 class="lv-section__title" id="maint-graves">
           墓碑{vault === '*' ? `（${space.en} 全部）` : ''}
         </h2>
+        {items.length > 0 && (
+          <span class="lv-section__stat">
+            {noteCount} 筆記 · {docCount} 文件{next ? '（還有更多）' : ''}
+          </span>
+        )}
+        <span class="lv-spacer" />
         <button type="button" class="btn-outline btn-outline--sm" onClick={() => setTick((t) => t + 1)}>
           重新整理
         </button>
@@ -449,7 +506,9 @@ export function TombstoneSection({ vault }: { vault: string }) {
       )}
       {error !== null && <ErrorState error={error} onRetry={() => setTick((t) => t + 1)} />}
       {loading && items.length === 0 && <Loading />}
-      {!loading && error === null && items.length === 0 && <p class="lv-muted lv-small">沒有墓碑。</p>}
+      {!loading && error === null && items.length === 0 && (
+        <div class="zone-state lv-empty lv-graves__empty">沒有墓碑：{vault === '*' ? `${space.en} space` : '這個 vault'} 目前沒有已刪除的筆記或文件。</div>
+      )}
       {items.length > 0 && (
         <ul class="lv-graves" data-testid="tombstones">
           {items.map((t) => {
@@ -458,20 +517,32 @@ export function TombstoneSection({ vault }: { vault: string }) {
             const name = t.kind === 'document' ? t.filename : t.title;
             const blocked = !t.vault_exists;
             const oldNote = t.kind === 'note' && t.restorable === false && t.vault_exists;
+            const state = blocked ? 'blocked' : t.restorable ? 'ok' : 'old';
             return (
-              <li class="lv-grave" key={key} data-kind={t.kind} data-restorable={String(t.restorable ?? false)}>
-                <span class="lv-grave__mark" aria-hidden="true">
-                  ✝
+              <li class="lv-grave" key={key} data-kind={t.kind} data-restorable={String(t.restorable ?? false)} data-state={state}>
+                <span class="lv-grave__kind">
+                  <Badge tone={t.kind === 'document' ? 'kind' : 'tag'} label="種類">
+                    {t.kind === 'document' ? '文件' : '筆記'}
+                  </Badge>
                 </span>
                 <div class="lv-grave__main">
-                  <div class="lv-grave__title">
-                    <span class="lv-code-tag">{t.kind === 'document' ? '文件' : '筆記'}</span>
-                    {name ?? <span class="lv-muted">（舊墓碑，沒有標題）</span>}
-                  </div>
-                  <div class="lv-grave__meta lv-mono">
-                    {t.id} · {t.vault}
-                    {blocked && <span class="lv-grave__warn"> · vault 已刪除</span>} · 刪除於 {formatTime(t.deleted_at)}
-                    {t.reason ? ` · ${t.reason}` : ''}
+                  <div class="lv-grave__title">{name ?? <span class="lv-muted">（舊墓碑，沒有標題）</span>}</div>
+                  <div class="lv-grave__meta">
+                    <Badge tone={blocked ? 'warn' : 'vault'} label="vault">
+                      {t.vault}
+                      {blocked ? ' · vault 已刪除' : ''}
+                    </Badge>
+                    <Badge tone="time" label="刪除於">
+                      刪除於 {formatTime(t.deleted_at)}
+                    </Badge>
+                    {t.reason && (
+                      <Badge tone="plain" label="原因">
+                        {t.reason}
+                      </Badge>
+                    )}
+                    <Badge tone="anchor" label="id">
+                      {t.id}
+                    </Badge>
                   </div>
                   <div class="lv-grave__state lv-small">
                     {blocked
