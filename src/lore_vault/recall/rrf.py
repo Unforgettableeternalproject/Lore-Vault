@@ -4,8 +4,10 @@
 
 - 只用排名、不用原始分數：FTS 的 -bm25 只在同一查詢內可比、cosine 在 -1–1，
   兩者量級不可比，正規化分數再加權需要逐語料調參；RRF 不需要
-- `k = 60`：Cormack, Clarke & Büttcher (SIGIR 2009) 的預設值，
-  在多種 TREC 資料上對 k 不敏感；k 越大，前幾名與後段的差距越平緩
+- `k = 20`：Cormack, Clarke & Büttcher (SIGIR 2009) 的預設是 60；本專案 30 題
+  離線實測（recall-diag，配合 lexical 改為逐 token OR）k=20 使 top-10 命中
+  76.7%→90.0%、top-5 66.7%→86.7%，無退化題（見 DECISIONS.md D11）。
+  k 越小，各路前幾名的權重越集中；k 越大，前幾名與後段的差距越平緩
 - 某一路沒有的文件（例如缺向量的 note）只拿到另一路的分數，不會被丟掉
 - 同分依「最佳單路名次」、再依 id 排序，結果穩定
 """
@@ -15,7 +17,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
-RRF_K = 60
+RRF_K = 20
 
 
 @dataclass(frozen=True)
