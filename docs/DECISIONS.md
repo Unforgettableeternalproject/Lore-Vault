@@ -25,6 +25,7 @@
 | A19 | 文件支援：md、txt、json、yaml、toml、pdf、docx、pptx 一次支援，其他純文字檔（含程式碼）一律當 txt；pdf 中文抽取先以 `E:\Documents` 的樣本做前置實測；文件 LLM 摘要第一版不做；單檔上限 25MB／1000 萬字元（2026-09-26 由 200 萬提高：文字密集的中文 pdf 20MB 可抽出約 940 萬字）；`upload_roots` 預設為殼 cwd、可設定額外白名單。space 的三個小項（程式白名單 + doctor、非 dev 不自動建 global、換 space 只走管理指令）照設計 | 艾斯維爾 2026-09-26，設計見 `docs/design/SPACES_AND_DOCUMENTS.md` |
 | A20 | `dev` 與非 dev（`lore`／`personal`）之間不互相轉換、不共用 vault；換 space 只允許 `lore`↔`personal`，並在單一交易內把 key 改成新前綴（舊 key 不留別名）。快照含全部 space、由殼端過濾；無 body 的 `POST /v1/status` 免帶 space | 艾斯維爾 2026-09-26 |
 | A21 | UI：Preact + Vite 建置成靜態檔，由服務在 `/ui` 提供（node 只在 docker 建置階段）；身分驗證改在服務本地端點執行（取代依賴 Cloudflare Access），Access 至多作外層、服務端不驗其 JWT；note 加入「作者」欄位，契約（agent 如何填）由艾斯維爾另訂；UI 需能經 `pm` 子網域連入，tunnel 切換提前處理 | 艾斯維爾 2026-09-26，見 docs/design/UI-IMPLEMENTATION-PLAN.md |
+| A22 | 作者契約：note 記 `author`（寫入者自報的身分名，agent 用自己的角色名如 Minka、子代理用各自名稱；UI 登入者為 `Xavier (Bernie)`；未填記為未具名、不代填）與 `principal`（服務依憑證判定、不可自填，現階段唯一為 `xavier`，日後共享時每人一組 token 對應各自 principal）；另記最後修改者 `updated_by`；舊 PM 匯入的 note 標 `legacy`。目的：共享後能分清誰做了什麼 | 艾斯維爾 2026-09-26 |
 
 ## 待裁決
 
