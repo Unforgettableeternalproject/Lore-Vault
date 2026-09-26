@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 
 from lore_vault.schema import Note, SchemaError, Vault
-from lore_vault.storage import checks, fts, notes, records, vaults, vectors
+from lore_vault.storage import admin, checks, fts, notes, records, vaults, vectors
 from lore_vault.storage.errors import (
     InvalidSpace,
     SpaceKeyPrefixRequired,
@@ -25,7 +25,6 @@ from lore_vault.storage.vaults import (
     list_vaults,
     resolve_read,
     resolve_write,
-    set_vault_space,
     upsert_vault,
 )
 
@@ -182,24 +181,38 @@ def test_upsert_cannot_move_space(two_spaces):
         upsert_vault(two_spaces, Vault(key=LORE, display="x", space="dev"))
 
 
-def test_set_vault_space_follows_prefix_rule(two_spaces):
-    with pytest.raises(SpaceKeyPrefixRequired):
-        set_vault_space(two_spaces, DEV, "lore")
-    with pytest.raises(SpaceKeyPrefixRequired):
-        set_vault_space(two_spaces, LORE, "personal")
+def test_change_space_refuses_dev_both_ways(two_spaces):
+    # A20：dev 與 lore／personal 不互相轉換，兩個方向都拒絕
+    with pytest.raises(admin.SpaceChangeRefused, match="A20"):
+        admin.change_vault_space(two_spaces, DEV, "lore")
+    with pytest.raises(admin.SpaceChangeRefused, match="A20"):
+        admin.change_vault_space(two_spaces, LORE, "dev")
     with pytest.raises(UnknownVault):
-        set_vault_space(two_spaces, "lore/arc-old", "dev")  # 別名不接受
+        admin.change_vault_space(two_spaces, "lore/arc-old", "personal")  # 別名不接受
     assert get_vault(two_spaces, LORE, space="lore").space == "lore"
+    assert get_vault(two_spaces, DEV, space="dev").space == "dev"
 
 
-def test_set_vault_space_moves_scope(two_spaces):
-    # lore → dev：dev 不檢查前綴；換完 dev 看得到、lore 看不到
-    assert set_vault_space(two_spaces, LORE, "dev") == ("lore", "dev")
-    assert {n.id for n in notes.list_notes(two_spaces, "*", space="dev")[0]} == {
-        "d-1",
-        "l-1",
-    }
+def test_change_space_moves_scope_and_renames(two_spaces):
+    # lore → personal：key 與別名換前綴；personal 看得到、lore 看不到、舊 key 不留
+    plan = admin.change_vault_space(two_spaces, LORE, "personal")
+    assert (plan.new_key, plan.aliases) == (
+        "personal/arc",
+        (("lore/arc-old", "personal/arc-old"),),
+    )
+    moved = get_vault(two_spaces, "personal/arc-old", space="personal")
+    assert (moved.key, moved.space, tuple(moved.aliases)) == (
+        "personal/arc",
+        "personal",
+        ("personal/arc-old",),
+    )
+    assert [n.id for n in notes.list_notes(two_spaces, "*", space="personal")[0]] == [
+        "l-1"
+    ]
     assert notes.list_notes(two_spaces, "*", space="lore")[0] == []
+    for space in ("lore", "personal"):
+        with pytest.raises(UnknownVault):
+            resolve_read(two_spaces, LORE, space=space)
 
 
 # ── doctor 對帳 ──

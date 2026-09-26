@@ -5,16 +5,18 @@
 - `delete-vault --key KEY [--force] [--reason TEXT]`：vault 內有 note 或其他紀錄時
   必須 `--force`
 - `undelete-note --id NOTE_ID`：移除墓碑，下次重跑匯入時該 note 會匯回來
-- `set-space --key KEY --space SPACE`：把 vault 換到另一個 space（A19／D-space-3：
-  只走管理指令，不開 MCP 工具）。前綴規則與建立時相同：非 dev 的 key 與別名必須
-  以 `<space>/` 開頭，不合即拒（不改 key）。換完後 MCP 殼的降級快照要等下次
-  快照更新才反映
+- `set-space --key KEY --space SPACE [--new-key NEW]`：把 vault 換到另一個 space
+  （A19／D-space-3 只走管理指令；A20 規則）。只允許 `lore`↔`personal`，dev 與非 dev
+  兩個方向都拒絕。換 space 同時改 key：缺省把前綴換掉（`lore/x`→`personal/x`），
+  別名一律換前綴（換不了就拒絕），舊 key 不留別名；新 key／新別名已存在則拒絕。
+  所有引用該 key 的表在單一交易內改寫，執行後核對各表筆數與規劃一致，否則 rollback。
+  換完後 MCP 殼的降級快照要等下次快照更新才反映
 
 刪除會為每則被刪的 note 寫墓碑（`note_tombstones`）：重跑匯入不會匯回，
 匯入對帳把它算成「刻意刪除」而非漏匯。
 
-預設 dry-run：只印將刪內容的 metadata（筆數、note id；不印標題與內文）。
-加 `--yes` 才真的刪，刪除在單一交易內完成（見 `lore_vault.storage.admin`）。
+預設 dry-run：只印將刪／將改內容的 metadata（筆數、id；不印標題與內文）。
+加 `--yes` 才真的執行，在單一交易內完成（見 `lore_vault.storage.admin`）。
 資料庫路徑缺省走設定 `database.path`
 （容器內 `LORE_VAULT_CONFIG` 已指向 /data/lore.db）。
 不遷移資料庫：schema 版本與程式不符時拒絕執行（先讓服務啟動遷移）。
@@ -34,9 +36,8 @@ from typing import TextIO
 
 from lore_vault.schema import SPACES
 from lore_vault.storage import admin
-from lore_vault.storage import vaults as storage_vaults
 from lore_vault.storage.db import connect
-from lore_vault.storage.errors import StorageError, UnknownVault
+from lore_vault.storage.errors import StorageError
 from lore_vault.storage.migrate import SCHEMA_VERSION, current_version
 
 
@@ -70,6 +71,9 @@ def _parser() -> argparse.ArgumentParser:
     p_space.add_argument(
         "--space", required=True, choices=sorted(SPACES), help="目標 space"
     )
+    p_space.add_argument(
+        "--new-key", help="新 key（缺省把 '<舊 space>/' 前綴換成 '<新 space>/'）"
+    )
     p_space.add_argument("--yes", action="store_true", help="真的變更（預設 dry-run）")
 
     p_undel = sub.add_parser("undelete-note", help="移除墓碑，讓下次匯入可匯回")
@@ -97,27 +101,18 @@ def _existing(path: str) -> str:
 
 
 def _set_space(conn: sqlite3.Connection, args: argparse.Namespace) -> dict[str, object]:
-    row = conn.execute("SELECT space FROM vaults WHERE key = ?", (args.key,)).fetchone()
-    if row is None:
-        raise UnknownVault(f"vault 不存在：{args.key!r}（只接受正式 key）")
     if args.yes:
-        before, after = storage_vaults.set_vault_space(conn, args.key, args.space)
-        return {"mode": "changed", "key": args.key, "from": before, "to": after}
-    # dry-run 也跑前綴檢查：不合的在這裡就報錯，不等 --yes
-    aliases = [
-        r[0]
-        for r in conn.execute(
-            "SELECT alias FROM vault_aliases WHERE vault = ?", (args.key,)
+        plan = admin.change_vault_space(
+            conn, args.key, args.space, new_key=args.new_key
         )
-    ]
-    for name in (args.key, *aliases):
-        storage_vaults.check_key_prefix(args.space, name)
+        return {"mode": "changed", **plan.to_dict()}
+    # dry-run 跑完整規劃：A20 拒絕、前綴、衝突在這裡就報錯，不等 --yes
+    plan = admin.plan_space_change(conn, args.key, args.space, new_key=args.new_key)
     return {
         "mode": "dry_run",
-        "key": args.key,
-        "from": row[0],
-        "to": args.space,
-        "hint": "確認無誤後加 --yes 執行；MCP 殼的降級快照要等下次快照更新才反映",
+        **plan.to_dict(),
+        "hint": "確認無誤後加 --yes 執行；舊 key 不留別名，引用舊 key 的外部設定需自行"
+        "更新；MCP 殼的降級快照要等下次快照更新才反映",
     }
 
 

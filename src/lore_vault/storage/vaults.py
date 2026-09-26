@@ -161,7 +161,8 @@ def upsert_vault(
     別名不可撞到其他 vault 的 key 或別名；key 也不可撞到其他 vault 的別名。
     `origin`／`origin_detail` 只在新建時寫入；更新既有 vault 不改來源標記。
     key 與別名都要符合 `vault.space` 的前綴規則（`check_key_prefix`）；
-    既有 vault 的 space 不在這裡改（換 space 只走管理指令 `set_vault_space`）。
+    既有 vault 的 space 不在這裡改（換 space 只走管理指令，連 key 一起改：
+    `storage.admin.change_vault_space`，A20）。
     """
     if origin not in VAULT_ORIGINS:
         raise ValueError(f"origin 必須是 {sorted(VAULT_ORIGINS)}，得到 {origin!r}")
@@ -236,29 +237,6 @@ def ensure_vault(
             pass
         upsert_vault(conn, vault, origin=origin, origin_detail=origin_detail)
         return vault.key, True
-
-
-def set_vault_space(conn: sqlite3.Connection, key: str, space: str) -> tuple[str, str]:
-    """管理操作：把 vault（正式 key，不接受別名）換到另一個 space。
-
-    前綴規則與建立時相同（`check_key_prefix`，含別名）；不合即拒，不改 key。
-    回傳 (舊 space, 新 space)。不開 MCP 工具（A19／D-space-3）。
-    """
-    target = validate_space(space)
-    with transaction(conn):
-        row = conn.execute("SELECT space FROM vaults WHERE key = ?", (key,)).fetchone()
-        if row is None:
-            raise UnknownVault(f"vault 不存在：{key!r}（只接受正式 key）")
-        aliases = [
-            r[0]
-            for r in conn.execute(
-                "SELECT alias FROM vault_aliases WHERE vault = ?", (key,)
-            )
-        ]
-        for name in (key, *aliases):
-            check_key_prefix(target, name)
-        conn.execute("UPDATE vaults SET space = ? WHERE key = ?", (target, key))
-        return row[0], target
 
 
 def vault_origins(conn: sqlite3.Connection) -> list[tuple[str, str, str | None]]:

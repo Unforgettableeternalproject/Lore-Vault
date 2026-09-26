@@ -125,7 +125,7 @@ def _green(db) -> None:
         assert imports.reconcile(conn, SOURCE).status == "pass"
         report = default_registry().run(
             DoctorContext(settings={"embedding_dim": DIM}, resources={"db": conn}),
-            categories=["storage", "import"],
+            categories=["storage", "import", "space"],
         )
         failed = [o.name for o in report.outcomes if o.result.status is Status.FAIL]
         assert failed == []
@@ -422,7 +422,7 @@ def test_cascade_guard_catches_orphans(db):
         conn.close()
 
 
-# ── set-space（A19／D-space-3：只走管理指令）──
+# ── set-space（A19／D-space-3：只走管理指令；A20：只允許 lore↔personal 並改 key）──
 
 
 def _space_of(db, key: str) -> str:
@@ -446,31 +446,122 @@ def test_delete_note_requires_space(db, capsys):
     assert code == 1
 
 
-def test_set_space_dry_run_then_apply(db):
+def _add_lore(db) -> None:
     conn = connect(db)
     try:
-        upsert_vault(conn, Vault(key="lore/arc", display="arc", space="lore"))
+        upsert_vault(
+            conn,
+            Vault(key="lore/arc", display="arc", space="lore", aliases=("lore/old",)),
+        )
+        for note_id in ("note:l1", "note:l2"):
+            insert_note(
+                conn, "lore/arc", _note("lore/arc", note_id, note_id), space="lore"
+            )
+            set_embedding(
+                conn, "lore/arc", note_id, [0.0, 1.0, 0.0, 0.0], space="lore", dim=DIM
+            )
     finally:
         conn.close()
-    code, result = _run(db, "set-space", "--key", "lore/arc", "--space", "dev")
-    assert code == 0
-    assert result["mode"] == "dry_run" and result["from"] == "lore"
-    assert _space_of(db, "lore/arc") == "lore"
-    code, result = _run(db, "set-space", "--key", "lore/arc", "--space", "dev", "--yes")
-    assert code == 0 and result == {
-        "mode": "changed",
-        "key": "lore/arc",
-        "from": "lore",
-        "to": "dev",
-    }
-    assert _space_of(db, "lore/arc") == "dev"
 
 
-def test_set_space_rejects_prefix_mismatch_and_aliases(db):
-    # dev 的 folder/a 不能直接搬到 lore（key 沒有 lore/ 前綴）；dry-run 就擋
-    for extra in ((), ("--yes",)):
-        code, _ = _run(db, "set-space", "--key", "folder/a", "--space", "lore", *extra)
-        assert code == 1
+def test_set_space_refuses_dev_both_ways(db, capsys):
+    _add_lore(db)
+    before = _table_counts(db)
+    for key, space in (
+        ("folder/a", "lore"),
+        ("folder/a", "personal"),
+        ("lore/arc", "dev"),
+    ):
+        for extra in ((), ("--yes",)):
+            code, out = _run(db, "set-space", "--key", key, "--space", space, *extra)
+            assert code == 1 and out is None
+            assert "A20" in capsys.readouterr().err
     assert _space_of(db, "folder/a") == "dev"
-    code, _ = _run(db, "set-space", "--key", "alias-a", "--space", "dev")
+    assert _space_of(db, "lore/arc") == "lore"
+    assert _table_counts(db) == before
+
+
+def test_set_space_rejects_alias_and_same_space(db):
+    _add_lore(db)
+    code, _ = _run(db, "set-space", "--key", "lore/old", "--space", "personal")
     assert code == 1
+    code, _ = _run(db, "set-space", "--key", "lore/arc", "--space", "lore")
+    assert code == 1
+
+
+def test_set_space_lore_to_personal_dry_run_then_apply(db):
+    _add_lore(db)
+    code, _ = _run(
+        db,
+        "delete-note",
+        "--space",
+        "lore",
+        "--vault",
+        "lore/arc",
+        "--id",
+        "note:l2",
+        "--yes",
+    )
+    assert code == 0
+    before = _table_counts(db)
+    code, dry = _run(db, "set-space", "--key", "lore/arc", "--space", "personal")
+    assert code == 0 and dry["mode"] == "dry_run"
+    assert dry["new_key"] == "personal/arc"
+    assert dry["aliases"] == {"lore/old": "personal/old"}
+    assert dry["counts"]["notes.vault"] == 1
+    assert dry["counts"]["note_tombstones.vault"] == 1
+    assert dry["counts"]["vault_aliases.vault"] == 1
+    assert _space_of(db, "lore/arc") == "lore"  # dry-run 不動
+
+    code, done = _run(
+        db, "set-space", "--key", "lore/arc", "--space", "personal", "--yes"
+    )
+    assert code == 0 and done["mode"] == "changed"
+    assert done["counts"] == dry["counts"]
+    assert _table_counts(db) == before  # 只改 key，不增減列
+    assert _space_of(db, "personal/arc") == "personal"
+    conn = connect(db)
+    try:
+        assert (
+            conn.execute("SELECT 1 FROM vaults WHERE key = 'lore/arc'").fetchone()
+            is None
+        )
+        assert (
+            conn.execute(
+                "SELECT vault FROM note_tombstones WHERE note_id = 'note:l2'"
+            ).fetchone()[0]
+            == "personal/arc"
+        )
+    finally:
+        conn.close()
+    _green(db)
+
+
+def test_set_space_new_key_option(db):
+    _add_lore(db)
+    code, _ = _run(
+        db,
+        "set-space",
+        "--key",
+        "lore/arc",
+        "--space",
+        "personal",
+        "--new-key",
+        "lore/arc2",
+        "--yes",
+    )
+    assert code == 1  # 新 key 不符新前綴
+    code, done = _run(
+        db,
+        "set-space",
+        "--key",
+        "lore/arc",
+        "--space",
+        "personal",
+        "--new-key",
+        "Personal/Diary",
+        "--yes",
+    )
+    assert code == 0 and done["new_key"] == "personal/diary"
+    assert _space_of(db, "personal/diary") == "personal"
+    _green(db)

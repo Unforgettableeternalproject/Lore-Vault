@@ -53,7 +53,7 @@
 **後果**：
 - `vault key` 在任何 space 都不可重複（見 1.3）。這是本提案對「vault key 在不同 space 是否可重複」
   這個問題的直接回答：**不可重複，全域唯一**，沿用現行 `PRIMARY KEY(key)` 不變。
-- vault 要換 space 是改一個欄位值（管理操作，見風險清單 R-3），不是搬資料。
+- vault 換 space 依 A20：dev 與 lore／personal 之間不轉換；僅 `lore`↔`personal`，以 `cli.admin set-space` 在單一交易內連同 key 前綴一併改名（引用欄位由 schema 動態偵測）。
 
 ### 1.2 schema 變更（v7）
 

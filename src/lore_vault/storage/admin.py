@@ -1,4 +1,4 @@
-"""管理用刪除（不經 HTTP／MCP）：刪單則 note、刪整個 vault。
+"""管理操作（不經 HTTP／MCP）：刪單則 note、刪整個 vault、換 space（改 key）。
 
 每個刪除先「規劃」（只讀、列出會刪的筆數與 id），實際刪除在單一交易內重新規劃再刪，
 並核對實際刪除筆數與規劃一致，不一致整段 rollback。
@@ -12,6 +12,12 @@
   `import_vault_counts`）**不動**：對帳把「清單有、note 沒有、有墓碑」算成刻意刪除，
   沒有墓碑的才是漏匯；重跑匯入遇到墓碑跳過，不會把刻意刪掉的 note 匯回來。
   `undelete_note` 移除墓碑，下次匯入即可匯回。
+
+換 space（A20）：只允許 `lore`↔`personal`，dev 與非 dev 兩個方向都拒絕。換 space 同時把
+key 與別名改成新前綴，引用 vault key 的欄位全部在同一交易內改寫（舊 key 不留別名）。
+引用欄位由 schema 動態列出（`vault_reference_columns`：欄名為 `vault` 或外鍵指向
+`vaults`），日後新增的表只要沿用任一慣例就不會漏改；已知清單
+`KNOWN_VAULT_REFERENCES` 中存在的表若沒被偵測到，視為偵測失效、拒絕執行。
 """
 
 from __future__ import annotations
@@ -21,10 +27,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from lore_vault.schema import SPACE_DEV, canonical_key
+
 from .db import transaction
-from .errors import NotFound, StorageError, UnknownVault
+from .errors import NotFound, StorageError, UnknownVault, VaultConflict
 from .timeutil import utc_now
-from .vaults import resolve_write
+from .vaults import check_key_prefix, resolve_write, validate_space
 
 DEFAULT_NOTE_REASON = "admin delete-note"
 DEFAULT_VAULT_REASON = "admin delete-vault"
@@ -311,3 +319,274 @@ def _verify(plan: DeletePlan, done: dict[str, int]) -> None:
     }
     if diff:
         raise PlanChanged(f"實際刪除筆數與規劃不符：{diff}")
+
+
+# ── 換 space（A20）──
+
+# 已知引用 vault key 的 (表, 欄)。只當守門用：表存在時動態偵測必須涵蓋它；
+# 實際改寫範圍以動態偵測為準（新表自動納入）。
+KNOWN_VAULT_REFERENCES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("vault_aliases", "vault"),
+        ("notes", "vault"),
+        ("episodes", "vault"),
+        ("concepts", "vault"),
+        ("injections", "vault"),
+        ("import_sources", "vault"),
+        ("import_vault_counts", "vault"),
+        ("note_tombstones", "vault"),
+        ("documents", "vault"),
+        ("document_tombstones", "vault"),
+    }
+)
+
+
+class SpaceChangeRefused(StorageError):
+    """A20 不允許的 space 轉換，或 key／別名無法換成新前綴。"""
+
+
+def _ident(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _ref_name(table: str, column: str) -> str:
+    return f"{table}.{column}"
+
+
+def vault_reference_columns(conn: sqlite3.Connection) -> tuple[tuple[str, str], ...]:
+    """列出 schema 中引用 vault key 的 (表, 欄)：欄名為 `vault`，或外鍵指向 `vaults`。
+
+    有外鍵的表（notes 等）與刻意無外鍵的表（墓碑、匯入對帳清單）都涵蓋。
+    """
+    tables = [
+        r[0]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name NOT LIKE 'sqlite_%' AND name != 'vaults' ORDER BY name"
+        )
+    ]
+    found: set[tuple[str, str]] = set()
+    for table in tables:
+        for col in conn.execute(f"PRAGMA table_info({_ident(table)})"):
+            if col["name"] == "vault":
+                found.add((table, "vault"))
+        for fk in conn.execute(f"PRAGMA foreign_key_list({_ident(table)})"):
+            if fk["table"] == "vaults":
+                found.add((table, fk["from"]))
+    return tuple(sorted(found))
+
+
+def _check_detection(
+    conn: sqlite3.Connection, columns: Sequence[tuple[str, str]]
+) -> None:
+    present = {r[0] for r in conn.execute("SELECT name FROM sqlite_master")}
+    expected = {ref for ref in KNOWN_VAULT_REFERENCES if ref[0] in present}
+    missing = expected - set(columns)
+    if missing:
+        raise StorageError(
+            f"引用 vault key 的欄位偵測不完整（缺 {sorted(missing)}）；拒絕改名"
+        )
+
+
+@dataclass(frozen=True)
+class SpaceChangePlan:
+    """換 space 的規劃：新舊 key、別名對照、各引用欄位受影響筆數。"""
+
+    key: str
+    new_key: str
+    from_space: str
+    to_space: str
+    aliases: tuple[tuple[str, str], ...]
+    counts: dict[str, int] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "key": self.key,
+            "new_key": self.new_key,
+            "from": self.from_space,
+            "to": self.to_space,
+            "aliases": {old: new for old, new in self.aliases},
+            "counts": dict(self.counts),
+        }
+
+
+def _swap_prefix(name: str, old_space: str, new_space: str, what: str) -> str:
+    prefix = f"{old_space}/"
+    if not name.startswith(prefix) or name == prefix:
+        raise SpaceChangeRefused(
+            f"{what} {name!r} 不以 '{prefix}' 開頭，無法換成 '{new_space}/' 前綴"
+        )
+    return f"{new_space}/{name[len(prefix) :]}"
+
+
+def _name_taken(conn: sqlite3.Connection, name: str) -> str | None:
+    """name 已是某 vault 的 key 或別名時回傳說明，否則 None。"""
+    if conn.execute("SELECT 1 FROM vaults WHERE key = ?", (name,)).fetchone():
+        return f"{name!r} 已是 vault 的 key"
+    row = conn.execute(
+        "SELECT vault FROM vault_aliases WHERE alias = ?", (name,)
+    ).fetchone()
+    if row is not None:
+        return f"{name!r} 已是 vault {row[0]!r} 的別名"
+    return None
+
+
+def plan_space_change(
+    conn: sqlite3.Connection, key: str, space: str, *, new_key: str | None = None
+) -> SpaceChangePlan:
+    """規劃把 vault（正式 key）在 lore／personal 之間換 space（只讀）。
+
+    - dev 與非 dev 之間兩個方向都拒絕（A20）；目標與目前相同也拒絕
+    - 新 key 缺省為把 `<舊 space>/` 換成 `<新 space>/`；給了要符合新前綴
+    - 別名一律換前綴，換不了就拒絕；新 key／新別名已被佔用就拒絕
+    - 任何引用欄位已有新 key 的資料（殘留）也拒絕，不合併
+    """
+    target = validate_space(space)
+    row = conn.execute("SELECT space FROM vaults WHERE key = ?", (key,)).fetchone()
+    if row is None:
+        alias = conn.execute(
+            "SELECT vault FROM vault_aliases WHERE alias = ?", (key,)
+        ).fetchone()
+        hint = f"（這是 {alias[0]!r} 的別名；請用正式 key）" if alias else ""
+        raise UnknownVault(f"vault 不存在：{key!r}{hint}")
+    source = row[0]
+    if SPACE_DEV in (source, target):
+        raise SpaceChangeRefused(
+            f"不允許 {source} → {target}：dev 與 lore／personal 之間不互相轉換（A20）。"
+            "dev 的 key 由 repo binding 決定、非 dev 以 '<space>/' 前綴命名，"
+            "兩邊不共用 vault；換 space 只允許 lore↔personal"
+        )
+    if source == target:
+        raise SpaceChangeRefused(f"vault {key!r} 已在 space {target!r}")
+    if new_key is None:
+        renamed = _swap_prefix(key, source, target, "key")
+    else:
+        renamed = canonical_key(new_key)
+        check_key_prefix(target, renamed)
+    taken = _name_taken(conn, renamed)
+    if taken:
+        raise VaultConflict(f"新 key 衝突：{taken}")
+    aliases: list[tuple[str, str]] = []
+    for (old_alias,) in conn.execute(
+        "SELECT alias FROM vault_aliases WHERE vault = ? ORDER BY alias", (key,)
+    ).fetchall():
+        new_alias = _swap_prefix(old_alias, source, target, "別名")
+        check_key_prefix(target, new_alias)
+        if new_alias == renamed:
+            raise VaultConflict(f"新別名 {new_alias!r} 與新 key 相同")
+        taken = _name_taken(conn, new_alias)
+        if taken:
+            raise VaultConflict(f"新別名衝突：{taken}")
+        aliases.append((old_alias, new_alias))
+
+    columns = vault_reference_columns(conn)
+    _check_detection(conn, columns)
+    counts: dict[str, int] = {"vaults.key": 1, "vault_aliases.alias": len(aliases)}
+    for table, column in columns:
+        sql = f"SELECT count(*) FROM {_ident(table)} WHERE {_ident(column)} = ?"
+        leftover = _count(conn, sql, (renamed,))
+        if leftover:
+            raise VaultConflict(
+                f"{_ref_name(table, column)} 已有 {leftover} 列引用新 key {renamed!r}"
+                "（殘留資料）；拒絕合併"
+            )
+        counts[_ref_name(table, column)] = _count(conn, sql, (key,))
+    return SpaceChangePlan(
+        key=key,
+        new_key=renamed,
+        from_space=source,
+        to_space=target,
+        aliases=tuple(aliases),
+        counts=counts,
+    )
+
+
+def _rename_column(
+    conn: sqlite3.Connection, table: str, column: str, old: str, new: str
+) -> int:
+    return conn.execute(
+        f"UPDATE {_ident(table)} SET {_ident(column)} = ? WHERE {_ident(column)} = ?",
+        (new, old),
+    ).rowcount
+
+
+def change_vault_space(
+    conn: sqlite3.Connection, key: str, space: str, *, new_key: str | None = None
+) -> SpaceChangePlan:
+    """換 space 並改 key（單一交易）：vaults、別名與所有引用欄位一起改寫。
+
+    交易內重新規劃再執行；執行後以資料實況逐欄核對「舊 key 零筆、新 key 筆數與
+    規劃一致」並做外鍵檢查，任何不符整段 rollback（`PlanChanged`）。
+    舊 key 不保留為別名。
+    """
+    with transaction(conn):
+        # 外鍵沒有 ON UPDATE CASCADE：延到提交時檢查，才能先改 vaults.key 再改子表。
+        # 提交前自行跑 foreign_key_check，不讓違規拖到 COMMIT 才爆。
+        conn.execute("PRAGMA defer_foreign_keys = ON")
+        plan = plan_space_change(conn, key, space, new_key=new_key)
+        done: dict[str, int] = {
+            "vaults.key": conn.execute(
+                "UPDATE vaults SET key = ?, space = ? WHERE key = ?",
+                (plan.new_key, plan.to_space, plan.key),
+            ).rowcount
+        }
+        done["vault_aliases.alias"] = sum(
+            conn.execute(
+                "UPDATE vault_aliases SET alias = ? WHERE alias = ? AND vault = ?",
+                (new_alias, old_alias, plan.key),
+            ).rowcount
+            for old_alias, new_alias in plan.aliases
+        )
+        for name in plan.counts:
+            if name in done:
+                continue
+            table, column = name.split(".", 1)
+            done[name] = _rename_column(conn, table, column, plan.key, plan.new_key)
+        _verify_counts(plan.counts, done)
+        _verify_renamed(conn, plan)
+        return plan
+
+
+def _verify_counts(expected: dict[str, int], done: dict[str, int]) -> None:
+    diff = {
+        name: (want, done.get(name))
+        for name, want in expected.items()
+        if done.get(name) != want
+    }
+    if diff:
+        raise PlanChanged(f"實際改寫筆數與規劃不符：{diff}")
+
+
+def _verify_renamed(conn: sqlite3.Connection, plan: SpaceChangePlan) -> None:
+    """以資料實況核對（不信 rowcount）：舊 key 不再被引用、新 key 筆數與規劃一致。"""
+    diff: dict[str, dict[str, int]] = {}
+    for table, column in vault_reference_columns(conn):
+        name = _ref_name(table, column)
+        sql = f"SELECT count(*) FROM {_ident(table)} WHERE {_ident(column)} = ?"
+        old_left = _count(conn, sql, (plan.key,))
+        new_now = _count(conn, sql, (plan.new_key,))
+        want = plan.counts.get(name, 0)
+        if old_left or new_now != want:
+            diff[name] = {"planned": want, "new_key": new_now, "old_key": old_left}
+    row = conn.execute(
+        "SELECT space FROM vaults WHERE key = ?", (plan.new_key,)
+    ).fetchone()
+    if row is None or row[0] != plan.to_space:
+        diff["vaults.key"] = {"planned": 1, "new_key": 0 if row is None else 1}
+    if conn.execute("SELECT 1 FROM vaults WHERE key = ?", (plan.key,)).fetchone():
+        diff["vaults.key"] = {"planned": 1, "old_key": 1}
+    for old_alias, new_alias in plan.aliases:
+        owner = conn.execute(
+            "SELECT vault FROM vault_aliases WHERE alias = ?", (new_alias,)
+        ).fetchone()
+        stale = conn.execute(
+            "SELECT 1 FROM vault_aliases WHERE alias = ?", (old_alias,)
+        ).fetchone()
+        if owner is None or owner[0] != plan.new_key or stale is not None:
+            diff[f"vault_aliases.alias:{old_alias}"] = {"planned": 1}
+    if diff:
+        raise PlanChanged(f"改名後核對不符：{diff}")
+    violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        tables = sorted({r[0] for r in violations})
+        raise PlanChanged(f"改名後外鍵不一致：{tables}")
