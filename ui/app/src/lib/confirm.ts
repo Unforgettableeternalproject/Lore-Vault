@@ -32,3 +32,15 @@ export async function executeTwoPhase(
   if (!data.executed) throw new Error('服務回應未執行（executed: false）');
   return data;
 }
+
+/**
+ * 409 plan_changed 的回應：`error.plan` 為目前規劃；服務若同時簽發新 token（`error.confirm_token`），
+ * 使用者可直接確認新規劃；沒有 token 時只能重新規劃。
+ */
+export function planChangedInfo(body: unknown): { plan: Record<string, unknown> | null; next: TwoPhasePlan | null } {
+  const error = (body as { error?: Record<string, unknown> } | null)?.error ?? null;
+  const plan = error && typeof error.plan === 'object' && error.plan !== null ? (error.plan as Record<string, unknown>) : null;
+  const token = typeof error?.confirm_token === 'string' && error.confirm_token ? error.confirm_token : null;
+  const expiresAt = typeof error?.expires_at === 'string' ? error.expires_at : null;
+  return { plan, next: plan && token ? { plan, token, expiresAt } : null };
+}

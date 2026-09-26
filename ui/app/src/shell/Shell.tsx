@@ -3,19 +3,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
 
 import type { ApiClient, Notice } from '../lib/api';
-import { ALL, AppContext, type AppEnv, type ToastKind, type VaultsState } from '../lib/context';
+import { ALL, AppContext, type AppEnv, type HealthBadge, type ToastKind, type VaultsState } from '../lib/context';
 import { describeError } from '../lib/format';
+import { healthBadge } from '../lib/health';
 import { loadSpace, saveSpace, type Theme } from '../lib/prefs';
 import { SCREENS, routePath, useRoute, type ScreenId } from '../lib/router';
 import { SPACES, type SpaceId } from '../lib/spaces';
-import type { VaultSummary } from '../lib/types';
+import type { StatusResult, VaultSummary } from '../lib/types';
 import { DocDetail } from '../screens/DocDetail';
 import { Docs } from '../screens/Docs';
+import { Health } from '../screens/Health';
+import { Maint } from '../screens/Maint';
+import { Memory } from '../screens/Memory';
 import { NoteDetail } from '../screens/NoteDetail';
 import { NoteNew } from '../screens/NoteNew';
 import { Notes } from '../screens/Notes';
-import { Placeholder } from '../screens/Placeholder';
 import { Search } from '../screens/Search';
+import { Settings } from '../screens/Settings';
+import { Vaults } from '../screens/Vaults';
 import { SpaceSwitcher } from './SpaceSwitcher';
 
 interface Props {
@@ -25,17 +30,6 @@ interface Props {
   degraded: Notice | null;
   onLogout: () => void;
 }
-
-const SCREEN_META: Record<ScreenId, { eyebrow: string; title: string; card: string }> = {
-  search: { eyebrow: 'RECALL', title: '檢索', card: 'T-79' },
-  notes: { eyebrow: 'NOTES', title: '筆記', card: 'T-80' },
-  docs: { eyebrow: 'DOCUMENTS', title: '文件', card: 'T-81' },
-  memory: { eyebrow: 'MEMORY', title: '記憶層', card: 'T-84' },
-  vaults: { eyebrow: 'VAULTS', title: 'Vault', card: 'T-82' },
-  maint: { eyebrow: 'MAINTENANCE', title: '維護', card: 'T-82' },
-  health: { eyebrow: 'HEALTH', title: '系統健康', card: 'T-83' },
-  settings: { eyebrow: 'CONNECTION', title: '連線設定', card: 'T-85' },
-};
 
 interface ToastItem {
   id: number;
@@ -53,6 +47,7 @@ export function Shell({ api, theme, onToggleTheme, degraded, onLogout }: Props) 
   const [vaultsTick, setVaultsTick] = useState(0);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const toastSeq = useRef(0);
+  const [health, setHealth] = useState<HealthBadge | null>(null);
   const space = SPACES[spaceId];
   const screen = route.screen;
 
@@ -69,6 +64,20 @@ export function Shell({ api, theme, onToggleTheme, degraded, onLogout }: Props) 
     return () => ctrl.abort();
   }, [api, spaceId, vaultsTick]);
 
+  // 頂列／側欄的健檢徽章：登入後取一次，之後由系統健康頁重新整理時同步
+  useEffect(() => {
+    const ctrl = new AbortController();
+    api
+      .post<StatusResult>('/v1/status', { space: spaceId }, ctrl.signal)
+      .then(({ data }) => setHealth(healthBadge(data)))
+      .catch((err) => {
+        if (ctrl.signal.aborted) return;
+        setHealth({ ok: false, fail: 0, warn: 0, checkedAt: null, error: describeError(err) });
+      });
+    return () => ctrl.abort();
+    // doctor 為全域對帳，不隨 space 重取
+  }, [api]);
+
   const toast = useCallback((message: string, kind: ToastKind = 'success') => {
     const id = ++toastSeq.current;
     setToasts((t) => [...t, { id, message, kind }]);
@@ -77,12 +86,13 @@ export function Shell({ api, theme, onToggleTheme, degraded, onLogout }: Props) 
     window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), ttl);
   }, []);
 
-  const pickSpace = (next: SpaceId) => {
+  const switchSpace = (next: SpaceId, path?: string) => {
     setSpaceId(next);
     saveSpace(next);
     setVault(ALL);
-    // 詳情頁的項目屬於舊 space：回到列表
-    if (route.params.length > 0) navigate(routePath(screen));
+    // 詳情頁的項目屬於舊 space：回到列表（或呼叫端指定的位置）
+    if (path) navigate(path);
+    else if (route.params.length > 0) navigate(routePath(screen));
     toast(`已切換至 ${SPACES[next].en} · ${SPACES[next].name}`, 'info');
   };
 
@@ -96,9 +106,12 @@ export function Shell({ api, theme, onToggleTheme, degraded, onLogout }: Props) 
       refreshVaults: () => setVaultsTick((t) => t + 1),
       navigate,
       toast,
+      health,
+      reportHealth: setHealth,
+      switchSpace,
     }),
-    // navigate 每次 render 都是新函式，但行為不變；不列入以免畫面重掛
-    [api, space, vaults, vault, toast],
+    // navigate／switchSpace 每次 render 都是新函式，但行為不變；不列入以免畫面重掛
+    [api, space, vaults, vault, toast, health],
   );
 
   const vaultLabel =
@@ -126,12 +139,23 @@ export function Shell({ api, theme, onToggleTheme, degraded, onLogout }: Props) 
               <div class="uep-brand-subtitle">PM · 紀錄與記憶層</div>
             </div>
           </a>
-          <SpaceSwitcher current={spaceId} onPick={pickSpace} />
+          <SpaceSwitcher current={spaceId} onPick={(next) => switchSpace(next)} />
           <div class="lv-header__spacer" />
           <button type="button" class="lv-conn" onClick={() => navigate(routePath('settings'))} title="連線設定">
             <span class="lv-conn__dot" aria-hidden="true" />
             {window.location.host}
           </button>
+          {health && (health.fail > 0 || health.error) && (
+            <button
+              type="button"
+              class="lv-degraded-badge lv-health-badge"
+              data-testid="header-health-badge"
+              onClick={() => navigate(routePath('health'))}
+              title={health.error ?? '系統健檢有失敗項目'}
+            >
+              {health.error ? '健檢無法取得' : `健檢 ${health.fail} 項失敗`}
+            </button>
+          )}
           {degraded && (
             <button
               type="button"
@@ -173,6 +197,11 @@ export function Shell({ api, theme, onToggleTheme, degraded, onLogout }: Props) 
                     {s.glyph}
                   </span>
                   <span class="lv-nav__label">{s.label}</span>
+                  {s.id === 'health' && health && health.fail > 0 && (
+                    <span class="lv-nav__badge" aria-label={`${health.fail} 項失敗`}>
+                      {health.fail}
+                    </span>
+                  )}
                 </a>
               ))}
             </nav>
@@ -234,7 +263,15 @@ export function Shell({ api, theme, onToggleTheme, degraded, onLogout }: Props) 
           </aside>
 
           <main class="lv-main" id="lv-main" tabIndex={-1}>
-            <ScreenView screen={screen} params={route.params} query={route.query} spaceKey={spaceId} />
+            <ScreenView
+              screen={screen}
+              params={route.params}
+              query={route.query}
+              spaceKey={spaceId}
+              theme={theme}
+              onToggleTheme={onToggleTheme}
+              onLogout={onLogout}
+            />
           </main>
         </div>
 
@@ -266,11 +303,17 @@ function ScreenView({
   params,
   query,
   spaceKey,
+  theme,
+  onToggleTheme,
+  onLogout,
 }: {
   screen: ScreenId;
   params: string[];
   query: URLSearchParams;
   spaceKey: SpaceId;
+  theme: Theme;
+  onToggleTheme: () => void;
+  onLogout: () => void;
 }) {
   // key 帶 space：切換 space 時畫面重新掛載，不殘留上一個 space 的資料
   switch (screen) {
@@ -293,10 +336,16 @@ function ScreenView({
         );
       }
       return <Docs key={spaceKey} />;
-    default: {
-      const meta = SCREEN_META[screen];
-      return <Placeholder eyebrow={meta.eyebrow} title={meta.title} space={SPACES[spaceKey]} card={meta.card} />;
-    }
+    case 'vaults':
+      return <Vaults key={spaceKey} />;
+    case 'maint':
+      return <Maint key={`${spaceKey}:${params[0] ?? ''}`} vaultKey={params[0] ?? null} />;
+    case 'health':
+      return <Health />;
+    case 'memory':
+      return <Memory key={spaceKey} />;
+    case 'settings':
+      return <Settings theme={theme} onToggleTheme={onToggleTheme} onLogout={onLogout} />;
   }
 }
 

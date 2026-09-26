@@ -1,9 +1,9 @@
-// 畫面共用的小元件：摘要來源標籤、狀態框、對話框、兩段式刪除確認。
+// 畫面共用的小元件：摘要來源標籤、狀態框、對話框、兩段式確認。
 import type { ComponentChildren } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 
 import { ApiError } from '../lib/api';
-import { executeTwoPhase, planTwoPhase, type TwoPhasePlan } from '../lib/confirm';
+import { executeTwoPhase, planChangedInfo, planTwoPhase, type TwoPhasePlan } from '../lib/confirm';
 import { useApp } from '../lib/context';
 import { describeError, formatTime, summarySource } from '../lib/format';
 import type { SummarySource, TwoPhaseResponse } from '../lib/types';
@@ -139,39 +139,62 @@ export function Dialog({
   );
 }
 
-// ── 兩段式刪除 ──
+// ── 兩段式確認 ──
 
 const COUNT_LABEL: Record<string, string> = {
   notes: '筆記',
   note_embeddings: '筆記向量',
   note_fts: '筆記全文索引',
   documents: '文件',
+  chunks: '文件段落',
   document_chunks: '文件段落',
   chunk_fts: '段落全文索引',
   document_chunk_embeddings: '段落向量',
 };
 
-function PlanView({ plan }: { plan: Record<string, unknown> }) {
+function Meta({ label, value }: { label: string; value: ComponentChildren }) {
+  return (
+    <>
+      <dt>{label}</dt>
+      <dd>{value}</dd>
+    </>
+  );
+}
+
+export function PlanView({ plan }: { plan: Record<string, unknown> }) {
   const counts = (plan.counts ?? {}) as Record<string, number>;
   const entries = Object.entries(counts).filter(([, n]) => typeof n === 'number');
+  const aliases =
+    typeof plan.aliases === 'object' && plan.aliases !== null && !Array.isArray(plan.aliases)
+      ? Object.entries(plan.aliases as Record<string, string>)
+      : [];
+  const noteIds = Array.isArray(plan.note_ids) ? plan.note_ids : null;
   return (
     <div class="lv-plan" data-testid="delete-plan">
       <dl class="lv-plan__meta">
-        {'vault' in plan && (
+        {'new_key' in plan ? (
           <>
-            <dt>vault</dt>
-            <dd>{String(plan.vault)}</dd>
+            <Meta label="key" value={<span class="lv-mono">{String(plan.key)} → {String(plan.new_key)}</span>} />
+            <Meta label="space" value={`${String(plan.from)} → ${String(plan.to)}`} />
           </>
+        ) : (
+          'vault' in plan && <Meta label="vault" value={<span class="lv-mono">{String(plan.vault)}</span>} />
         )}
-        {'filename' in plan && (
-          <>
-            <dt>檔名</dt>
-            <dd>{String(plan.filename)}</dd>
-          </>
-        )}
+        {'filename' in plan && <Meta label="檔名" value={String(plan.filename)} />}
+        {noteIds && <Meta label="轉為墓碑" value={`${noteIds.length} 則筆記`} />}
       </dl>
+      {aliases.length > 0 && (
+        <ul class="lv-plan__counts" aria-label="別名改寫">
+          {aliases.map(([from, to]) => (
+            <li key={from}>
+              <span class="lv-mono">{from}</span>
+              <span class="lv-mono">→ {to}</span>
+            </li>
+          ))}
+        </ul>
+      )}
       {entries.length > 0 && (
-        <ul class="lv-plan__counts">
+        <ul class="lv-plan__counts" aria-label="受影響筆數">
           {entries.map(([k, n]) => (
             <li key={k}>
               <span>{COUNT_LABEL[k] ?? k}</span>
@@ -191,35 +214,46 @@ function PlanView({ plan }: { plan: Record<string, unknown> }) {
   );
 }
 
-/**
- * 兩段式刪除：開啟即向服務規劃（不帶 token），顯示規劃內容；按確認才以相同參數＋token 執行。
- * 過期、規劃變動都要求重新規劃，不自動重送。
- */
-export function TwoPhaseDelete({
-  title,
-  path,
-  args,
-  describe,
-  onDone,
-  onCancel,
-}: {
+export interface TwoPhaseProps {
   title: string;
   path: string;
   args: Record<string, unknown>;
   describe: ComponentChildren;
   onDone: (result: TwoPhaseResponse) => void;
   onCancel: () => void;
-}) {
+  confirmLabel?: string;
+  /** 確認鈕在輸入框內容與此字串完全相同前維持停用（刪 vault 需輸入 key 全文） */
+  requireText?: string;
+}
+
+/**
+ * 兩段式確認：開啟即向服務規劃（不帶 token），顯示規劃內容；按確認才以相同參數＋token 執行。
+ * - 過期／token 無效：要求重新規劃，不自動重送
+ * - 409 plan_changed：服務附新 token 時直接顯示新規劃讓使用者再確認；沒附就只能重新規劃
+ */
+export function TwoPhaseConfirm({
+  title,
+  path,
+  args,
+  describe,
+  onDone,
+  onCancel,
+  confirmLabel = '確認',
+  requireText,
+}: TwoPhaseProps) {
   const { api } = useApp();
   const [plan, setPlan] = useState<TwoPhasePlan | null>(null);
   const [changedPlan, setChangedPlan] = useState<Record<string, unknown> | null>(null);
+  const [replanned, setReplanned] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(true);
+  const [typed, setTyped] = useState('');
 
   const doPlan = async () => {
     setBusy(true);
     setError(null);
     setPlan(null);
+    setReplanned(false);
     try {
       setPlan(await planTwoPhase(api, path, args));
       setChangedPlan(null);
@@ -242,19 +276,30 @@ export function TwoPhaseDelete({
     try {
       onDone(await executeTwoPhase(api, path, args, plan.token));
     } catch (err) {
-      setError(err);
       if (err instanceof ApiError && err.code === 'plan_changed') {
-        const body = err.body as { error?: { plan?: Record<string, unknown> } } | null;
-        setChangedPlan(body?.error?.plan ?? null);
-        setPlan(null); // 舊 token 已不能用
-      } else if (err instanceof ApiError && (err.code === 'confirm_token_expired' || err.code === 'invalid_confirm_token')) {
-        setPlan(null);
+        const info = planChangedInfo(err.body);
+        if (info.next) {
+          // 服務已為新規劃簽發 token：讓使用者檢視新內容後再確認
+          setPlan(info.next);
+          setChangedPlan(null);
+          setReplanned(true);
+        } else {
+          setError(err);
+          setChangedPlan(info.plan);
+          setPlan(null); // 舊 token 已不能用
+        }
+      } else {
+        setError(err);
+        if (err instanceof ApiError && (err.code === 'confirm_token_expired' || err.code === 'invalid_confirm_token')) {
+          setPlan(null);
+        }
       }
       setBusy(false);
     }
   };
 
   const needsReplan = !busy && !plan;
+  const textOk = requireText === undefined || typed === requireText;
   return (
     <Dialog
       title={title}
@@ -273,10 +318,10 @@ export function TwoPhaseDelete({
             <button
               type="button"
               class="uep-dialog__btn lv-dialog__btn--danger"
-              disabled={busy || !plan}
+              disabled={busy || !plan || !textOk}
               onClick={() => void confirm()}
             >
-              確認刪除
+              {confirmLabel}
             </button>
           )}
         </>
@@ -284,7 +329,12 @@ export function TwoPhaseDelete({
     >
       <div class="lv-stack">
         <div>{describe}</div>
-        {busy && !plan && <p class="lv-muted">正在向服務規劃刪除範圍…</p>}
+        {busy && !plan && <p class="lv-muted">正在向服務規劃影響範圍…</p>}
+        {replanned && (
+          <p class="lv-plan__warn" role="status" data-testid="plan-replanned">
+            規劃後資料已變動，以下是服務重新規劃的內容，請確認後再送出。
+          </p>
+        )}
         {plan && (
           <>
             <PlanView plan={plan.plan} />
@@ -293,9 +343,23 @@ export function TwoPhaseDelete({
         )}
         {changedPlan && (
           <>
-            <p class="lv-plan__warn">資料在規劃後已變動，目前的規劃如下，需重新確認：</p>
+            <p class="lv-plan__warn">資料在規劃後已變動，目前的規劃如下，需重新規劃後再確認：</p>
             <PlanView plan={changedPlan} />
           </>
+        )}
+        {requireText !== undefined && plan && (
+          <label class="lv-field">
+            <span class="lv-field__label">
+              輸入 <span class="lv-mono">{requireText}</span> 確認
+            </span>
+            <input
+              class="lv-input lv-mono"
+              value={typed}
+              autoComplete="off"
+              spellcheck={false}
+              onInput={(e) => setTyped((e.target as HTMLInputElement).value)}
+            />
+          </label>
         )}
         {error !== null && (
           <p class="lv-notice lv-notice--error" role="alert">
@@ -305,4 +369,9 @@ export function TwoPhaseDelete({
       </div>
     </Dialog>
   );
+}
+
+/** 刪除用的兩段式確認（既有呼叫點沿用）。 */
+export function TwoPhaseDelete(props: TwoPhaseProps) {
+  return <TwoPhaseConfirm confirmLabel="確認刪除" {...props} />;
 }

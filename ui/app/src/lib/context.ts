@@ -5,7 +5,7 @@ import { useContext } from 'preact/hooks';
 
 import type { ApiClient } from './api';
 import type { Navigate } from './router';
-import type { SpaceMeta } from './spaces';
+import type { SpaceId, SpaceMeta } from './spaces';
 import type { VaultSummary } from './types';
 
 export type ToastKind = 'success' | 'error' | 'warning' | 'info';
@@ -13,6 +13,16 @@ export type ToastKind = 'success' | 'error' | 'warning' | 'info';
 export interface VaultsState {
   items: VaultSummary[];
   loading: boolean;
+  error: string | null;
+}
+
+/** 頂列與側欄的健檢徽章：取自最近一次 `/v1/status`。 */
+export interface HealthBadge {
+  ok: boolean;
+  fail: number;
+  warn: number;
+  checkedAt: string | null;
+  /** 取得狀態失敗時的說明（徽章改顯示「健檢無法取得」） */
   error: string | null;
 }
 
@@ -26,6 +36,11 @@ export interface AppEnv {
   refreshVaults: () => void;
   navigate: Navigate;
   toast: (message: string, kind?: ToastKind) => void;
+  health: HealthBadge | null;
+  /** 系統健康頁重新整理後同步頂列徽章 */
+  reportHealth: (badge: HealthBadge) => void;
+  /** 切換目前 space（重置 vault 篩選），可同時導向指定路徑 */
+  switchSpace: (space: SpaceId, path?: string) => void;
 }
 
 export const ALL = '*';

@@ -3,6 +3,8 @@ import { ApiError, type ApiClient } from './api';
 
 export interface SessionInfo {
   authenticated: true;
+  /** 登入所用憑證對應的 principal（A22） */
+  principal?: string;
   expires_at: string;
   idle_expires_at: string;
 }

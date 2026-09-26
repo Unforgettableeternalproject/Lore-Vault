@@ -6,10 +6,10 @@ import { useEffect, useState } from 'preact/hooks';
 import { Banner, TwoPhaseDelete } from '../components/ui';
 import { ALL, useApp } from '../lib/context';
 import { describeDegradedReason, describeError, formatTime } from '../lib/format';
-import { loadSendAuthor, saveSendAuthor, UI_AUTHOR } from '../lib/prefs';
+import { UI_AUTHOR } from '../lib/prefs';
 import { routePath } from '../lib/router';
 import type { GetResult, NoteFull, WriteResult } from '../lib/types';
-import { AuthorToggle, parseTopics } from './NoteDetail';
+import { AuthorLine, parseTopics } from './NoteDetail';
 
 const REASON_LABEL: Record<string, string> = { title: '標題相同', lexical: '字詞相近', vector: '語意相近' };
 
@@ -19,7 +19,6 @@ export function NoteNew({ supersedes }: { supersedes: string | null }) {
   const [title, setTitle] = useState('');
   const [topics, setTopics] = useState('');
   const [body, setBody] = useState('');
-  const [sendAuthor, setSendAuthor] = useState(loadSendAuthor);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [written, setWritten] = useState<{ result: WriteResult; title: string } | null>(null);
@@ -63,7 +62,7 @@ export function NoteNew({ supersedes }: { supersedes: string | null }) {
         body,
         topics: parseTopics(topics),
         ...(supersedes && oldNote ? { supersedes } : {}),
-        ...(sendAuthor ? { author: UI_AUTHOR } : {}),
+        author: UI_AUTHOR,
       });
       refreshVaults();
       if (data.duplicates.length === 0 && !data.dedup_degraded) {
@@ -210,13 +209,7 @@ export function NoteNew({ supersedes }: { supersedes: string | null }) {
           <textarea class="lv-textarea" aria-label="正文（Markdown）" value={body} onInput={(e) => setBody((e.target as HTMLTextAreaElement).value)} />
         </label>
         <p class="lv-hint lv-hint--inline">摘要會在儲存後於背景產生；產生前以首段頂替。寫入後會回報疑似重複的既有筆記。</p>
-        <AuthorToggle
-          on={sendAuthor}
-          onChange={(on) => {
-            setSendAuthor(on);
-            saveSendAuthor(on);
-          }}
-        />
+        <AuthorLine />
         {error !== null && (
           <p class="lv-notice lv-notice--error" role="alert">
             {describeError(error)}

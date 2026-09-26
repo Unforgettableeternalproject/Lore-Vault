@@ -9,7 +9,7 @@ import { useApp } from '../lib/context';
 import { diffLines, hasConflictMarkers, mergeDraft } from '../lib/diff';
 import { authorLabel, describeError, formatTime, isAbort } from '../lib/format';
 import { Markdown } from '../lib/markdown';
-import { loadSendAuthor, saveSendAuthor, UI_AUTHOR } from '../lib/prefs';
+import { UI_AUTHOR } from '../lib/prefs';
 import { routePath } from '../lib/router';
 import type { ConflictCurrent, GetResult, NoteFull, NoteUndeleteResult, UpdateResult } from '../lib/types';
 
@@ -74,7 +74,6 @@ export function NoteDetail({ id }: { id: string }) {
   const [deleted, setDeleted] = useState<{ title: string } | null>(null);
   const [undeleting, setUndeleting] = useState(false);
   const [undeleteResult, setUndeleteResult] = useState<{ tone: 'ok' | 'warn' | 'error'; text: string } | null>(null);
-  const [sendAuthor, setSendAuthor] = useState(loadSendAuthor);
 
   const fetchNote = async (signal?: AbortSignal, want = budget): Promise<GetResult<NoteFull>> => {
     const { data } = await api.post<GetResult<NoteFull>>(
@@ -137,11 +136,6 @@ export function NoteDetail({ id }: { id: string }) {
     setMode('edit');
   };
 
-  const toggleAuthor = (on: boolean) => {
-    setSendAuthor(on);
-    saveSendAuthor(on);
-  };
-
   const refetchCurrent = async (): Promise<NoteFull> => {
     const data = await fetchNote(undefined, DETAIL_BUDGET);
     const current = data.items.find((n) => n.id === id);
@@ -156,7 +150,7 @@ export function NoteDetail({ id }: { id: string }) {
       id,
       expected_updated: expected,
       ...payload,
-      ...(sendAuthor ? { author: UI_AUTHOR } : {}),
+      author: UI_AUTHOR,
     });
     return data;
   };
@@ -478,7 +472,7 @@ export function NoteDetail({ id }: { id: string }) {
                 onInput={(e) => setDraft({ ...draft, body: (e.target as HTMLTextAreaElement).value })}
               />
             </label>
-            <AuthorToggle on={sendAuthor} onChange={toggleAuthor} />
+            <AuthorLine />
             {saveError !== null && (
               <p class="lv-notice lv-notice--error" role="alert">
                 {describeError(saveError)}
@@ -618,15 +612,12 @@ export function NoteDetail({ id }: { id: string }) {
   );
 }
 
-export function AuthorToggle({ on, onChange }: { on: boolean; onChange: (on: boolean) => void }) {
+/** 寫入署名說明：UI 寫入一律帶 author（A22），不提供關閉。 */
+export function AuthorLine() {
   return (
-    <label class="lv-check">
-      <input type="checkbox" checked={on} onChange={(e) => onChange((e.target as HTMLInputElement).checked)} />
-      <span>
-        署名寫入（author: {UI_AUTHOR}）
-        <span class="lv-muted"> · 服務未支援 author 時會被拒絕，可取消勾選</span>
-      </span>
-    </label>
+    <p class="lv-hint lv-hint--inline" data-testid="author-line">
+      以 <span class="lv-mono">{UI_AUTHOR}</span> 署名寫入（A22：分清誰做了什麼）
+    </p>
   );
 }
 

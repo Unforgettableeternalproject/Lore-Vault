@@ -189,21 +189,18 @@ describe('編輯與版本衝突', () => {
     expect(callsTo('/v1/update')[1]!.body.expected_updated).toBe(theirs.updated);
   });
 
-  it('author 被 422 拒收：明確說明並可取消署名；取消後不再帶 author', async () => {
+  it('署名一律開啟：沒有開關，每次都帶 author；被 422 拒收時明確說明、不偷偷拿掉重送', async () => {
     const { callsTo } = await openEditor({
       '/v1/get': getHandler(() => note({ links: [] })),
-      '/v1/update': (body) =>
-        'author' in body
-          ? { status: 422, body: { detail: [{ type: 'extra_forbidden', loc: ['body', 'author'], msg: 'Extra inputs are not permitted' }] } }
-          : json({ id: 'n1', vault: VAULT, updated: 'x', summary_stale: false, embedding_stale: false }),
+      '/v1/update': () => ({ status: 422, body: { detail: [{ type: 'extra_forbidden', loc: ['body', 'author'], msg: 'Extra inputs are not permitted' }] } }),
     });
+    expect(screen.queryByRole('checkbox')).toBeNull();
+    expect(screen.getByTestId('author-line').textContent).toContain(UI_AUTHOR);
     fireEvent.click(screen.getByRole('button', { name: '儲存' }));
     expect((await screen.findByRole('alert')).textContent).toContain('A22');
-    fireEvent.click(screen.getByRole('checkbox', { name: /署名寫入/ }));
     fireEvent.click(screen.getByRole('button', { name: '儲存' }));
     await waitFor(() => expect(callsTo('/v1/update')).toHaveLength(2));
-    expect(callsTo('/v1/update')[1]!.body).not.toHaveProperty('author');
-    expect(window.localStorage.getItem('lore-vault.author')).toBe('off');
+    expect(callsTo('/v1/update').every((c) => c.body.author === UI_AUTHOR)).toBe(true);
   });
 
   it('沒有變更不送出', async () => {

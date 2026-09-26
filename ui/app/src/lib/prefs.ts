@@ -41,15 +41,5 @@ export function saveSpace(space: SpaceId): void {
 }
 
 // ── 署名（A22 author）──
-// UI 寫入 note 時帶的作者名。服務端 A22 上線前會以 422 拒收 author 欄位：
-// 做成可關閉的偏好（預設開），編輯器上有可見的勾選框；被拒時明確顯示原因，不自動拿掉重送。
+// UI 寫入 note 一律帶的作者名。A22 的用意是分清誰做了什麼，所以不提供關閉開關。
 export const UI_AUTHOR = 'Xavier (Bernie)';
-const AUTHOR_KEY = 'lore-vault.author';
-
-export function loadSendAuthor(): boolean {
-  return read(AUTHOR_KEY) !== 'off';
-}
-
-export function saveSendAuthor(on: boolean): void {
-  write(AUTHOR_KEY, on ? 'on' : 'off');
-}

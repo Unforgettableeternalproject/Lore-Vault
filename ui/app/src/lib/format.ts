@@ -24,6 +24,13 @@ const ERROR_TEXT: Record<string, string> = {
   csrf_required: '請求缺少 UI 標頭（CSRF 防護）',
   storage_error: '服務端儲存層錯誤',
   invalid_request: '請求參數不合法',
+  invalid_cursor: '分頁游標無效，請從第一頁重新載入',
+  vault_exists: 'key 或別名已被使用',
+  space_key_prefix_required: '非 dev space 的 key 與別名必須以「<space>/」開頭',
+  cannot_remove_key: '這是 vault 的正式 key，不能當別名移除',
+  space_change_refused: '只允許 lore 與 personal 互換（A20：dev 不與其他 space 轉換）',
+  vault_conflict: '目標 space 已有相同 key 的 vault',
+  not_restorable: '無法復原',
 };
 
 const RESTORE_REASON: Record<string, string> = {
@@ -57,7 +64,7 @@ export function describeError(err: unknown): string {
   if (typeof err === 'string') return err;
   if (err instanceof ApiError) {
     if (isAuthorRejected(err)) {
-      return '服務尚未接受 author 欄位（A22 未上線）。可取消勾選「署名」後重試。';
+      return '服務拒收 author 欄位（服務版本未支援 A22 作者契約），UI 寫入一律署名，請更新服務後再試。';
     }
     if (err.status === 422) {
       const fields = rejectedFields(err);
@@ -67,6 +74,12 @@ export function describeError(err: unknown): string {
       const reason = (err.body as { error?: { reason?: unknown } } | null)?.error?.reason;
       const text = typeof reason === 'string' ? (RESTORE_REASON[reason] ?? reason) : '原因不明';
       return `無法復原：${text}（not_restorable${typeof reason === 'string' ? ` · ${reason}` : ''}）`;
+    }
+    if (err.code === 'vault_exists') {
+      const existing = (err.body as { error?: { existing?: { key?: unknown } | null } } | null)?.error?.existing;
+      const owner =
+        typeof existing?.key === 'string' ? `，已屬於 vault ${existing.key}` : existing === null ? '（佔用者在其他 space）' : '';
+      return `${ERROR_TEXT.vault_exists}${owner}（vault_exists）`;
     }
     const known = ERROR_TEXT[err.code];
     const base = known ?? err.message;

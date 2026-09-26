@@ -33,10 +33,10 @@ export async function login(page: Page) {
   await expect(page.getByRole('navigation', { name: '主導覽' })).toBeVisible();
 }
 
-export async function createVault(request: APIRequestContext, key: string, display: string) {
+export async function createVault(request: APIRequestContext, key: string, display: string, space = 'dev') {
   const resp = await request.post('/v1/vaults', {
     headers: { Authorization: `Bearer ${E2E_TOKEN}` },
-    data: { space: 'dev', key, display },
+    data: { space, key, display },
   });
   expect([201, 409]).toContain(resp.status());
 }

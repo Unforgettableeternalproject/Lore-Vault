@@ -228,4 +228,139 @@ export interface TwoPhaseResponse {
   plan: Record<string, unknown>;
   confirm_token?: string;
   expires_at?: string;
+  /** vault_move_space 執行後附新 space 的 vault */
+  vault?: VaultSummary;
+}
+
+// ── 管理端點（T-70～T-75）──
+
+/** `/v1/tombstones` 的一筆。note 與 document 欄位不同，共用欄位在前。 */
+export interface TombstoneItem {
+  kind: 'note' | 'document' | string;
+  id: string;
+  vault: string;
+  vault_exists: boolean;
+  deleted_at: string;
+  reason: string | null;
+  /** note：內容快照的標題（舊墓碑為 null） */
+  title?: string | null;
+  source?: string | null;
+  restorable?: boolean;
+  reimportable?: boolean;
+  /** document */
+  sha256?: string;
+  filename?: string;
+}
+
+export interface TombstonePage {
+  items: TombstoneItem[];
+  next_cursor: string | null;
+}
+
+export interface DocumentUndeleteResult {
+  document: DocumentMeta;
+  space: string;
+  tombstone: Record<string, unknown>;
+}
+
+/** `vault_move_space` 的規劃。counts 的 key 為「表.欄」。 */
+export interface MovePlan {
+  key: string;
+  new_key: string;
+  from: string;
+  to: string;
+  aliases: Record<string, string>;
+  counts: Record<string, number>;
+}
+
+export interface ConceptItem {
+  id: string;
+  vault: string;
+  kind: string;
+  scope: string | null;
+  scope_state: 'repo' | 'global' | 'missing' | string;
+  statement: string;
+  anchors: unknown;
+  surprisal: number | null;
+  usability_verdict: string | null;
+  updated: string;
+}
+
+export interface ConceptPage {
+  items: ConceptItem[];
+  next_cursor: string | null;
+}
+
+export interface EpisodeGroup {
+  machine?: string | null;
+  vault?: string | null;
+  episodes: number;
+  last_recorded: string | null;
+  last_started: string | null;
+}
+
+export interface EpisodeSummary {
+  space: string;
+  vault: string;
+  total: number;
+  last_recorded: string | null;
+  by_machine: EpisodeGroup[];
+  by_vault: EpisodeGroup[];
+}
+
+// ── /v1/status ──
+
+export type CheckStatus = 'pass' | 'warn' | 'fail' | 'skipped';
+
+export interface DoctorCheck {
+  name: string;
+  category: string;
+  description: string;
+  status: CheckStatus | string;
+  summary: string;
+  details: string[];
+  counts: Record<string, number>;
+}
+
+export interface DoctorReport {
+  ok: boolean;
+  exit_code: number;
+  summary: { total: number } & Partial<Record<CheckStatus, number>>;
+  checks: DoctorCheck[];
+}
+
+export interface WorkerStatus {
+  enabled: boolean;
+  running: boolean;
+  stopping?: boolean;
+  runs?: number;
+  last_run?: string | null;
+  last_error?: string | null;
+  fatal_error?: string | null;
+  [key: string]: unknown;
+}
+
+export interface BacklogStatus {
+  status: string;
+  summary: string;
+  counts: Record<string, number>;
+}
+
+export interface WarmupStatus {
+  status: 'disabled' | 'pending' | 'running' | 'ok' | 'failed' | string;
+  started_at: string | null;
+  finished_at: string | null;
+  elapsed_ms: number | null;
+  error: string | null;
+}
+
+export interface StatusResult {
+  ok: boolean;
+  checked_at: string;
+  schema: { version: number; expected: number };
+  space: string | null;
+  embedding: { warmup: WarmupStatus };
+  enrich: { worker: WorkerStatus; backlog: BacklogStatus };
+  documents: { enabled: boolean; worker: WorkerStatus; backlog: BacklogStatus };
+  doctor: DoctorReport;
 }

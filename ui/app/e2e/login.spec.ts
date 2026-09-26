@@ -52,8 +52,15 @@ test('登入、App Shell 與登出', async ({ page, context }) => {
   await expect(page.getByRole('button', { name: /LORE · 世界觀/ })).toBeVisible();
   await expect(page.locator('.lv-app')).toHaveAttribute('data-zone', 'history');
 
+  // 連線設定：principal、測試連線（無 body 的 /v1/status）、署名一律開啟
+  await page.getByRole('link', { name: '連線設定' }).click();
+  await expect(page.getByTestId('settings-principal')).toHaveText('xavier');
+  await expect(page.getByTestId('settings-author')).toContainText('Xavier (Bernie)');
+  await page.getByRole('button', { name: '測試連線' }).click();
+  await expect(page.getByTestId('settings-test')).toContainText('可連線');
+
   // 登出後重整仍在登入頁
-  await page.getByRole('button', { name: '登出' }).click();
+  await page.getByRole('button', { name: '登出', exact: true }).first().click();
   await expect(page.getByRole('heading', { name: '登入' })).toBeVisible();
   await page.reload();
   await expect(page.getByRole('heading', { name: '登入' })).toBeVisible();

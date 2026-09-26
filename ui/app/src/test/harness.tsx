@@ -6,7 +6,7 @@ import { vi } from 'vitest';
 
 import { createApiClient, type ApiClient, type ApiResponse, type UploadOptions } from '../lib/api';
 import { AppContext, type AppEnv } from '../lib/context';
-import { SPACES } from '../lib/spaces';
+import { SPACES, type SpaceId } from '../lib/spaces';
 import type { VaultSummary } from '../lib/types';
 
 export interface Call {
@@ -52,6 +52,7 @@ export function makeApi(handlers: Record<string, Handler>) {
 export interface EnvOverrides {
   vault?: string;
   vaults?: VaultSummary[];
+  space?: SpaceId;
   upload?: (path: string, form: FormData, options?: UploadOptions) => Promise<ApiResponse<unknown>>;
 }
 
@@ -60,19 +61,24 @@ export function renderWithApp(ui: ComponentChildren, api: ApiClient, overrides: 
   const toast = vi.fn();
   const refreshVaults = vi.fn();
   const setVault = vi.fn();
+  const reportHealth = vi.fn();
+  const switchSpace = vi.fn();
   const client: ApiClient = overrides.upload
     ? { ...api, upload: overrides.upload as ApiClient['upload'] }
     : api;
   const env: AppEnv = {
     api: client,
-    space: SPACES.dev,
+    space: SPACES[overrides.space ?? 'dev'],
     vaults: { items: overrides.vaults ?? VAULTS, loading: false, error: null },
     vault: overrides.vault ?? '*',
     setVault,
     refreshVaults,
     navigate,
     toast,
+    health: null,
+    reportHealth,
+    switchSpace,
   };
   const result = render(<AppContext.Provider value={env}>{ui}</AppContext.Provider>);
-  return { ...result, navigate, toast, refreshVaults, setVault };
+  return { ...result, navigate, toast, refreshVaults, setVault, reportHealth, switchSpace };
 }
