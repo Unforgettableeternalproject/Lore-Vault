@@ -299,7 +299,7 @@ class ConceptBatch(_Req):
     vault: str | None = Field(
         None,
         description="單一 vault（操作限於此 vault）"
-        "或 '*'（依每筆 vault／既有歸屬／A17 自動決定）",
+        "或 '*'（依每筆的 vault、既有歸屬或 repo scope 自動決定）",
     )
     mode: str = Field(
         "upsert", description="upsert／create（已存在即衝突）／update（不存在即失敗）"

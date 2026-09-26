@@ -229,7 +229,7 @@ def ui_login_lock(ctx: DoctorContext) -> CheckResult:
         ("ui_login_state",),
     ).fetchone()
     if exists is None:
-        raise CheckSkipped("資料庫尚無 UI 登入表（schema v13 前）")
+        raise CheckSkipped("資料庫尚無 UI 登入表（資料庫版本較舊，尚未遷移）")
     now = ctx.settings.get("now") or datetime.now(UTC)
     return _to_result(storage_ui_login.lock_check(db, now=now))
 
@@ -442,7 +442,7 @@ def default_registry() -> Registry:
             "notes.attribution",
             "notes",
             notes_attribution,
-            "每則 note 都有 principal 與 updated_by_principal（A22）",
+            "每則 note 都記錄了寫入者與最後修改者的帳號",
         )
     )
     for name, func, description in (

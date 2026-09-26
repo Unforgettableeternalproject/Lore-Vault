@@ -2,7 +2,7 @@
 // `/ui/maint/<key>` 針對單一 vault；`/ui/maint` 列出本 space 的 vault 與全 space 墓碑（刪除 vault 後回到這裡）。
 import { useEffect, useState } from 'preact/hooks';
 
-import { Badge, ErrorState, Loading, TwoPhaseConfirm, TwoPhaseDelete } from '../components/ui';
+import { Badge, EmptyState, ErrorState, Loading, TwoPhaseConfirm, TwoPhaseDelete } from '../components/ui';
 import { useApp } from '../lib/context';
 import { describeError, formatTime, isAbort } from '../lib/format';
 import { routePath } from '../lib/router';
@@ -15,7 +15,7 @@ import type {
   TwoPhaseResponse,
   VaultSummary,
 } from '../lib/types';
-import { originLabel } from './Vaults';
+import { ORIGIN_TITLE, originLabel } from './Vaults';
 
 export function Maint({ vaultKey }: { vaultKey: string | null }) {
   const { space, vaults, navigate } = useApp();
@@ -42,7 +42,14 @@ export function Maint({ vaultKey }: { vaultKey: string | null }) {
           {vaults.loading && vaults.items.length === 0 && <Loading />}
           {vaults.error && <ErrorState error={`vault 列表載入失敗：${vaults.error}`} />}
           {!vaults.loading && !vaults.error && vaults.items.length === 0 && (
-            <div class="zone-state lv-empty">這個 space 還沒有 vault。</div>
+            <EmptyState
+              title="這個 space 還沒有 vault"
+              action={
+                <button type="button" class="btn-outline" onClick={() => navigate(routePath('vaults'))}>
+                  到 Vault 頁建立
+                </button>
+              }
+            />
           )}
           {vaults.items.length > 0 && (
             <ul class="lv-vcards" aria-label={`${space.en} 的 vault`}>
@@ -113,9 +120,11 @@ function VaultCard({ vault, onOpen }: { vault: VaultSummary; onOpen: () => void 
     >
       <span class="lv-vcard__head">
         <span class="lv-vcard__name">{vault.display}</span>
-        <Badge tone="tag" label="來源">
-          {originLabel(vault.origin)}
-        </Badge>
+        <span class="lv-vcard__origin">
+          <Badge tone="tag" label="來源" title={ORIGIN_TITLE[vault.origin ?? ''] ?? '來源未知'}>
+            {originLabel(vault.origin)}
+          </Badge>
+        </span>
       </span>
       <span class="lv-vcard__key lv-mono">{vault.key}</span>
       <span class="lv-vcard__stats">
@@ -313,8 +322,8 @@ function MoveSection({ vault }: { vault: VaultSummary }) {
       {targets.some((id) => !moveAllowed(space.id, id)) && (
         <p class="lv-hint lv-hint--inline" id="maint-move-a20" data-testid="move-a20">
           {space.id === 'dev'
-            ? 'dev 的 vault 不能移到其他 space（A20）：dev 綁 repo 與收料、記憶層只屬於 dev，與 lore／personal 不互相轉換。'
-            : '不能移到 dev（A20）：dev 綁 repo 與收料，只允許 lore 與 personal 互換。'}
+            ? 'dev 的 vault 不能移到其他 space：dev 綁 repo 與收料、記憶層只屬於 dev，與 lore／personal 不互相轉換。'
+            : '不能移到 dev：dev 綁 repo 與收料，只允許 lore 與 personal 互換。'}
         </p>
       )}
       {target && (
@@ -483,7 +492,7 @@ export function TombstoneSection({ vault }: { vault: string }) {
         </button>
       </div>
       <p class="lv-section__desc">
-        已刪除的筆記與文件留下紀錄，重新匯入時不會復活。v12 起刪除的筆記保留內容快照可完整還原；舊墓碑只能移除墓碑、內容靠重新匯入。
+        已刪除的筆記與文件留下紀錄，重新匯入時不會復活。較新的刪除會保留內容快照，可完整還原；舊版墓碑沒有快照，只能移除墓碑、內容靠重新匯入。
       </p>
       {resultEntries.length > 0 && (
         <ul class="lv-stack lv-restore-results" data-testid="restore-results">
@@ -507,7 +516,9 @@ export function TombstoneSection({ vault }: { vault: string }) {
       {error !== null && <ErrorState error={error} onRetry={() => setTick((t) => t + 1)} />}
       {loading && items.length === 0 && <Loading />}
       {!loading && error === null && items.length === 0 && (
-        <div class="zone-state lv-empty lv-graves__empty">沒有墓碑：{vault === '*' ? `${space.en} space` : '這個 vault'} 目前沒有已刪除的筆記或文件。</div>
+        <EmptyState size="sm" title="沒有墓碑" testId="graves-empty">
+          {vault === '*' ? `${space.en} space` : '這個 vault'} 目前沒有已刪除的筆記或文件。
+        </EmptyState>
       )}
       {items.length > 0 && (
         <ul class="lv-graves" data-testid="tombstones">

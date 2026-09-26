@@ -2,7 +2,7 @@
 // 列表顯示抽取狀態（處理中自動輪詢）、失敗原因與重試、編碼警示、版本與「已被取代」、兩段式刪除。
 import { useEffect, useRef, useState } from 'preact/hooks';
 
-import { Banner, ErrorState, Loading, TwoPhaseDelete } from '../components/ui';
+import { Banner, EmptyState, ErrorState, Loading, TwoPhaseDelete } from '../components/ui';
 import { VaultPicker } from '../components/VaultPicker';
 import { ApiError } from '../lib/api';
 import { ALL, useApp, vaultName } from '../lib/context';
@@ -197,7 +197,7 @@ export function Docs() {
       <h1 id="lv-docs-title" class="lv-title">
         文件
       </h1>
-      <div class="lv-filters lv-filters--top">
+      <div class="lv-filters">
         <VaultPicker />
       </div>
 
@@ -331,11 +331,10 @@ export function Docs() {
               <span role="columnheader" class="is-right">
                 版本
               </span>
-              <span role="columnheader" class="lv-visually-hidden">
-                操作
+              <span role="columnheader">
+                <span class="lv-visually-hidden">操作</span>
               </span>
             </div>
-            {items.length === 0 && !loading && <div class="zone-state lv-empty">這裡還沒有文件。</div>}
             {items.map((d) => {
               const st = documentStatus(d);
               const replacedBy = d.superseded_by ? byId.get(d.superseded_by) : undefined;
@@ -405,6 +404,11 @@ export function Docs() {
               );
             })}
           </div>
+          {items.length === 0 && !loading && (
+            <EmptyState title="這裡還沒有文件" testId="docs-empty">
+              把檔案拖到上方區塊，或按「選擇檔案」上傳。
+            </EmptyState>
+          )}
           <div class="lv-pager">
             <span>
               第 {cursors.length} 頁 · 本頁 {items.length} 份{processing ? ' · 有文件處理中，自動更新' : ''}

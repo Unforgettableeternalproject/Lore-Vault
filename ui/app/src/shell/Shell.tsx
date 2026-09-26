@@ -4,7 +4,7 @@
 // 全站快捷鍵（T-87）見 lib/shortcuts.ts；`?` 開說明面板。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
 
-import { Dialog } from '../components/ui';
+import { Dialog, EmptyState } from '../components/ui';
 import type { ApiClient, Notice } from '../lib/api';
 import { ALL, AppContext, type AppEnv, type HealthBadge, type ToastKind, type VaultsState } from '../lib/context';
 import { describeError } from '../lib/format';
@@ -313,7 +313,7 @@ export function Shell({ api, principal, author, limits, theme, onToggleTheme, de
                 </p>
               )}
               {!vaults.loading && !vaults.error && vaults.items.length === 0 && (
-                <p class="lv-vaults__empty">這個 space 還沒有 vault。</p>
+                <EmptyState size="sm" title="還沒有 vault" />
               )}
               {vaults.items.length > 0 && (
                 <ul class="lv-vaults__list" aria-labelledby="lv-vaults-label">

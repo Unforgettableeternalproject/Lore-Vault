@@ -2,7 +2,7 @@
 // 以及收料概況（by_machine／by_vault）。concept 與 episode 只屬於 dev，其他 space 只顯示說明。
 import { useEffect, useState } from 'preact/hooks';
 
-import { Badge, ErrorState, Loading } from '../components/ui';
+import { Badge, EmptyState, ErrorState, Loading } from '../components/ui';
 import { VaultPicker } from '../components/VaultPicker';
 import { ALL, useApp, vaultName } from '../lib/context';
 import { formatTime, isAbort } from '../lib/format';
@@ -151,7 +151,7 @@ function ConceptList() {
       {error !== null && <ErrorState error={error} onRetry={() => setTick((t) => t + 1)} />}
       {loading && !page && <Loading />}
       {page && page.items.length === 0 && !loading && error === null && (
-        <div class="zone-state lv-empty">沒有符合條件的 concept。</div>
+        <EmptyState title="沒有符合條件的 concept">調整類型、scope 或 vault 篩選再試一次。</EmptyState>
       )}
       {page && page.items.length > 0 && (
         <ul class="lv-concepts" data-testid="concepts" aria-busy={loading}>
@@ -284,7 +284,7 @@ function GroupList({ title, groups, field }: { title: string; groups: EpisodeGro
     <div class="lv-episode-group">
       <div class="lv-filters__label">{title}</div>
       {groups.length === 0 ? (
-        <p class="lv-muted lv-small">沒有資料。</p>
+        <EmptyState size="sm" title="沒有資料" />
       ) : (
         <ul class="lv-machines">
           {groups.map((g) => (

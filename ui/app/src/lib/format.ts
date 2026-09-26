@@ -28,7 +28,7 @@ const ERROR_TEXT: Record<string, string> = {
   vault_exists: 'key 或別名已被使用',
   space_key_prefix_required: '非 dev space 的 key 與別名必須以「<space>/」開頭',
   cannot_remove_key: '這是 vault 的正式 key，不能當別名移除',
-  space_change_refused: '只允許 lore 與 personal 互換（A20：dev 不與其他 space 轉換）',
+  space_change_refused: '只允許 lore 與 personal 互換；dev 不與其他 space 轉換',
   vault_conflict: '目標 space 已有相同 key 的 vault',
   not_restorable: '無法復原',
 };
@@ -59,12 +59,28 @@ export function isAuthorRejected(err: unknown): boolean {
   return err instanceof ApiError && rejectedFields(err).includes('author');
 }
 
+/**
+ * 服務回給 UI 顯示的文字（doctor 摘要與說明、錯誤訊息）可能夾帶內部決策／工作編號（A22、T-69）
+ * 或 schema 版本階段（v11 前）。使用者看不懂這些代號：顯示前去掉編號、把版本階段改成白話。
+ * 只用在服務產生的說明文字，不用在使用者資料（標題、正文、vault 名）。
+ */
+const REF = String.raw`(?:[ATD]\d{1,3}|T-\d+)`;
+export function stripInternalRefs(text: string): string {
+  return text
+    .replace(new RegExp(String.raw`\s*[（(]\s*${REF}(?:\s*[、,，]\s*${REF})*\s*[）)]`, 'g'), '')
+    .replace(new RegExp(String.raw`([（(])\s*${REF}\s*[：:]\s*`, 'g'), '$1')
+    .replace(/schema\s*v\d+\s*前/g, '舊版資料庫')
+    .replace(/未遷移到\s*v\d+/g, '未遷移到最新版')
+    .replace(/(?<![A-Za-z])v\d+\s*前/g, '舊版')
+    .replace(/(?<![A-Za-z])v\d+\s*起/g, '新版起');
+}
+
 export function describeError(err: unknown): string {
   // 畫面自己產生的說明（例如前端檢查）直接顯示
   if (typeof err === 'string') return err;
   if (err instanceof ApiError) {
     if (isAuthorRejected(err)) {
-      return '服務拒收 author 欄位（服務版本未支援 A22 作者契約），UI 寫入一律署名，請更新服務後再試。';
+      return '服務拒收 author 欄位（服務版本太舊，不支援作者署名）。UI 寫入一律署名，請更新服務後再試。';
     }
     if (err.status === 422) {
       const fields = rejectedFields(err);
@@ -82,7 +98,7 @@ export function describeError(err: unknown): string {
       return `${ERROR_TEXT.vault_exists}${owner}（vault_exists）`;
     }
     const known = ERROR_TEXT[err.code];
-    const base = known ?? err.message;
+    const base = known ?? stripInternalRefs(err.message);
     return `${base}（${err.code}）`;
   }
   if (err instanceof Error) return `未預期的錯誤：${err.message}`;

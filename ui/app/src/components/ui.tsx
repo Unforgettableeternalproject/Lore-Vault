@@ -76,6 +76,32 @@ export function Banner({
   );
 }
 
+/**
+ * 空狀態：大字置中顯示在空白區，可附一行補充與動作按鈕。
+ * size="sm" 給側欄、小區塊（仍比內文大、置中），預設給主內容區。
+ */
+export function EmptyState({
+  title,
+  children,
+  action,
+  size = 'lg',
+  testId,
+}: {
+  title: ComponentChildren;
+  children?: ComponentChildren;
+  action?: ComponentChildren;
+  size?: 'lg' | 'sm';
+  testId?: string;
+}) {
+  return (
+    <div class={`lv-empty-state lv-empty-state--${size}`} role="status" data-testid={testId}>
+      <p class="lv-empty-state__title">{title}</p>
+      {children && <p class="lv-empty-state__text">{children}</p>}
+      {action && <div class="lv-empty-state__action">{action}</div>}
+    </div>
+  );
+}
+
 export function ErrorState({ error, onRetry }: { error: unknown; onRetry?: () => void }) {
   return (
     <div class="zone-state zone-state--error" role="alert">

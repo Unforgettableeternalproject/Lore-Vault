@@ -6,7 +6,7 @@
 // 更正鏈（supersedes／superseded_by）在列上標示。
 import { useEffect, useState } from 'preact/hooks';
 
-import { Badge, Banner, ErrorState, Loading, SourceTag } from '../components/ui';
+import { Badge, Banner, EmptyState, ErrorState, Loading, SourceTag } from '../components/ui';
 import { VaultPicker } from '../components/VaultPicker';
 import { useApp, vaultName } from '../lib/context';
 import { authorLabel, daysAgoIso, describeError, formatTime, isAbort } from '../lib/format';
@@ -210,11 +210,6 @@ export function Notes() {
                 更新
               </span>
             </div>
-            {items.length === 0 && !loading && (
-              <div class="zone-state lv-empty" data-testid="notes-empty">
-                {tag || time !== 'all' ? '沒有符合篩選條件的筆記。' : '這裡還沒有筆記。'}
-              </div>
-            )}
             {items.map((n) => (
               <a
                 key={n.id}
@@ -286,6 +281,30 @@ export function Notes() {
               </a>
             ))}
           </div>
+          {items.length === 0 && !loading && (
+            <EmptyState
+              testId="notes-empty"
+              title={tag || time !== 'all' ? '沒有符合篩選條件的筆記' : '這裡還沒有筆記'}
+              action={
+                tag || time !== 'all' ? (
+                  <button
+                    type="button"
+                    class="btn-outline"
+                    onClick={() => {
+                      setTag(null);
+                      setTime('all');
+                    }}
+                  >
+                    清除篩選
+                  </button>
+                ) : (
+                  <button type="button" class="btn-outline btn-outline--gold" onClick={() => navigate(routePath('notes', ['new']))}>
+                    + 新增筆記
+                  </button>
+                )
+              }
+            />
+          )}
           <div class="lv-pager">
             <span>
               第 {pageNo} 頁 · 本頁 {items.length} 則{loading ? ' · 更新中…' : ''}

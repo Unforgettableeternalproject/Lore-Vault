@@ -189,9 +189,9 @@ def test_upsert_cannot_move_space(two_spaces):
 
 def test_change_space_refuses_dev_both_ways(two_spaces):
     # A20：dev 與 lore／personal 不互相轉換，兩個方向都拒絕
-    with pytest.raises(admin.SpaceChangeRefused, match="A20"):
+    with pytest.raises(admin.SpaceChangeRefused, match="不互相轉換"):
         admin.change_vault_space(two_spaces, DEV, "lore")
-    with pytest.raises(admin.SpaceChangeRefused, match="A20"):
+    with pytest.raises(admin.SpaceChangeRefused, match="不互相轉換"):
         admin.change_vault_space(two_spaces, LORE, "dev")
     with pytest.raises(UnknownVault):
         admin.change_vault_space(two_spaces, "lore/arc-old", "personal")  # 別名不接受

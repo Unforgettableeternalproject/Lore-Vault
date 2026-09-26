@@ -293,7 +293,7 @@ export function NoteDetail({ id }: { id: string }) {
         <div class="lv-eyebrow">NOTE · {space.en} · 已刪除</div>
         <h1 class="lv-title">已刪除「{deleted.title}」</h1>
         <div class="zone-state" role="status" data-testid="note-deleted">
-          已留下墓碑。v12 起的刪除保留內容快照，可以原 id 與原內容還原。
+          已留下墓碑並保留內容快照，可以原 id 與原內容還原。
         </div>
         {undeleteResult && (
           <p
@@ -653,12 +653,12 @@ export function NoteDetail({ id }: { id: string }) {
   );
 }
 
-/** 寫入署名說明：UI 寫入一律帶 author（A22），不提供關閉。 */
+/** 寫入署名說明：UI 寫入一律帶 author，不提供關閉。 */
 export function AuthorLine() {
   const { author } = useApp();
   return (
     <p class="lv-hint lv-hint--inline" data-testid="author-line">
-      以 <span class="lv-mono">{author}</span> 署名寫入（A22：分清誰做了什麼）
+      以 <span class="lv-mono">{author}</span> 署名寫入（多人共用時分清誰做了什麼）
     </p>
   );
 }

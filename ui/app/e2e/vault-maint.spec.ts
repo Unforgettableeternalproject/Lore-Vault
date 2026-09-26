@@ -26,7 +26,7 @@ test('建立 lore vault → 新增別名 → 移到 personal → 刪除 → 墓�
   await form.getByRole('button', { name: '建立於 LORE' }).click();
   const row = page.locator(`[data-vault="${KEY}"]`);
   await expect(row).toContainText('E2E 維護');
-  await expect(row).toContainText('手動建立');
+  await expect(row).toContainText('手動');
 
   const write = await request.post('/v1/write', {
     headers: { Authorization: `Bearer ${E2E_TOKEN}` },

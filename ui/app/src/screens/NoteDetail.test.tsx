@@ -197,7 +197,7 @@ describe('編輯與版本衝突', () => {
     expect(screen.queryByRole('checkbox')).toBeNull();
     expect(screen.getByTestId('author-line').textContent).toContain(TEST_AUTHOR);
     fireEvent.click(screen.getByRole('button', { name: '儲存' }));
-    expect((await screen.findByRole('alert')).textContent).toContain('A22');
+    expect((await screen.findByRole('alert')).textContent).toContain('不支援作者署名');
     fireEvent.click(screen.getByRole('button', { name: '儲存' }));
     await waitFor(() => expect(callsTo('/v1/update')).toHaveLength(2));
     expect(callsTo('/v1/update').every((c) => c.body.author === TEST_AUTHOR)).toBe(true);

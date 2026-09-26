@@ -1,5 +1,6 @@
 // `/v1/status` 的整理：頂列徽章計數、doctor 分組排序、備份與收料新鮮度判讀。
 import type { HealthBadge } from './context';
+import { formatTime } from './format';
 import type { CheckStatus, DoctorCheck, StatusResult } from './types';
 
 export function healthBadge(status: StatusResult): HealthBadge {
@@ -22,6 +23,26 @@ export const STATUS_LABEL: Record<CheckStatus, string> = {
   skipped: 'SKIP',
   pass: 'PASS',
 };
+
+/**
+ * 客戶端（agent 機器）檢查的分類：快照、spool、concept 快照與推送。它們看的是 agent 機器上的目錄與
+ * client.env，服務端 doctor 沒有這些設定、永遠是 skipped。doctor 回報沒有「屬客戶端」欄位，
+ * UI 依分類判斷（服務新增客戶端分類時要一併加進來）。
+ */
+export const CLIENT_CATEGORIES: ReadonlySet<string> = new Set(['snapshot', 'spool', 'concept_snapshot', 'concept_push']);
+
+/** agent 機器上執行這些檢查的指令範例（路徑依該機器的設定） */
+export const CLIENT_DOCTOR_COMMAND =
+  'python -m lore_vault.doctor --category snapshot --category spool --category concept_snapshot --category concept_push --snapshot-dir <快照目錄> --spool-dir <spool 目錄>';
+
+export function isClientCheck(check: DoctorCheck): boolean {
+  return CLIENT_CATEGORIES.has(check.category);
+}
+
+/** 把檢查分成服務端與客戶端兩組（順序不變）。 */
+export function splitClientChecks(checks: DoctorCheck[]): { server: DoctorCheck[]; client: DoctorCheck[] } {
+  return { server: checks.filter((c) => !isClientCheck(c)), client: checks.filter(isClientCheck) };
+}
 
 export interface CheckGroup {
   category: string;
@@ -70,4 +91,15 @@ export function formatAge(hours: number | null): string {
   if (hours < 1) return `${Math.round(hours * 60)} 分鐘前`;
   if (hours < 48) return `${hours.toFixed(1)} 小時前`;
   return `${Math.round(hours / 24)} 天前`;
+}
+
+/**
+ * 服務的備份明細是「最近一次：<ISO 時間>（<檔名>）」：時間改成全站一致的本地格式，檔名另列。
+ * 格式不符就原樣顯示，不吞掉資訊。
+ */
+export function parseBackupDetail(detail: string | null): { time: string; file: string | null } | null {
+  if (!detail) return null;
+  const m = /^最近一次：\s*(\S+?)\s*(?:（(.+)）)?$/.exec(detail);
+  if (!m) return { time: detail.replace(/^最近一次：\s*/, ''), file: null };
+  return { time: formatTime(m[1]), file: m[2] ?? null };
 }

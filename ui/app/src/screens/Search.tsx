@@ -2,7 +2,7 @@
 // 降級／截斷／不支援的種類／缺向量都要明確呈現。「載入其餘結果」＝提高 budget（必要時 limit）重查。
 import { useEffect, useRef, useState } from 'preact/hooks';
 
-import { Badge, Banner, ErrorState, Loading, SourceTag } from '../components/ui';
+import { Badge, Banner, EmptyState, ErrorState, Loading, SourceTag } from '../components/ui';
 import { VaultPicker } from '../components/VaultPicker';
 import { useApp, vaultName } from '../lib/context';
 import { authorLabel, describeDegradedReason, formatTime, isAbort, locatorLabel } from '../lib/format';
@@ -139,7 +139,7 @@ export function Search({ initialQuery }: { initialQuery: string }) {
         </button>
       </form>
 
-      <div class="lv-filters lv-filters--search">
+      <div class="lv-filters">
         <VaultPicker />
       </div>
 
@@ -173,7 +173,9 @@ export function Search({ initialQuery }: { initialQuery: string }) {
         </Banner>
       )}
 
-      {!params && <div class="zone-state lv-empty">輸入關鍵詞開始檢索；結果只列標題與摘要，點開看全文。</div>}
+      {!params && (
+        <EmptyState title="輸入關鍵詞開始檢索">結果只列標題與摘要，點開看全文。快捷鍵 / 可隨時回到查詢框。</EmptyState>
+      )}
       {loading && !result && <Loading label="檢索中…" />}
       {error !== null && <ErrorState error={error} onRetry={() => setRetryTick((t) => t + 1)} />}
 
@@ -187,9 +189,9 @@ export function Search({ initialQuery }: { initialQuery: string }) {
             <span>只列標題與摘要 · 點開看全文</span>
           </div>
           {result.items.length === 0 && (
-            <div class="zone-state lv-empty" data-testid="recall-empty">
-              沒有符合「{params.query}」的結果{degraded ? '（降級中：只做了關鍵字比對，換個說法可能查得到）' : ''}。
-            </div>
+            <EmptyState testId="recall-empty" title={`沒有符合「${params.query}」的結果`}>
+              {degraded ? '降級中只做了關鍵字比對，換個說法可能查得到。' : '換個關鍵詞，或把 vault 篩選改成「本 space 全部」。'}
+            </EmptyState>
           )}
           <ol class="lv-results">
             {result.items.map((item) => (

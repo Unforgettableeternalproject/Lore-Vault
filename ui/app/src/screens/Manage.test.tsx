@@ -31,7 +31,7 @@ function vault(overrides: Partial<VaultSummary> = {}): VaultSummary {
 const noGraves: Handler = () => json({ items: [], next_cursor: null });
 
 describe('換 space（A20）', () => {
-  it('dev vault：兩個目標都停用並說明 A20，不會送出搬移', async () => {
+  it('dev vault：兩個目標都停用並說明原因（不寫內部編號），不會送出搬移', async () => {
     const dev = vault({ key: 'github.com/org/repo', display: 'Repo', space: 'dev' });
     const { api, callsTo } = makeApi({ '/v1/tombstones': noGraves });
     renderWithApp(<Maint vaultKey={dev.key} />, api, { vaults: [dev] });
@@ -39,7 +39,8 @@ describe('換 space（A20）', () => {
     const personal = screen.getByRole('button', { name: /移到 PERSONAL/ });
     expect((lore as HTMLButtonElement).disabled).toBe(true);
     expect((personal as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.getByTestId('move-a20').textContent).toContain('A20');
+    expect(screen.getByTestId('move-a20').textContent).toContain('dev 的 vault 不能移到其他 space');
+    expect(screen.getByTestId('move-a20').textContent).not.toMatch(/\bA\d+\b/);
     fireEvent.click(lore);
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(callsTo('/v1/vault_move_space')).toHaveLength(0);
@@ -251,7 +252,7 @@ describe('Vault 列表', () => {
       '/v1/vault_update': (body) => json(vault({ display: body.display as string })),
     });
     const { refreshVaults, toast } = renderWithApp(<Vaults />, api, { vaults: [vault()], space: 'lore' });
-    expect(screen.getByText('手動建立')).toBeTruthy();
+    expect(screen.getByText('手動')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: '+ 建立 vault' }));
     const form = screen.getByRole('form', { name: '建立 vault' });
     const [key, display] = within(form).getAllByRole('textbox') as HTMLInputElement[];
@@ -298,6 +299,32 @@ describe('系統健康', () => {
       },
     };
   }
+
+  it('客戶端檢查（snapshot／spool／concept_snapshot）歸成預設收合的一組，不算進 SKIP、不顯示缺少設定', async () => {
+    const { api } = makeApi({
+      '/v1/status': () =>
+        json(
+          status([
+            check({ name: 'storage.ok', category: 'storage' }),
+            check({ name: 'snapshot.age', category: 'snapshot', status: 'skipped', summary: '缺少設定：snapshot_dir', description: '快照新鮮度' }),
+            check({ name: 'spool.pending', category: 'spool', status: 'skipped', summary: '缺少設定：spool_dir', description: 'spool 待推送' }),
+            check({ name: 'concept_snapshot.age', category: 'concept_snapshot', status: 'skipped', summary: '缺少設定：concept_snapshot' }),
+          ]),
+        ),
+      '/v1/episode_summary': () => json({ space: 'dev', vault: '*', total: 0, last_recorded: null, by_machine: [], by_vault: [] }),
+    });
+    renderWithApp(<Health />, api);
+    const group = (await screen.findByTestId('client-checks')) as HTMLDetailsElement;
+    expect(group.open).toBe(false);
+    expect(group.textContent).toContain('客戶端檢查 · 3 項');
+    expect(group.textContent).toContain('python -m lore_vault.doctor');
+    expect(group.textContent).not.toContain('缺少設定');
+    expect(screen.getByTestId('check-snapshot.age').textContent).toContain('AGENT');
+    expect(screen.getByTestId('count-skipped').textContent).toContain('0');
+    // 服務端分組裡沒有客戶端分類
+    const categories = Array.from(document.querySelectorAll('[data-category]')).map((g) => g.getAttribute('data-category'));
+    expect(categories).toEqual(['storage']);
+  });
 
   it('fail 醒目、排最前且展開明細；計數與頂列徽章同步；收料過久標紅', async () => {
     const recent = new Date(Date.now() - 3_600_000).toISOString();
@@ -358,7 +385,7 @@ describe('系統健康', () => {
     const { reportHealth } = renderWithApp(<Health />, api);
     expect((await screen.findByRole('alert')).textContent).toContain('storage_error');
     await waitFor(() => expect(reportHealth).toHaveBeenCalledWith(expect.objectContaining({ error: expect.stringContaining('storage_error') })));
-    expect(await screen.findByText('還沒有收到任何 episode。')).toBeTruthy();
+    expect(await screen.findByText('還沒有收到任何 episode')).toBeTruthy();
   });
 });
 

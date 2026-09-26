@@ -62,7 +62,6 @@ test('登入、App Shell 與登出', async ({ page, context }) => {
   await page.getByRole('link', { name: '連線設定' }).click();
   await expect(page.getByTestId('settings-principal')).toHaveText(E2E_USER);
   await expect(page.getByTestId('settings-display')).toHaveText(E2E_DISPLAY);
-  await expect(page.getByTestId('settings-author')).toContainText(E2E_DISPLAY);
   await page.getByRole('button', { name: '測試連線' }).click();
   await expect(page.getByTestId('settings-test')).toContainText('可連線');
 

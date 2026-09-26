@@ -116,7 +116,7 @@ def documents_quality_warnings(ctx: DoctorContext) -> CheckResult:
         for row in db.execute("PRAGMA table_info(documents)").fetchall()
     )
     if not has:
-        raise CheckSkipped("缺少 documents.warnings 欄（schema 未遷移到 v10）")
+        raise CheckSkipped("缺少 documents.warnings 欄（資料庫尚未遷移到最新版）")
     return _to_result(document_index.quality_warnings(db))
 
 

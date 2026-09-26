@@ -541,7 +541,8 @@ def undelete_document(
         key = resolve_write(conn, grave["vault"], space=space)
         if grave["filename"] is None or grave["mime"] is None:
             raise NotRestorable(
-                f"文件 {document_id!r} 的墓碑缺檔名／格式（v11 前刪除）；請重新上傳",
+                f"文件 {document_id!r} 的墓碑缺檔名／格式（舊版刪除時沒有保存）；"
+                "請重新上傳",
                 "incomplete",
             )
         if grave["size_bytes"] is None:
@@ -871,7 +872,7 @@ def plan_space_change(
     source = row[0]
     if SPACE_DEV in (source, target):
         raise SpaceChangeRefused(
-            f"不允許 {source} → {target}：dev 與 lore／personal 之間不互相轉換（A20）。"
+            f"不允許 {source} → {target}：dev 與 lore／personal 之間不互相轉換。"
             "dev 的 key 由 repo binding 決定、非 dev 以 '<space>/' 前綴命名，"
             "兩邊不共用 vault；換 space 只允許 lore↔personal"
         )

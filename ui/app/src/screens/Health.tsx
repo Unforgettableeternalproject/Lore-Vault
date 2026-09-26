@@ -3,16 +3,20 @@
 // 兩個請求各自成敗：收料概況失敗不遮蔽健檢結果，反之亦然。
 import { useEffect, useState } from 'preact/hooks';
 
-import { Banner, ErrorState, Loading } from '../components/ui';
+import { Banner, EmptyState, ErrorState, Loading } from '../components/ui';
 import { useApp } from '../lib/context';
-import { describeError, formatTime, isAbort } from '../lib/format';
+import { describeError, formatTime, isAbort, stripInternalRefs } from '../lib/format';
 import {
   EPISODE_STALE_HOURS,
   STATUS_LABEL,
   formatAge,
   groupChecks,
   healthBadge,
+  CLIENT_DOCTOR_COMMAND,
   hoursSince,
+  parseBackupDetail,
+  splitClientChecks,
+  statusRank,
 } from '../lib/health';
 import type { BacklogStatus, CheckStatus, DoctorCheck, EpisodeSummary, StatusResult, WorkerStatus } from '../lib/types';
 
@@ -115,13 +119,16 @@ export function Health() {
 
 function StatusView({ status }: { status: StatusResult }) {
   const doctor = status.doctor;
+  const { server, client } = splitClientChecks(doctor.checks);
+  // 客戶端檢查在服務端必然略過：不算進「SKIP」，免得看起來像設定缺漏
+  const clientSkipped = client.filter((c) => c.status === 'skipped').length;
   const counts: Record<CheckStatus, number> = {
     fail: doctor.summary.fail ?? 0,
     warn: doctor.summary.warn ?? 0,
-    skipped: doctor.summary.skipped ?? 0,
+    skipped: Math.max(0, (doctor.summary.skipped ?? 0) - clientSkipped),
     pass: doctor.summary.pass ?? 0,
   };
-  const groups = groupChecks(doctor.checks);
+  const groups = groupChecks(server);
   const backup = doctor.checks.find((c) => c.name === 'backup.recent') ?? null;
   const fatal = [
     ['摘要／向量 worker', status.enrich.worker],
@@ -162,6 +169,7 @@ function StatusView({ status }: { status: StatusResult }) {
               ))}
             </section>
           ))}
+          {client.length > 0 && <ClientChecks checks={client} />}
         </div>
 
         <aside class="lv-health-side">
@@ -177,7 +185,7 @@ function StatusView({ status }: { status: StatusResult }) {
           </div>
           <div class="lv-side-block">
             <div class="lv-side-block__label">服務狀態</div>
-            <dl class="lv-kv">
+            <dl class="lv-kv lv-kv--stack">
               <dt>最近備份</dt>
               <dd data-testid="health-backup">
                 <BackupView check={backup} />
@@ -197,16 +205,42 @@ function StatusView({ status }: { status: StatusResult }) {
   );
 }
 
-function CheckRow({ check }: { check: DoctorCheck }) {
+/** 客戶端檢查：預設收合的一組，說明要到 agent 機器上執行；有非略過的結果時照常標示狀態。 */
+function ClientChecks({ checks }: { checks: DoctorCheck[] }) {
+  const ran = checks.filter((c) => c.status !== 'skipped');
+  const worst = ran.map((c) => c.status).sort((a, b) => statusRank(a) - statusRank(b))[0] ?? 'client';
+  return (
+    <details class={`lv-check-group lv-check-group--client lv-check-group--${worst}`} data-testid="client-checks" open={worst === 'fail'}>
+      <summary class="lv-check-group__title lv-check-group__summary">
+        客戶端檢查 · {checks.length} 項
+        <span class="lv-check-group__note">{ran.length === 0 ? '在 agent 機器上執行' : `${ran.length} 項有結果`}</span>
+      </summary>
+      <div class="lv-client-note">
+        <p>
+          這些檢查看的是 agent 機器上的快照、spool 與 client.env，服務端沒有這些目錄，所以在這裡不會執行——不是設定缺漏。
+          請在 agent 機器上以 doctor 執行：
+        </p>
+        <pre class="lv-md__pre lv-client-note__cmd">{CLIENT_DOCTOR_COMMAND}</pre>
+      </div>
+      {checks.map((c) => (
+        <CheckRow key={c.name} check={c} client />
+      ))}
+    </details>
+  );
+}
+
+function CheckRow({ check, client = false }: { check: DoctorCheck; client?: boolean }) {
   const hasMore = check.details.length > 0 || Object.keys(check.counts).length > 0;
-  const tone = check.status in STATUS_LABEL ? check.status : 'unknown';
-  const label = STATUS_LABEL[check.status as CheckStatus] ?? check.status.toUpperCase();
+  // 客戶端檢查在服務端略過是預期的：標成「AGENT」並顯示檢查用途，不顯示「缺少設定」
+  const clientSkip = client && check.status === 'skipped';
+  const tone = clientSkip ? 'skipped' : check.status in STATUS_LABEL ? check.status : 'unknown';
+  const label = clientSkip ? 'AGENT' : (STATUS_LABEL[check.status as CheckStatus] ?? check.status.toUpperCase());
   const head = (
     <>
       <span class={`lv-check__status lv-check__status--${tone}`}>{label}</span>
       <span class="lv-check__main">
         <span class="lv-check__name lv-mono">{check.name}</span>
-        <span class="lv-check__desc">{check.summary || check.description}</span>
+        <span class="lv-check__desc">{stripInternalRefs(clientSkip ? check.description || check.summary : check.summary || check.description)}</span>
       </span>
     </>
   );
@@ -226,7 +260,7 @@ function CheckRow({ check }: { check: DoctorCheck }) {
     >
       <summary class="lv-check__head">{head}</summary>
       <div class="lv-check__body">
-        {check.description && check.summary && <p class="lv-muted lv-small">{check.description}</p>}
+        {check.description && check.summary && <p class="lv-muted lv-small">{stripInternalRefs(check.description)}</p>}
         {Object.keys(check.counts).length > 0 && (
           <ul class="lv-plan__counts">
             {Object.entries(check.counts).map(([k, n]) => (
@@ -260,7 +294,7 @@ function BacklogView({ title, backlog, worker }: { title: string; backlog: Backl
         <span>{title}</span>
         <span class={'lv-mono ' + (bad ? 'lv-text-error' : 'lv-muted')}>{backlog.status.toUpperCase()}</span>
       </div>
-      <p class="lv-small">{backlog.summary}</p>
+      <p class="lv-small">{stripInternalRefs(backlog.summary)}</p>
       {entries.length > 0 && (
         <ul class="lv-plan__counts">
           {entries.map(([k, n]) => (
@@ -283,19 +317,26 @@ function BacklogView({ title, backlog, worker }: { title: string; backlog: Backl
 
 function BackupView({ check }: { check: DoctorCheck | null }) {
   if (!check) return <span class="lv-muted">服務未回報備份檢查</span>;
-  if (check.status === 'skipped') return <span class="lv-muted">未檢查：{check.summary}</span>;
-  const last = check.details.find((d) => d.startsWith('最近一次')) ?? null;
+  if (check.status === 'skipped') return <span class="lv-muted">未檢查：{stripInternalRefs(check.summary)}</span>;
+  const last = parseBackupDetail(check.details.find((d) => d.startsWith('最近一次')) ?? null);
   return (
     <span class={check.status === 'pass' ? undefined : 'lv-text-error'}>
-      {check.summary}
-      {last && <span class="lv-status__raw">{last}</span>}
+      {stripInternalRefs(check.summary)}
+      {last && (
+        <span class="lv-status__raw" data-testid="health-backup-last">
+          最近一次：{last.time}
+          {last.file && <span class="lv-backup-file lv-mono">{last.file}</span>}
+        </span>
+      )}
     </span>
   );
 }
 
 function MachineList({ summary }: { summary: EpisodeSummary }) {
   if (summary.by_machine.length === 0) {
-    return <p class="lv-muted lv-small">還沒有收到任何 episode。</p>;
+    return (
+      <EmptyState size="sm" title="還沒有收到任何 episode">agent 機器開始收料後，這裡會依機器列出最近收料時間。</EmptyState>
+    );
   }
   return (
     <ul class="lv-machines" data-testid="machines">
