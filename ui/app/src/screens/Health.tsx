@@ -3,7 +3,7 @@
 // 兩個請求各自成敗：收料概況失敗不遮蔽健檢結果，反之亦然。
 import { useEffect, useState } from 'preact/hooks';
 
-import { Banner, ErrorState, Loading } from '../components/ui';
+import { Banner, EmptyState, ErrorState, Loading } from '../components/ui';
 import { useApp } from '../lib/context';
 import { describeError, formatTime, isAbort, stripInternalRefs } from '../lib/format';
 import {
@@ -334,7 +334,9 @@ function BackupView({ check }: { check: DoctorCheck | null }) {
 
 function MachineList({ summary }: { summary: EpisodeSummary }) {
   if (summary.by_machine.length === 0) {
-    return <p class="lv-muted lv-small">還沒有收到任何 episode。</p>;
+    return (
+      <EmptyState size="sm" title="還沒有收到任何 episode">agent 機器開始收料後，這裡會依機器列出最近收料時間。</EmptyState>
+    );
   }
   return (
     <ul class="lv-machines" data-testid="machines">

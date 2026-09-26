@@ -2,7 +2,7 @@
 // 列表顯示抽取狀態（處理中自動輪詢）、失敗原因與重試、編碼警示、版本與「已被取代」、兩段式刪除。
 import { useEffect, useRef, useState } from 'preact/hooks';
 
-import { Banner, ErrorState, Loading, TwoPhaseDelete } from '../components/ui';
+import { Banner, EmptyState, ErrorState, Loading, TwoPhaseDelete } from '../components/ui';
 import { VaultPicker } from '../components/VaultPicker';
 import { ApiError } from '../lib/api';
 import { ALL, useApp, vaultName } from '../lib/context';
@@ -335,7 +335,11 @@ export function Docs() {
                 操作
               </span>
             </div>
-            {items.length === 0 && !loading && <div class="zone-state lv-empty">這裡還沒有文件。</div>}
+            {items.length === 0 && !loading && (
+              <EmptyState title="這裡還沒有文件" testId="docs-empty">
+                把檔案拖到上方區塊，或按「選擇檔案」上傳。
+              </EmptyState>
+            )}
             {items.map((d) => {
               const st = documentStatus(d);
               const replacedBy = d.superseded_by ? byId.get(d.superseded_by) : undefined;

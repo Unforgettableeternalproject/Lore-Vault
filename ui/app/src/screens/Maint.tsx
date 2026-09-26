@@ -2,7 +2,7 @@
 // `/ui/maint/<key>` 針對單一 vault；`/ui/maint` 列出本 space 的 vault 與全 space 墓碑（刪除 vault 後回到這裡）。
 import { useEffect, useState } from 'preact/hooks';
 
-import { Badge, ErrorState, Loading, TwoPhaseConfirm, TwoPhaseDelete } from '../components/ui';
+import { Badge, EmptyState, ErrorState, Loading, TwoPhaseConfirm, TwoPhaseDelete } from '../components/ui';
 import { useApp } from '../lib/context';
 import { describeError, formatTime, isAbort } from '../lib/format';
 import { routePath } from '../lib/router';
@@ -42,7 +42,14 @@ export function Maint({ vaultKey }: { vaultKey: string | null }) {
           {vaults.loading && vaults.items.length === 0 && <Loading />}
           {vaults.error && <ErrorState error={`vault 列表載入失敗：${vaults.error}`} />}
           {!vaults.loading && !vaults.error && vaults.items.length === 0 && (
-            <div class="zone-state lv-empty">這個 space 還沒有 vault。</div>
+            <EmptyState
+              title="這個 space 還沒有 vault"
+              action={
+                <button type="button" class="btn-outline" onClick={() => navigate(routePath('vaults'))}>
+                  到 Vault 頁建立
+                </button>
+              }
+            />
           )}
           {vaults.items.length > 0 && (
             <ul class="lv-vcards" aria-label={`${space.en} 的 vault`}>
@@ -509,7 +516,9 @@ export function TombstoneSection({ vault }: { vault: string }) {
       {error !== null && <ErrorState error={error} onRetry={() => setTick((t) => t + 1)} />}
       {loading && items.length === 0 && <Loading />}
       {!loading && error === null && items.length === 0 && (
-        <div class="zone-state lv-empty lv-graves__empty">沒有墓碑：{vault === '*' ? `${space.en} space` : '這個 vault'} 目前沒有已刪除的筆記或文件。</div>
+        <EmptyState size="sm" title="沒有墓碑" testId="graves-empty">
+          {vault === '*' ? `${space.en} space` : '這個 vault'} 目前沒有已刪除的筆記或文件。
+        </EmptyState>
       )}
       {items.length > 0 && (
         <ul class="lv-graves" data-testid="tombstones">

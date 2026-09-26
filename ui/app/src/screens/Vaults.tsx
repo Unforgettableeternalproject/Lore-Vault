@@ -2,7 +2,7 @@
 // 列表沿用 Shell 已載入的 `/v1/vault_list`（同一份資料，避免兩處不一致）；寫入後 refreshVaults。
 import { useState } from 'preact/hooks';
 
-import { ErrorState, Loading } from '../components/ui';
+import { EmptyState, ErrorState, Loading } from '../components/ui';
 import { ApiError } from '../lib/api';
 import { useApp } from '../lib/context';
 import { describeError, formatTime } from '../lib/format';
@@ -112,7 +112,19 @@ export function Vaults() {
       {vaults.loading && vaults.items.length === 0 && <Loading />}
       {vaults.error && <ErrorState error={`vault 列表載入失敗：${vaults.error}`} onRetry={refreshVaults} />}
       {!vaults.loading && !vaults.error && vaults.items.length === 0 && (
-        <div class="zone-state lv-empty">這個 space 還沒有 vault。</div>
+        <EmptyState
+          title="這個 space 還沒有 vault"
+          testId="vaults-empty"
+          action={
+            !creating && (
+              <button type="button" class="btn-outline btn-outline--gold" onClick={() => setCreating(true)}>
+                + 建立 vault
+              </button>
+            )
+          }
+        >
+          筆記與文件都要放進某個 vault；先建立一個再開始寫入。
+        </EmptyState>
       )}
 
       {vaults.items.length > 0 && (

@@ -385,7 +385,7 @@ describe('系統健康', () => {
     const { reportHealth } = renderWithApp(<Health />, api);
     expect((await screen.findByRole('alert')).textContent).toContain('storage_error');
     await waitFor(() => expect(reportHealth).toHaveBeenCalledWith(expect.objectContaining({ error: expect.stringContaining('storage_error') })));
-    expect(await screen.findByText('還沒有收到任何 episode。')).toBeTruthy();
+    expect(await screen.findByText('還沒有收到任何 episode')).toBeTruthy();
   });
 });
 

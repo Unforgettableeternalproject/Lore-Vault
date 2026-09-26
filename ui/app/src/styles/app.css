@@ -362,6 +362,18 @@ button { font: inherit; }
 .lv-title--tight { margin-bottom: 0; }
 .lv-hint--inline { margin: 8px 0 0; }
 .lv-empty { margin-top: 12px; }
+/* 空狀態（components/ui EmptyState）：大字置中在空白區 */
+.lv-empty-state {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; text-align: center;
+  margin: 16px 0; padding: 56px 24px; border: 1px dashed var(--line-strong); border-radius: var(--lv-radius-control);
+  color: var(--ink-soft);
+}
+.lv-empty-state__title { margin: 0; font-family: var(--font-serif-tc); font-weight: 600; font-size: 22px; line-height: 1.5; color: var(--ink-title); overflow-wrap: anywhere; }
+.lv-empty-state__text { margin: 0; max-width: 48ch; font-size: 15px; line-height: 1.7; }
+.lv-empty-state__action { margin-top: 8px; display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+.lv-empty-state--sm { padding: 24px 16px; gap: 6px; }
+.lv-empty-state--sm .lv-empty-state__title { font-size: 17px; }
+.lv-empty-state--sm .lv-empty-state__text { font-size: var(--lv-fs-body); }
 .lv-loading { margin-top: 12px; }
 .lv-actions--wrap { flex-wrap: wrap; }
 .lv-field__label--split { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
@@ -805,7 +817,6 @@ button.lv-wikilink { background: none; border: none; border-bottom: 1px dashed v
 .lv-grave[data-state='ok'] .lv-grave__state { color: var(--lv-success-text); }
 .lv-grave[data-state='old'] .lv-grave__state { color: var(--lv-gold-text); }
 .lv-grave[data-state='blocked'] .lv-grave__state { color: var(--lv-error-text); }
-.lv-graves__empty { border: 1px dashed var(--line-strong); }
 .lv-restore-results { list-style: none; margin: 0 0 12px; padding: 0; }
 
 .lv-nav__badge {
