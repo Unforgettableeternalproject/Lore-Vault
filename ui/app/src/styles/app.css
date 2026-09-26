@@ -878,6 +878,8 @@ details.lv-check > .lv-check__head { cursor: pointer; }
 .lv-settings .lv-actions { margin-top: 18px; }
 .lv-backlog { padding: 10px 0; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 4px; }
 .lv-backlog p { margin: 0; }
+.lv-backlog .lv-plan__counts li { font-size: var(--lv-fs-body); font-weight: 400; color: var(--ink-soft); }
+.lv-backlog__head > span:first-child { font-weight: 600; }
 .lv-backlog__head { display: flex; justify-content: space-between; gap: 8px; font-size: var(--lv-fs-body); color: var(--ink-title); }
 .lv-machines { list-style: none; margin: 0; padding: 0; }
 .lv-machine { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto auto; gap: 10px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: var(--lv-fs-body); color: var(--lv-success-text); }
