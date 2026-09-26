@@ -35,7 +35,7 @@ test('頁面 vault 篩選器與側欄同步', async ({ page }) => {
   // 下拉開著、游標在選項上（zone tint 底）時的對比
   expect(await axeViolations(page, '筆記 · vault 篩選器展開')).toEqual([]);
   await picker(page).fill('篩選甲');
-  await expect(page.getByRole('option')).toHaveCount(1);
+  await expect(page.getByRole('listbox').getByRole('option')).toHaveCount(1);
   await picker(page).press('Enter');
   await expect(picker(page)).toHaveAttribute('aria-expanded', 'false');
   await expect(picker(page)).toHaveValue(A.display);
