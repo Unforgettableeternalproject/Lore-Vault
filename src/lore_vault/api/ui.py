@@ -10,7 +10,6 @@
 
 from __future__ import annotations
 
-import hmac
 import json
 import logging
 import math
@@ -23,8 +22,9 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from lore_vault.config import ConfigError, Secret
+from lore_vault.config import ConfigError
 
+from .principals import Principals
 from .ui_auth import UiAuth, client_ip, has_ui_header, read_cookie
 
 log = logging.getLogger("lore_vault.api.ui")
@@ -74,9 +74,9 @@ def _ui(request: Request) -> UiAuth:
     return request.app.state.ui_auth
 
 
-def build_router(token: Secret) -> APIRouter:
+def build_router(principals: Principals) -> APIRouter:
+    """登入金鑰與 Bearer 共用同一張憑證對照表；session 記住對應的 principal。"""
     router = APIRouter(prefix="/ui/api", include_in_schema=False)
-    expected = token.reveal().encode("utf-8")
 
     @router.post("/login")
     async def login(request: Request) -> Response:
@@ -112,12 +112,13 @@ def build_router(token: Secret) -> APIRouter:
             # 格式錯不算猜測失敗，但同樣記 log；不回傳任何請求內容
             log.warning("UI 登入被拒（body 格式錯） ip=%s", ip)
             return _error(400, "invalid_request", 'body 必須是 {"key": "<存取金鑰>"}')
-        if not hmac.compare_digest(provided.encode("utf-8"), expected):
+        principal = principals.match(provided.encode("utf-8"))
+        if principal is None:
             ui.limiter.record_failure(ip)
             log.warning("UI 登入失敗 ip=%s", ip)
             return _error(401, "invalid_credentials", "存取金鑰不正確")
         ui.limiter.record_success(ip)
-        session_id = ui.sessions.create()
+        session_id = ui.sessions.create(principal)
         log.info("UI 登入成功 ip=%s", ip)
         response = Response(status_code=204)
         response.set_cookie(
@@ -161,6 +162,7 @@ def build_router(token: Secret) -> APIRouter:
         return JSONResponse(
             {
                 "authenticated": True,
+                "principal": info.principal,
                 "expires_at": _iso(info.absolute_expires),
                 "idle_expires_at": _iso(info.idle_expires),
             }

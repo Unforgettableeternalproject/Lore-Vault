@@ -113,6 +113,8 @@ def client_ip(scope: Scope, trusted: Iterable[IpNetwork]) -> str:
 class _Session:
     created: float
     last_seen: float
+    # 登入時所用憑證對應的 principal（A22）
+    principal: str
 
 
 @dataclass(frozen=True)
@@ -120,6 +122,7 @@ class SessionInfo:
     created: float
     absolute_expires: float
     idle_expires: float
+    principal: str
 
 
 def _digest(session_id: str) -> str:
@@ -148,7 +151,9 @@ class SessionStore:
     def absolute_seconds(self) -> float:
         return self._absolute
 
-    def create(self) -> str:
+    def create(self, principal: str) -> str:
+        if not principal:
+            raise ValueError("session 必須記錄 principal")
         session_id = secrets.token_urlsafe(32)
         now = self._clock()
         with self._lock:
@@ -156,7 +161,9 @@ class SessionStore:
             while len(self._sessions) >= self._max:
                 oldest = min(self._sessions, key=lambda k: self._sessions[k].created)
                 del self._sessions[oldest]
-            self._sessions[_digest(session_id)] = _Session(created=now, last_seen=now)
+            self._sessions[_digest(session_id)] = _Session(
+                created=now, last_seen=now, principal=principal
+            )
         return session_id
 
     def touch(self, session_id: str) -> SessionInfo | None:
@@ -194,6 +201,7 @@ class SessionStore:
             created=session.created,
             absolute_expires=absolute,
             idle_expires=min(session.last_seen + self._idle, absolute),
+            principal=session.principal,
         )
 
     def _prune(self, now: float) -> None:

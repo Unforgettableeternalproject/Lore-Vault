@@ -66,7 +66,12 @@
 | `topics` | 標籤 |
 | `links` | `[[標題]]` 互連，解析成 note id |
 | `supersedes` | 更正關係：新 note 取代舊 note 時標記，而不是另建更正篇 |
+| `author` | 寫入者自報的身分名（A22，schema v12）：agent 用自己的角色名、UI 登入寫入帶 `Xavier (Bernie)`；未填存 null（對外顯示為未具名），服務**不代填**。單行、去前後空白後 1–64 字、控制字元規則同其他欄位；`legacy` 保留給舊 PM 匯入（API／MCP 自稱會被拒） |
+| `principal` | 服務依憑證判定的主體（A22）：**不可由請求指定**（body 帶了 422）。`api.principals` 的「憑證 → principal」對照，目前唯一的 token 對應 `xavier`，日後一 token 一 principal；UI session 記住登入所用憑證的 principal。DB 欄位可為 NULL、無 DEFAULT，儲存層 `insert_note` 拒收缺 principal，doctor `notes.attribution` 對帳 |
+| `updated_by`, `updated_by_principal` | 最後一次寫入（建立或修改）者的自報名與 principal；建立時同 `author`／`principal`。`update` 的 `author` 參數寫進這裡（未填也記 null，不沿用上一位），原 `author` 不變 |
 | `created`, `updated` | |
+
+v12 遷移回填：principal 全為 `xavier`；對帳清單 `import_sources.imported_updated` 非 NULL 的 note（舊 PM 匯入成功者）`author`／`updated_by` = `legacy`，其餘 `author` 維持 NULL。`import_on` 新寫入或依來源更新的 note 同樣標 `legacy`，重跑冪等。
 
 ### Episode（發生過的事）
 
@@ -122,7 +127,7 @@ HTTP 契約為 `POST /v1/<工具名>` + JSON body，另有 `POST /v1/vaults` 建
 |---|---|
 | `POST /ui/api/login` | body `{"key": "<存取金鑰>"}`（= `LORE_VAULT_API_TOKEN`，常數時間比對）。成功 204 + `Set-Cookie`：`__Host-lv_session`（`ui.cookie_secure=false` 時為 `lv_session`、不帶 Secure）、HttpOnly、SameSite=Strict、Path=/、Max-Age=絕對期限。金鑰錯 401 `invalid_credentials`；body 格式錯 400 `invalid_request`、超過 4KB 413 `too_large`；缺標頭 403 `csrf_required`；限流中 429 `too_many_attempts` + `Retry-After`（退避期間正確金鑰也擋） |
 | `POST /ui/api/logout` | 註銷目前 session 並清 cookie；沒有 session 也回 204 |
-| `GET /ui/api/session` | `{authenticated, expires_at, idle_expires_at}`；無效或過期 401 |
+| `GET /ui/api/session` | `{authenticated, principal, expires_at, idle_expires_at}`；無效或過期 401 |
 
 `/v1/*` 的認證：帶了 `Authorization` 標頭就只走 bearer（行為與 A15 相同，不看 cookie）；否則接受有效的 session cookie，但必須帶 `X-Lore-Vault-UI: 1`，缺少回 403 `csrf_required`。session 只存在服務記憶體，重啟即失效；有絕對與閒置兩種期限。登入限流分每來源與全域，來源 IP 只在直接連線位址屬於 `ui.trusted_proxies` 時才採信 `CF-Connecting-IP`。`/ui` 回應帶嚴格 CSP（無 inline、無第三方來源，字型自託管）與 `nosniff`、`no-referrer`、`frame-ancestors 'none'`。
 
@@ -150,8 +155,8 @@ spike 接入端點（階段 8，同樣需 bearer；每筆 body 項目 = schema d
 | `vault_delete` ⚠ | `{space, key, reason?, confirm_token?}` | `plan`＝`{target: "vault", vault, counts, note_ids, requires_force}`；確認即等同 `--force` | 404（只接受正式 key） |
 | `note_delete` ⚠ | `{space, vault, id, reason?, confirm_token?}` | `plan`＝同上（`target: "note"`） | 404 `not_found` |
 | `document_delete` ⚠ | `{space, vault, id, reason?, confirm_token?}` | `plan`＝`{target: "document", document_id, vault, sha256, filename, supersedes, relinked, counts, blob_still_referenced}` | 404 `not_found` |
-| `tombstones` | `{space, vault, kinds?: ["note","document"], cursor?, limit? (≤500, 預設 50)}` | `{items, next_cursor}`；item＝`{kind, id, vault, vault_exists, deleted_at, reason}` + note：`{source, reimportable}`／document：`{sha256, filename, restorable}`。依刪除時間由新到舊；`vault="*"` 為 space 內全部，已刪的 vault 可用原 key 查 | 400 `vault_required`／`invalid_cursor`／`invalid_request` |
-| `note_undelete` | `{space, id}` | `{undeleted: 墓碑, restored: false, reimportable}`（沿用 CLI：只移除墓碑，內容不回來；有匯入來源者重跑匯入才回來） | 404 |
+| `tombstones` | `{space, vault, kinds?: ["note","document"], cursor?, limit? (≤500, 預設 50)}` | `{items, next_cursor}`；item＝`{kind, id, vault, vault_exists, deleted_at, reason}` + note：`{source, title, restorable, reimportable}`（`title` 取自內容快照，舊墓碑為 null；`restorable`＝有快照且 vault 還在）／document：`{sha256, filename, restorable}`。依刪除時間由新到舊；`vault="*"` 為 space 內全部，已刪的 vault 可用原 key 查 | 400 `vault_required`／`invalid_cursor`／`invalid_request` |
+| `note_undelete` | `{space, id}` | `{undeleted: 墓碑, restored, reimportable, note}`。墓碑有內容快照（schema v12 起刪除的）→ 以原 id 與原內容（含作者欄位、created／updated）還原，`restored: true`、`note` 為 `{id, vault, title, author, updated}`；FTS 同交易重建，向量由背景補算。v12 前的舊墓碑 → 維持舊行為：只移除墓碑、`restored: false`、`note: null`，有匯入來源者（`reimportable`）重跑匯入才回來 | 404；409 `not_restorable`（`reason`：`vault_deleted` 所屬 vault 已刪除、墓碑保留，重建同 key 的 vault 後可還原／`exists`） |
 | `document_undelete` | `{space, id}` | `{document: Document, space, tombstone}`；同一 id 重建、`status: "pending"` 重新抽取，版本鏈比照上傳（同檔名現行版本為 `supersedes`） | 409 `not_restorable`（`reason`：`incomplete` v11 前墓碑／`blob_missing`／`duplicate` 同內容已存在／`vault_deleted`／`exists`）、500 `documents_not_configured` |
 | `document_retry` | `{space, vault, id}` | `{document, space, manual_retries, max_manual_retries}`；failed → pending（沿用上傳重試的 `reset_for_retry`） | 409 `not_failed`／`retry_limit`（每份 3 次） |
 | `concept_query` | `{space, vault, scope?, scope_state?: repo／global／missing, kind?, cursor?, limit? (≤200)}` | `{items, next_cursor}`；item＝`{id, vault, kind, scope, scope_state, statement, anchors, surprisal, usability_verdict, updated}`，依 updated 由新到舊。**不回** cue／probe／why／source_*／probe_result／usability 的 evidence | 400 `invalid_request`／`invalid_cursor` |
@@ -171,11 +176,11 @@ MCP 為各機器本地 stdio 殼（`python -m lore_vault.mcp`，A15）：服務�
 |---|---|---|
 | `space(action, value?)` | `{space, spaces}` | `action="get"` 查詢、`"set"` 切換（`value` 為 `dev`／`lore`／`personal`）；純殼端狀態，不打服務；非法值回工具錯誤 `invalid_space`、狀態不變 |
 | `vault_resolve(cwd?, create?, display?, space?, key?)` | vault key、display、space、note 數、binding（dev 由 cwd 推算時） | dev：key 省略時 MCP 殼以 `lore_vault.binding` 從 cwd 算 key，服務端做別名解析；lore／personal：沒有 repo，必須帶 `key`（`<space>/名稱`，缺少回 `key_required`），傳了 `cwd` 會忽略並回 `cwd_ignored: true`。`space` 省略用目前 space，顯式傳入只影響這一次。`create=True` 才建 vault（HTTP `POST /v1/vaults`）；取代 pm-bind 的手動步驟 |
-| `recall(query, vault, kinds?, limit?, budget?)` | `[{id, kind, vault, title, summary, summary_source, score, updated}]`；chunk 另帶 `document_id`、`chunk_id`、`locator` | 統一檢索 note 與文件段落（`kinds` 預設 `["note", "chunk"]`；concept 未實作）；note 與 chunk 的 lexical／vector 四路一次 RRF。chunk 的 `title` 為檔名、`summary` 為段落摘錄（`summary_source: "excerpt"`），同樣受 `budget`；**預設不含全文**；`vault` 必填，跨範圍用 `vault="*"` 明示。回應另有 `kinds`（實際查的）、`missing_chunk_embeddings`；降級時 `chunk` 列在 `unsupported_kinds` |
+| `recall(query, vault, kinds?, limit?, budget?)` | `[{id, kind, vault, title, summary, summary_source, score, updated}]`；note 另帶 `author`；chunk 另帶 `document_id`、`chunk_id`、`locator` | 統一檢索 note 與文件段落（`kinds` 預設 `["note", "chunk"]`；concept 未實作）；note 與 chunk 的 lexical／vector 四路一次 RRF。chunk 的 `title` 為檔名、`summary` 為段落摘錄（`summary_source: "excerpt"`），同樣受 `budget`；**預設不含全文**；`vault` 必填，跨範圍用 `vault="*"` 明示。回應另有 `kinds`（實際查的）、`missing_chunk_embeddings`；降級時 `chunk` 列在 `unsupported_kinds` |
 | `get(vault, ids, budget?)` | 全文 | 可批次；`ids` 可混 note id、`doc:…`（整份文件文字，重疊段已去除）、`chunk:…`（單段，含 `locator`）；字數預算依 ids 順序分配，超過時截斷並標示（`truncated`、`body_chars`／`text_chars`）；vault 必填（A5）。範圍外或不存在列在 `missing`，降級時文件 id 列在 `unavailable` |
 | `list(vault, since?, topics?, cursor?, limit?, kinds?)` | 標題清單 | note 與文件合併分頁（`kinds` 預設兩者）；文件項含 `status`、`error_code`、`version`、`supersedes`、`superseded_by`、`chunk_count`、`encoding`；指定 `topics` 時只列 note；降級時 `document` 列在 `unsupported_kinds` |
-| `write(vault, title, body, topics?, supersedes?)` | id、疑似重複清單 | 寫入前自動查重，回傳相似 note 讓 agent 決定改用 `update` |
-| `update(id, body?, title?, topics?)` | id | |
+| `write(vault, title, body, topics?, supersedes?, author?)` | id、`author`、`principal`、疑似重複清單 | 寫入前自動查重，回傳相似 note 讓 agent 決定改用 `update`。`author` 填 agent 自己的角色名（工具描述明寫），不可代填別人 |
+| `update(id, body?, title?, topics?, author?)` | id、`author`、`updated_by`、`updated_by_principal` | `author` 記為最後修改者（`updated_by`） |
 | `upload(path, vault?)` | `document_id`、`status`、`duplicate`、`version`、`supersedes` | 殼讀本機檔案（只限殼工作目錄與 `mcp.upload_roots`；拒絕 `..` 與 symlink 逃逸）轉送 `POST /v1/documents`；`vault` 省略時只在 dev 用殼工作目錄 binding；服務不可達直接失敗 |
 | `status(vault?)` | 健康狀態、最近更新、管線狀態 | 合併 doctor 摘要與 health alert |
 

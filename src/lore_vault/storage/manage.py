@@ -315,10 +315,15 @@ def list_tombstones(
     parts: list[str] = []
     args: list[Any] = []
     if KIND_NOTE in wanted:
+        # v12 起有內容快照：列出標題供辨識（只取標題，不取內文）
+        has_snap = _has_column(conn, "note_tombstones", "snapshot")
+        title = "json_extract(snapshot, '$.title')" if has_snap else "NULL"
+        snap = "snapshot IS NOT NULL" if has_snap else "0"
         parts.append(
             f"""
             SELECT 'note' AS kind, note_id AS id, vault, deleted_at, reason,
                    source, NULL AS sha256, NULL AS filename,
+                   {title} AS title, ({snap}) AS has_snapshot,
                    ({_SPACE_OF.format(col="vault")}) AS space
             FROM note_tombstones
             """
@@ -329,6 +334,7 @@ def list_tombstones(
             f"""
             SELECT 'document' AS kind, document_id AS id, vault, deleted_at, reason,
                    NULL AS source, sha256, {"filename" if has_meta else "NULL"},
+                   NULL AS title, 0 AS has_snapshot,
                    ({_SPACE_OF.format(col="vault")}) AS space
             FROM document_tombstones
             """
@@ -367,8 +373,11 @@ def list_tombstones(
             "reason": r["reason"],
         }
         if r["kind"] == KIND_NOTE:
-            # 內容已刪，undelete 只移除墓碑；有匯入來源時重跑匯入才會回來
+            # 有快照（v12 起）且 vault 還在 → undelete 以原內容還原（restorable）；
+            # 沒有快照的舊墓碑 undelete 只移除墓碑，有匯入來源時重跑匯入才會回來
             item["source"] = r["source"]
+            item["title"] = r["title"]
+            item["restorable"] = bool(r["has_snapshot"]) and item["vault_exists"]
             item["reimportable"] = r["source"] is not None
         else:
             item["sha256"] = r["sha256"]
@@ -620,6 +629,74 @@ def tombstones_disjoint(conn: sqlite3.Connection) -> Reconciliation:
         f"{len(note_dup) + len(doc_dup)} 筆 id 同時在墓碑與現行表",
         counts,
         tuple(details[:MAX_DETAILS]),
+    )
+
+
+def note_attribution(conn: sqlite3.Connection) -> Reconciliation:
+    """每則 note 都有 principal 與 updated_by_principal（A22）。欄位可為 NULL、沒有
+    DEFAULT（漏設不會被默默記成某人），靠寫入路徑與這項對帳把關。"""
+    missing = [
+        r[0]
+        for r in conn.execute(
+            "SELECT id FROM notes WHERE principal IS NULL "
+            "OR updated_by_principal IS NULL ORDER BY id"
+        )
+    ]
+    total = int(conn.execute("SELECT count(*) FROM notes").fetchone()[0])
+    unnamed = int(
+        conn.execute("SELECT count(*) FROM notes WHERE author IS NULL").fetchone()[0]
+    )
+    counts = {"notes": total, "missing_principal": len(missing), "unnamed": unnamed}
+    if not missing:
+        return Reconciliation(
+            "pass", f"{total} 則 note 皆有 principal（未具名 {unnamed} 則）", counts
+        )
+    return Reconciliation(
+        "fail",
+        f"{len(missing)} 則 note 缺 principal／updated_by_principal",
+        counts,
+        tuple(f"note {i} 缺 principal" for i in missing[:MAX_DETAILS]),
+    )
+
+
+_SNAPSHOT_KEYS = ("id", "vault", "title", "body", "created", "updated")
+
+
+def tombstone_snapshots(conn: sqlite3.Connection) -> Reconciliation:
+    """note 墓碑的內容快照可解析、id 與墓碑相同、還原必要欄位齊全（restore 依賴它）。
+    快照內的 vault 不比對：換 space 只改寫墓碑的 vault 欄，還原以該欄為準。"""
+    bad: list[str] = []
+    with_snapshot = legacy = 0
+    for note_id, raw in conn.execute(
+        "SELECT note_id, snapshot FROM note_tombstones ORDER BY note_id"
+    ):
+        if raw is None:
+            legacy += 1
+            continue
+        with_snapshot += 1
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            bad.append(f"note {note_id} 的墓碑快照不是合法 JSON")
+            continue
+        if not isinstance(data, dict) or data.get("id") != note_id:
+            bad.append(f"note {note_id} 的墓碑快照 id 不符")
+            continue
+        lacking = [k for k in _SNAPSHOT_KEYS if not isinstance(data.get(k), str)]
+        if lacking:
+            bad.append(f"note {note_id} 的墓碑快照缺欄位 {lacking}")
+    counts = {"with_snapshot": with_snapshot, "legacy": legacy, "invalid": len(bad)}
+    if not bad:
+        return Reconciliation(
+            "pass",
+            f"{with_snapshot} 筆墓碑快照可還原（無快照的舊墓碑 {legacy} 筆）",
+            counts,
+        )
+    return Reconciliation(
+        "fail",
+        f"{len(bad)} 筆墓碑快照無法用於還原",
+        counts,
+        tuple(bad[:MAX_DETAILS]),
     )
 
 

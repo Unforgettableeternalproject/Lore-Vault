@@ -91,6 +91,8 @@ def _conflict_note(exc: VersionConflict) -> dict[str, Any]:
         "topics": list(note.topics),
         "links": list(note.links),
         "supersedes": note.supersedes,
+        "author": note.author,
+        "updated_by": note.updated_by,
         "created": note.created,
         "updated": note.updated,
     }

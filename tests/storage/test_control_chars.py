@@ -114,6 +114,7 @@ def _note(**overrides) -> Note:
         "updated": TS,
     }
     data.update(overrides)
+    data.setdefault("principal", "xavier")
     return Note(**data)
 
 

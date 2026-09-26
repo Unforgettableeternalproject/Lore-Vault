@@ -103,6 +103,11 @@ uv run uvicorn --factory lore_vault.api.app:create_app --host 127.0.0.1 --port 8
   `/v1/vault_resolve`、`/v1/recall`、`/v1/get`、`/v1/list`、`/v1/write`、`/v1/update`、
   `/v1/status`，另有 `/v1/vaults`（明確建 vault；`write` 不會自動建）。
   錯誤格式統一為 `{"error": {"code", "message", ...}}`。
+- 作者（A22，schema v12）：`/v1/write`、`/v1/update` 接受 `author`（寫入者自報名，未填存 null、不代填）；
+  `principal` 由認證中介層依憑證判定（`api.principals`，放進 ASGI scope，路由以 `principal_of` 取，缺少即 500），
+  **body 帶 `principal`／`updated_by_principal` 一律 422**（`extra="forbid"`，不寫入）。
+  服務層 `notes.write`／`notes.update` 的 `principal` 是必填 keyword；儲存層 `insert_note` 拒收缺 principal 的 Note，
+  `update_note_if(editor=(名稱, principal))` 寫 `updated_by*`（省略 `editor`＝作者欄位不動，只給內部呼叫）
 - 啟動時（lifespan）遷移資料庫，之後每個請求各開一條連線（WAL + busy_timeout）。
 - 背景補算 worker 預設在同一程序內以執行緒執行（`[api] enrich_worker`）；
   關閉路徑：SIGTERM 經 tini 轉給 uvicorn → lifespan 結束 → worker `stop()`，
@@ -158,8 +163,8 @@ stdout 是 MCP 協定通道，log 一律寫 stderr（UTF-8）。設定錯誤時�
 `space(action, value?)`、`vault_resolve(cwd?, create?, display?, space?, key?)`、
 `recall(query, vault, kinds?, limit?, budget?)`、
 `get(vault, ids, budget?)`、`list(vault, since?, topics?, cursor?, limit?, kinds?)`、
-`write(vault, title, body, topics?, links?, supersedes?)`、
-`update(vault, id, expected_updated, title?, body?, topics?, links?, supersedes?)`、
+`write(vault, title, body, topics?, links?, supersedes?, author?)`、
+`update(vault, id, expected_updated, title?, body?, topics?, links?, supersedes?, author?)`、
 `upload(path, vault?)`、`status(vault?)`（共 9 個）。
 
 - **目前 space**（A18）：殼行程持有、只在記憶體，新行程一律 `dev`；`space(action="set", value=...)`
@@ -242,7 +247,7 @@ token 放在 repo 外的 env 檔，不寫進 `.claude.json`：
 | `delete-note --space SPACE --vault KEY --id NOTE_ID [--reason TEXT] [--yes]` | 刪單則 note（vault 在該 space 內解析，可用別名；`--space` 必填） |
 | `delete-vault --key KEY [--force] [--reason TEXT] [--yes]` | 刪整個 vault；只接受正式 key。vault 內有 note、文件或 episode／concept／injection 時必須 `--force`；文件一併刪並各寫文件墓碑 |
 | `delete-document --space SPACE --vault KEY --id DOC_ID [--reason TEXT] [--yes]` | 刪單份文件：chunk、chunk_fts、向量（CASCADE）、抽取／補算紀錄（CASCADE），寫 `document_tombstones`。blob 不刪（其他 vault／版本可能共用），沒人引用時 doctor `documents.orphan_blobs` 回報。指向它的新版本改指向它的前一版；刪的是現行版本時前一版同交易回到索引（向量由 worker 補）。CLI 不提供 undelete（HTTP `document_undelete` 可在原始檔仍在時復原，見下） |
-| `undelete-note --id NOTE_ID [--yes]` | 移除墓碑；下次重跑匯入時該 note 會匯回 |
+| `undelete-note --id NOTE_ID [--yes]` | 取消刪除。墓碑有內容快照（schema v12 起刪除的）→ 以原 id、原內容還原（FTS 同交易重建，向量由服務背景補算），所屬 vault 已刪除則拒絕（先重建 vault）；v12 前的舊墓碑 → 只移除墓碑，下次重跑匯入時該 note 會匯回。dry-run 以 `has_snapshot` 顯示走哪條 |
 | `gc-blobs [--blob-dir DIR] [--min-age-hours N] [--yes]` | 清理孤兒 blob 與中斷遺留的暫存檔，見下方「blob 清理」 |
 | `set-space --key KEY --space SPACE [--yes]` | 把 vault 換到另一個 space（A19）；只接受正式 key。前綴規則與建立時相同：目標非 dev 時 key 與別名都必須以 `<space>/` 開頭，不合即拒（dry-run 就擋，不改 key）。換完後 MCP 殼的降級快照要等下次快照更新才反映 |
 
@@ -252,12 +257,15 @@ token 放在 repo 外的 env 檔，不寫進 `.claude.json`：
   一併刪；刪完核對實際筆數與規劃、檢查無孤兒向量／補算列，不符整段 rollback
 - **墓碑**（schema v5 `note_tombstones`，刻意無外鍵）：每則被刪的 note 寫一筆（note id、vault、
   對帳清單記載的來源與來源 id、刪除時間、`--reason`）；`delete-vault --force` 為其下每則 note 各寫一筆。
-  匯入對帳清單（`import_sources`／`import_vault_counts`）不動
+  schema v12 起另存刪除當下的完整內容（`snapshot` JSON：title、body、summary、topics、links、supersedes、
+  作者欄位、created、updated），供取消刪除還原；還原時 vault 以墓碑的 `vault` 欄為準（`set-space` 會改寫它，
+  快照裡的 vault 不改）。墓碑內容永久保留在 DB。匯入對帳清單（`import_sources`／`import_vault_counts`）不動
 - 重跑 `import_on import`：有墓碑的 note 跳過、不匯回，報告 `skipped.deleted` 與 `deleted_skipped` 列出；
   來源 note 全部有墓碑的 vault 不重建（`vaults.deleted_skipped`）。已知缺口：沒有 note 的空 vault 刪除不寫墓碑，
   若 mapping 仍有該本會被重建
 - `import.on_reconcile`：清單有、note 沒有、有墓碑 → 刻意刪除（`counts.deleted`，只報告）；沒有墓碑 → 漏筆（fail）。
-  來源筆數核對改為「實際 + 刻意刪除 = 來源」。`undelete-note` 後、重匯前 doctor 會顯示漏筆，重匯即恢復綠
+  來源筆數核對改為「實際 + 刻意刪除 = 來源」。舊墓碑 `undelete-note` 後、重匯前 doctor 會顯示漏筆，重匯即恢復綠；
+  有快照的還原後 note 與匯入時相同（`updated` 未變），重匯視為 unchanged
 - 服務執行中可直接用（WAL + busy_timeout；與匯入工具同樣直接寫 DB）。快照快取以內容指紋判斷，刪除後下次拉取即更新
 
 容器內：
@@ -276,7 +284,12 @@ v11 前的舊墓碑不能復原）與 `document_retry`（`documents.manual_retri
 
 - `vaults.alias_integrity`：別名等於某 vault 的正式 key、或指向不存在的 vault 為 fail
 - `tombstones.disjoint`：同一 id 同時在墓碑與現行 notes／documents 為 fail（undelete 必須同交易刪墓碑）
-- 兩項都有破壞資料變紅的測試（`tests/storage/test_manage_checks.py`）；跨 space 洩漏與拿掉保護會紅見
+- `tombstones.note_snapshots`（schema v12）：note 墓碑的內容快照不是合法 JSON、`$.id` 與墓碑不符或缺還原
+  必要欄位為 fail（不比對 `$.vault`，理由同上）
+- `notes.attribution`（schema v12，A22）：有 note 缺 `principal`／`updated_by_principal` 為 fail；
+  counts 另列未具名（`author` 為 null）筆數
+- 前兩項有破壞資料變紅的測試（`tests/storage/test_manage_checks.py`），後兩項見
+  `tests/api/test_authorship.py`；跨 space 洩漏與拿掉保護會紅見
   `tests/api/test_manage_leak.py`
 
 space 對帳（分類 `space`，schema v7；DB 沒有 CHECK，只能靠對帳）：`space.valid_values`
@@ -564,6 +577,9 @@ KEY=VALUE、只用標準庫解析；行程環境變數中同名鍵優先。
 
 - 登入金鑰就是 `LORE_VAULT_API_TOKEN`（不另設密碼）。`POST /ui/api/login` 成功後發 session cookie：
   HttpOnly、SameSite=Strict、Path=/、Secure（可設定）、Max-Age = 絕對期限
+- 作者（A22）：登入金鑰與 bearer 共用 `api.principals` 的「憑證 → principal」對照（目前唯一的 token → `xavier`），
+  session 記住登入時的 principal（`GET /ui/api/session` 回 `principal`），UI 發出的寫入記在該 principal 下。
+  寫入時前端在 body 帶 `author: "Xavier (Bernie)"`；服務端不強制、只記錄，也不代填
 - session 只存在服務記憶體（以 sha256(session id) 為鍵）：**服務重啟即全部失效**，重新登入即可。
   期限：絕對 `ui.session_absolute_hours`（預設 12）、閒置 `ui.session_idle_minutes`（預設 60）；
   同時上限 `ui.max_sessions`（預設 32，超過淘汰最舊）

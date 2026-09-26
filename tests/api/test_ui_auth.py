@@ -177,6 +177,33 @@ def test_session_cookie_authenticates_v1_with_ui_header(ui):
     session = ui.get("/ui/api/session", headers=UI)
     assert session.status_code == 200
     assert session.json()["authenticated"] is True
+    assert session.json()["principal"] == "xavier"
+
+
+def test_session_write_records_login_principal_and_client_author(ui):
+    """A22：session 記住登入憑證對應的 principal；author 由前端自報，服務端只記錄。"""
+    login(ui)
+    ui.post(
+        "/v1/vaults",
+        json={"key": "folder/ui-a", "display": "a", "space": "dev"},
+        headers=UI,
+    ).raise_for_status()
+    resp = ui.post(
+        "/v1/write",
+        json={
+            "vault": "folder/ui-a",
+            "title": "UI 寫的",
+            "body": "內容",
+            "space": "dev",
+            "author": "Xavier (Bernie)",
+        },
+        headers=UI,
+    )
+    assert resp.status_code == 201, resp.text
+    assert (resp.json()["author"], resp.json()["principal"]) == (
+        "Xavier (Bernie)",
+        "xavier",
+    )
 
 
 def test_cookie_without_csrf_header_is_blocked(ui):

@@ -32,6 +32,9 @@ uuid hex 相撞）：可追溯、重跑天然冪等，連結也能在寫入前�
 對帳清單另存在 `import_sources`（來源 id、內容雜湊、匯入當下的 updated）。
 管理指令刪除過的 note 有墓碑（`note_tombstones`）：重跑匯入時跳過，不匯回，
 報告列在 `deleted_skipped`；來源 note 全部已刪除的 vault 也不重建。
+作者（A22）：新寫入與依來源更新的 note 一律 `author`／`updated_by` = `legacy`、
+principal = `xavier`（本工具直接寫庫，沿用唯一的憑證主體）；重跑冪等（未變動的
+note 不改寫）。既有 note 被「採用」（adopted）時不改其作者。
 """
 
 from __future__ import annotations
@@ -53,7 +56,14 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from lore_vault.binding import folder_key, lookup_key, resolve_binding
-from lore_vault.schema import SPACE_DEV, Note, Vault, canonical_key
+from lore_vault.schema import (
+    AUTHOR_LEGACY,
+    DEFAULT_PRINCIPAL,
+    SPACE_DEV,
+    Note,
+    Vault,
+    canonical_key,
+)
 from lore_vault.schema.chars import sanitize_text
 from lore_vault.storage import imports
 from lore_vault.storage.db import connect, transaction
@@ -979,6 +989,10 @@ def _import_one(
                 created=p.created,
                 updated=p.updated,
                 links=link_ids,
+                author=AUTHOR_LEGACY,
+                principal=DEFAULT_PRINCIPAL,
+                updated_by=AUTHOR_LEGACY,
+                updated_by_principal=DEFAULT_PRINCIPAL,
             ),
             space=SPACE_DEV,
         )
@@ -1025,6 +1039,7 @@ def _import_one(
             {"title": p.title, "body": p.body, "links": link_ids, "summary": None},
             space=SPACE_DEV,
             now=p.updated,
+            editor=(AUTHOR_LEGACY, DEFAULT_PRINCIPAL),
         )
         if stored is None:
             raise OnImportError(f"note {p.source_id} 更新時版本衝突")

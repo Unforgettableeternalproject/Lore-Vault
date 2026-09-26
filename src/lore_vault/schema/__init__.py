@@ -3,7 +3,10 @@
 from ._base import MISSING, SchemaError
 from .chars import InvalidCharacters
 from .models import (
+    AUTHOR_LEGACY,
+    AUTHOR_MAX_CHARS,
     CONCEPT_KINDS,
+    DEFAULT_PRINCIPAL,
     EPISODE_ORIGINS,
     SPACE_DEV,
     SPACES,
@@ -16,10 +19,14 @@ from .models import (
     ToolCount,
     Vault,
     canonical_key,
+    validate_author,
 )
 
 __all__ = [
+    "AUTHOR_LEGACY",
+    "AUTHOR_MAX_CHARS",
     "CONCEPT_KINDS",
+    "DEFAULT_PRINCIPAL",
     "EPISODE_ORIGINS",
     "MISSING",
     "SPACES",
@@ -35,4 +42,5 @@ __all__ = [
     "ToolCount",
     "Vault",
     "canonical_key",
+    "validate_author",
 ]

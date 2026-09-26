@@ -342,10 +342,25 @@ def test_orphans_are_skipped_and_reported(fake, tmp_path, conn):
     assert mapping["orphans"] == ["note:orphan"]
 
 
+def _attribution(conn) -> list[tuple]:
+    return [
+        tuple(r)
+        for r in conn.execute(
+            "SELECT id, author, principal, updated_by, updated_by_principal, updated "
+            "FROM notes ORDER BY id"
+        )
+    ]
+
+
 def test_rerun_is_idempotent(fake, tmp_path, conn):
     export, mapping = _prepare(fake, tmp_path)
     mod.run_import(conn, export, _reviewed(mapping))
+    # 作者契約（A22）：舊 PM 匯入的 note 一律標 legacy、principal 為 xavier
+    first = _attribution(conn)
+    assert len(first) == 6
+    assert {r[1:5] for r in first} == {("legacy", "xavier", "legacy", "xavier")}
     report = mod.run_import(conn, export, mapping)
+    assert _attribution(conn) == first
     assert report["notes"]["inserted"] == 0
     assert report["notes"]["unchanged"] == 6
     assert report["vaults"]["created"] == []
@@ -388,6 +403,11 @@ def test_rerun_applies_source_change_when_not_modified_locally(fake, tmp_path, c
     assert report["notes"]["updated_from_source"] == 1
     note = get_note(conn, "global", "note:g1", space="dev")
     assert note.body == "ON 端更新" and note.updated == "2026-09-01T00:00:00.123Z"
+    assert (note.author, note.updated_by, note.updated_by_principal) == (
+        "legacy",
+        "legacy",
+        "xavier",
+    )
     assert _reconcile(conn).status is Status.PASS
 
 
@@ -428,7 +448,15 @@ def test_reconcile_passes_after_import_and_reports_extras(fake, tmp_path, conn):
     insert_note(
         conn,
         "global",
-        Note(id="new-1", vault="global", title="新增", body="", created=ts, updated=ts),
+        Note(
+            id="new-1",
+            vault="global",
+            title="新增",
+            body="",
+            created=ts,
+            updated=ts,
+            principal="xavier",
+        ),
         space="dev",
     )
     result = _reconcile(conn)

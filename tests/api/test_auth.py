@@ -136,7 +136,8 @@ def test_openapi_is_served_behind_auth(anon):
 
 
 def test_auth_uses_constant_time_compare(monkeypatch, anon):
-    import lore_vault.api.auth as auth
+    # 比對在憑證 → principal 對照表（A22）裡做
+    import lore_vault.api.principals as auth
 
     calls = []
     real = auth.hmac.compare_digest

@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse
 from .auth import BearerAuthMiddleware
 from .errors import install_error_handlers
 from .manage import router as manage_router
+from .principals import Principals
 from .routes import router
 from .settings import ApiSettings, load_settings, validate_token
 from .spike import router as spike_router
@@ -60,6 +61,8 @@ def create_app(
         _configure_logging()
         settings = load_settings(environ=environ)
     validate_token(settings.token)
+    # 憑證 → principal（A22）：目前唯一的 token 對應 xavier
+    principals = Principals.single(settings.token)
     ui_auth = UiAuth.from_config(settings.config.ui, settings.clock or time.time)
     ui_static = (
         static_app(settings.config.ui.static_dir)
@@ -101,7 +104,7 @@ def create_app(
     app.include_router(spike_router)
     app.include_router(manage_router)
     # /ui/api/* 必須在 /ui 靜態掛載之前註冊（Starlette 依註冊順序比對）
-    app.include_router(build_ui_router(settings.token))
+    app.include_router(build_ui_router(principals))
     if ui_static is not None:
         app.mount("/ui", ui_static, name="ui")
 
@@ -110,7 +113,12 @@ def create_app(
         """存活檢查：不需認證、不碰資料庫與任何資料。"""
         return JSONResponse({"ok": True})
 
-    app.add_middleware(BearerAuthMiddleware, token=settings.token, ui_auth=ui_auth)
+    app.add_middleware(
+        BearerAuthMiddleware,
+        token=settings.token,
+        ui_auth=ui_auth,
+        principals=principals,
+    )
     # 最後加入 = 最外層：/ui 的所有回應（含認證中介層產生的）都帶安全標頭
     app.add_middleware(UiSecurityHeadersMiddleware)
     return app

@@ -19,7 +19,9 @@
   對帳清單記載的來源、刪除時間、原因）。匯入對帳清單（`import_sources`／
   `import_vault_counts`）**不動**：對帳把「清單有、note 沒有、有墓碑」算成刻意刪除，
   沒有墓碑的才是漏匯；重跑匯入遇到墓碑跳過，不會把刻意刪掉的 note 匯回來。
-  `undelete_note` 移除墓碑，下次匯入即可匯回。
+  v12 起墓碑另存刪除當下 note 的完整內容（`snapshot`，JSON）：`restore_note` 以原 id
+  與原內容還原（FTS 同交易重建，向量交給背景補算）；v12 前沒有快照的舊墓碑維持
+  `undelete_note` 的舊行為（只移除墓碑，下次匯入即可匯回）。
 
 換 space（A20）：只允許 `lore`↔`personal`，dev 與非 dev 兩個方向都拒絕。換 space 同時把
 key 與別名改成新前綴，引用 vault key 的欄位全部在同一交易內改寫（舊 key 不留別名）。
@@ -30,16 +32,19 @@ key 與別名改成新前綴，引用 vault key 的欄位全部在同一交易�
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import sqlite3
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from lore_vault.schema import SPACE_DEV, canonical_key
+from lore_vault.schema import SPACE_DEV, Note, canonical_key
 
 from . import document_index
 from .db import transaction
 from .errors import NotFound, StorageError, UnknownVault, VaultConflict
+from .notes import insert_note, note_from_row
 from .timeutil import utc_now
 from .vaults import check_key_prefix, resolve_write, validate_space
 
@@ -146,10 +151,14 @@ def delete_note(
 def _write_tombstones(
     conn: sqlite3.Connection, vault: str, note_ids: Sequence[str], reason: str
 ) -> int:
-    """每則 note 寫一筆墓碑；來源取自對帳清單（沒有就 NULL）。回傳寫入筆數。"""
+    """每則 note 寫一筆墓碑；來源取自對帳清單（沒有就 NULL）。回傳寫入筆數。
+
+    v12 起同時存 note 完整內容的快照（`snapshot`），`restore_note` 據此還原。
+    """
     if not reason.strip():
         raise StorageError("刪除原因不可為空")
     has_manifest = _has_table(conn, "import_sources")
+    has_snapshot = _has_column(conn, "note_tombstones", "snapshot")
     now = utc_now()
     written = 0
     for note_id in note_ids:
@@ -161,6 +170,29 @@ def _write_tombstones(
             ).fetchone()
             if row is not None:
                 source, source_id = row[0], row[1]
+        if has_snapshot:
+            row = conn.execute(
+                "SELECT * FROM notes WHERE id = ?", (note_id,)
+            ).fetchone()
+            if row is None:
+                raise PlanChanged(f"note {note_id!r} 已不存在，無法寫墓碑快照")
+            written += conn.execute(
+                """
+                INSERT OR REPLACE INTO note_tombstones
+                    (note_id, vault, source, source_id, deleted_at, reason, snapshot)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    note_id,
+                    vault,
+                    source,
+                    source_id,
+                    now,
+                    reason,
+                    json.dumps(note_from_row(row).to_dict(), ensure_ascii=False),
+                ),
+            ).rowcount
+            continue
         # 取消刪除後再刪一次：覆寫舊墓碑
         written += conn.execute(
             """
@@ -191,15 +223,71 @@ def find_tombstone(conn: sqlite3.Connection, note_id: str) -> dict[str, Any]:
         "source_id": row[3],
         "deleted_at": row[4],
         "reason": row[5],
+        # 有快照（v12 起刪除的）才能以原內容還原；只回旗標，不回內容
+        "has_snapshot": _tombstone_snapshot(conn, note_id) is not None,
     }
 
 
+def _tombstone_snapshot(conn: sqlite3.Connection, note_id: str) -> str | None:
+    if not _has_column(conn, "note_tombstones", "snapshot"):
+        return None
+    row = conn.execute(
+        "SELECT snapshot FROM note_tombstones WHERE note_id = ?", (note_id,)
+    ).fetchone()
+    return None if row is None else row[0]
+
+
 def undelete_note(conn: sqlite3.Connection, note_id: str) -> dict[str, Any]:
-    """移除墓碑，下次匯入可把該 note 匯回來。回傳被移除的墓碑。"""
+    """只移除墓碑（不還原內容），下次匯入可把該 note 匯回來。回傳被移除的墓碑。
+
+    v12 前沒有快照的舊墓碑走這條；有快照的請用 `restore_note`。
+    """
     with transaction(conn):
         grave = find_tombstone(conn, note_id)
         conn.execute("DELETE FROM note_tombstones WHERE note_id = ?", (note_id,))
         return grave
+
+
+def restore_note(
+    conn: sqlite3.Connection, note_id: str, *, space: str | None = None
+) -> dict[str, Any]:
+    """取消刪除：墓碑有快照就以原 id 與原內容還原，沒有（v12 前的舊墓碑）就只移除墓碑。
+
+    - 還原：title、body、summary、topics、links、supersedes、作者欄位、created、
+      updated 與刪除前逐欄相同；FTS 在同一交易重建，向量已隨刪除消失，交給背景補算
+    - vault 取墓碑的 `vault` 欄（換 space 會改寫它，快照 JSON 內的 vault 可能已過時）
+    - 墓碑所屬 vault 已刪除 → `NotRestorable("vault_deleted")`，墓碑保留；
+      `space` 給定時 vault 必須在該 space（否則 `UnknownVault`），
+      省略用 vault 目前的 space
+    - 同 id 的 note 已存在 → `NotRestorable("exists")`
+    - 刪墓碑與插入在同一交易
+    回傳 {"tombstone": 墓碑 dict, "restored": bool, "note": Note | None}。
+    """
+    with transaction(conn):
+        grave = find_tombstone(conn, note_id)
+        raw = _tombstone_snapshot(conn, note_id)
+        if raw is None:
+            conn.execute("DELETE FROM note_tombstones WHERE note_id = ?", (note_id,))
+            return {"tombstone": grave, "restored": False, "note": None}
+        row = conn.execute(
+            "SELECT space FROM vaults WHERE key = ?", (grave["vault"],)
+        ).fetchone()
+        if row is None:
+            raise NotRestorable(
+                f"note {note_id!r} 所屬的 vault {grave['vault']!r} 已刪除；"
+                "請先建立同一個 vault 再取消刪除",
+                "vault_deleted",
+            )
+        key = resolve_write(conn, grave["vault"], space=space or row[0])
+        if conn.execute("SELECT 1 FROM notes WHERE id = ?", (note_id,)).fetchone():
+            raise NotRestorable(f"note {note_id!r} 已存在", "exists")
+        data = json.loads(raw)
+        if not isinstance(data, dict) or data.get("id") != note_id:
+            raise StorageError(f"note {note_id!r} 的墓碑快照與墓碑 id 不符")
+        note = dataclasses.replace(Note.from_dict(data), vault=key)
+        conn.execute("DELETE FROM note_tombstones WHERE note_id = ?", (note_id,))
+        stored = insert_note(conn, key, note, space=space or row[0])
+        return {"tombstone": grave, "restored": True, "note": stored}
 
 
 # ── 單份文件（T-68）──

@@ -41,6 +41,7 @@ def _readers():
 
 def _writers():
     note = Note(
+        principal="xavier",
         id="w-1",
         vault="folder/a",
         title="t",
@@ -140,6 +141,7 @@ def test_alias_conflicts_are_rejected(two_vaults, add_vault):
 
 def test_note_vault_must_match_argument(two_vaults):
     note = Note(
+        principal="xavier",
         id="x",
         vault="folder/b",
         title="t",

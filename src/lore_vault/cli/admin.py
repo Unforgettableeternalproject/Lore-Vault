@@ -7,7 +7,9 @@
 - `delete-document --space SPACE --vault KEY --id DOC_ID [--reason TEXT]`：刪一份
   文件（chunk、FTS、向量、抽取紀錄），寫文件墓碑；blob 不刪（沒人引用時 doctor
   `documents.orphan_blobs` 回報）。不提供 undelete：要恢復就重新上傳
-- `undelete-note --id NOTE_ID`：移除墓碑，下次重跑匯入時該 note 會匯回來
+- `undelete-note --id NOTE_ID`：取消刪除。墓碑有內容快照（schema v12 起刪除的）時以
+  原 id 與原內容還原（FTS 同交易重建，向量由服務的背景補算重算）；所屬 vault 已刪除
+  則拒絕（先重建 vault）。v12 前的舊墓碑只移除墓碑，下次重跑匯入時該 note 會匯回來
 - `set-space --key KEY --space SPACE [--new-key NEW]`：把 vault 換到另一個 space
   （A19／D-space-3 只走管理指令；A20 規則）。只允許 `lore`↔`personal`，dev 與非 dev
   兩個方向都拒絕。換 space 同時改 key：缺省把前綴換掉（`lore/x`→`personal/x`），
@@ -119,7 +121,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     p_gc.add_argument("--yes", action="store_true", help="真的刪除（預設 dry-run）")
 
-    p_undel = sub.add_parser("undelete-note", help="移除墓碑，讓下次匯入可匯回")
+    p_undel = sub.add_parser(
+        "undelete-note", help="取消刪除（有快照則還原內容，舊墓碑只移除墓碑）"
+    )
     p_undel.add_argument("--id", required=True, dest="note_id", help="note id")
     p_undel.add_argument("--yes", action="store_true", help="真的移除（預設 dry-run）")
     return parser
@@ -209,7 +213,8 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> 
             return 1
         if args.command == "undelete-note":
             if args.yes:
-                grave = admin.undelete_note(conn, args.note_id)
+                restored = admin.restore_note(conn, args.note_id)
+                grave = {**restored["tombstone"], "restored": restored["restored"]}
             else:
                 grave = admin.find_tombstone(conn, args.note_id)
             result = {"mode": "undeleted" if args.yes else "dry_run", **grave}

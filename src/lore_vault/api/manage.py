@@ -477,16 +477,36 @@ def tombstones(request: Request, req: TombstonesRequest) -> dict[str, Any]:
 
 @router.post("/note_undelete")
 def note_undelete(request: Request, req: UndeleteRequest) -> dict[str, Any]:
-    """沿用 CLI `undelete-note`：只移除墓碑，note 內容**不會**回來；有匯入來源的
-    note 在下次重跑匯入時匯回（`reimportable`），其餘移除墓碑後即無從復原。"""
-    with _state(request).connection() as conn:
+    """取消刪除 note（同 CLI `undelete-note --yes`）。
+
+    - 墓碑有內容快照（v12 起刪除的）：以原 id 與原內容還原，`restored: true`，
+      `note` 附還原後的 metadata；FTS 同交易重建，向量由背景補算（喚醒 worker）。
+      所屬 vault 已刪除 → 409 `not_restorable`（reason `vault_deleted`），墓碑保留
+    - 舊墓碑（v12 前，無快照）：維持舊行為，只移除墓碑、內容**不會**回來
+      （`restored: false`）；有匯入來源的在下次重跑匯入時匯回（`reimportable`）
+    """
+    state = _state(request)
+    with state.connection() as conn:
         with transaction(conn):
             store.note_tombstone_in_space(conn, req.id, space=req.space)
-            grave = admin.undelete_note(conn, req.id)
+            result = admin.restore_note(conn, req.id, space=req.space)
+    grave = result["tombstone"]
+    note = result["note"]
+    if result["restored"]:
+        state.wake_worker()
     return {
         "undeleted": grave,
-        "restored": False,
-        "reimportable": grave["source"] is not None,
+        "restored": result["restored"],
+        "reimportable": not result["restored"] and grave["source"] is not None,
+        "note": None
+        if note is None
+        else {
+            "id": note.id,
+            "vault": note.vault,
+            "title": note.title,
+            "author": note.author,
+            "updated": note.updated,
+        },
     }
 
 

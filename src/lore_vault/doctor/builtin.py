@@ -195,6 +195,14 @@ def tombstones_disjoint(ctx: DoctorContext) -> CheckResult:
     return _to_result(storage_manage.tombstones_disjoint(ctx.require("db")))
 
 
+def notes_attribution(ctx: DoctorContext) -> CheckResult:
+    return _to_result(storage_manage.note_attribution(ctx.require("db")))
+
+
+def tombstones_note_snapshots(ctx: DoctorContext) -> CheckResult:
+    return _to_result(storage_manage.tombstone_snapshots(ctx.require("db")))
+
+
 def default_registry() -> Registry:
     registry = Registry()
     registry.add(
@@ -372,6 +380,22 @@ def default_registry() -> Registry:
             "tombstones",
             tombstones_disjoint,
             "note／文件墓碑與現行表沒有重複 id（undelete 須同交易刪墓碑）",
+        )
+    )
+    registry.add(
+        Check(
+            "tombstones.note_snapshots",
+            "tombstones",
+            tombstones_note_snapshots,
+            "note 墓碑的內容快照可解析、id 相符、還原必要欄位齊全",
+        )
+    )
+    registry.add(
+        Check(
+            "notes.attribution",
+            "notes",
+            notes_attribution,
+            "每則 note 都有 principal 與 updated_by_principal（A22）",
         )
     )
     for name, func, description in (

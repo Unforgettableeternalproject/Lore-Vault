@@ -23,7 +23,7 @@ from typing import Any
 
 from lore_vault.documents import service as document_service
 from lore_vault.recall.embedder import REASON_UNAVAILABLE, Embedder, embed_text
-from lore_vault.schema import Note
+from lore_vault.schema import Note, validate_author
 from lore_vault.schema.chars import check_fields
 from lore_vault.storage import fts, vectors
 from lore_vault.storage.db import transaction
@@ -105,6 +105,12 @@ def _norm_title(title: str) -> str:
     return _WHITESPACE.sub(" ", title).strip().casefold()
 
 
+def _check_principal(principal: object) -> None:
+    """principal 由服務依憑證決定；缺少代表呼叫路徑漏接認證結果，是程式錯誤。"""
+    if not isinstance(principal, str) or not principal.strip():
+        raise TypeError("principal 必填（由服務依憑證判定，不可由請求指定）")
+
+
 def _str_list(name: str, values: Sequence[str]) -> tuple[str, ...]:
     if isinstance(values, str):
         raise TypeError(f"{name} 必須是清單，不可傳單一字串")
@@ -148,6 +154,8 @@ class WriteResult:
             "id": self.note.id,
             "vault": self.note.vault,
             "updated": self.note.updated,
+            "author": self.note.author,
+            "principal": self.note.principal,
             "duplicates": [d.to_dict() for d in self.duplicates],
             "dedup_degraded": self.dedup_degraded,
             "dedup_reason": self.dedup_reason,
@@ -229,6 +237,8 @@ def write(
     body: str,
     *,
     space: str,
+    principal: str,
+    author: str | None = None,
     topics: Sequence[str] = (),
     links: Sequence[str] = (),
     supersedes: str | None = None,
@@ -247,7 +257,12 @@ def write(
     - `supersedes` 必須是同一 vault 內存在的 note；它本身不列入疑似重複
     - 任一欄位含控制字元（tab、LF、CR 以外的 C0）或孤立 surrogate：拋
       `InvalidCharacters`，不寫入
+    - 作者（A22）：`principal` 由呼叫端依憑證決定（HTTP 層取自認證結果，不可來自
+      請求）；`author` 是寫入者自報名，未填存 None、不代填（規則見
+      `schema.validate_author`）。建立時 `updated_by` 同 `author`
     """
+    _check_principal(principal)
+    author = validate_author(author)
     topics = _str_list("topics", topics)
     links = _str_list("links", links)
     # 查重會把 title／body 組成 FTS 查詢，禁用字元要在那之前擋下
@@ -288,6 +303,10 @@ def write(
         topics=topics,
         links=links,
         supersedes=supersedes,
+        author=author,
+        principal=principal,
+        updated_by=author,
+        updated_by_principal=principal,
     )
     stored = insert_note(conn, key, note, space=space)
     return WriteResult(stored, duplicates, reason is not None, reason)
@@ -309,6 +328,9 @@ class UpdateResult:
             "id": self.note.id,
             "vault": self.note.vault,
             "updated": self.note.updated,
+            "author": self.note.author,
+            "updated_by": self.note.updated_by,
+            "updated_by_principal": self.note.updated_by_principal,
             "summary_stale": self.summary_stale,
             "embedding_stale": self.embedding_stale,
         }
@@ -324,6 +346,8 @@ def update(
     expected_updated: str,
     *,
     space: str,
+    principal: str,
+    author: str | None = None,
     title: str | None = None,
     body: str | None = None,
     topics: Sequence[str] | None = None,
@@ -335,7 +359,11 @@ def update(
     （附目前版本），不寫入任何東西。
 
     版本比對只在 `storage.notes.update_note_if` 一處（同一交易內）。
+    `author` 是這次修改者的自報名：寫進 `updated_by`（未填存 None，不沿用上一位），
+    `principal` 寫進 `updated_by_principal`；原作者 `author` 不變。
     """
+    _check_principal(principal)
+    author = validate_author(author)
     if not isinstance(expected_updated, str) or not expected_updated:
         raise ValueError("expected_updated 必填（取自 get／write 回傳的 updated）")
     changes: dict[str, Any] = {}
@@ -363,7 +391,14 @@ def update(
         if body_changed:
             changes["summary"] = None
         updated = update_note_if(
-            conn, key, note_id, expected_updated, changes, space=space, now=now
+            conn,
+            key,
+            note_id,
+            expected_updated,
+            changes,
+            space=space,
+            now=now,
+            editor=(author, principal),
         )
         if updated is None:
             raise VersionConflict(
@@ -474,6 +509,10 @@ def get(
                 "topics": list(note.topics),
                 "links": list(note.links),
                 "supersedes": note.supersedes,
+                "author": note.author,
+                "principal": note.principal,
+                "updated_by": note.updated_by,
+                "updated_by_principal": note.updated_by_principal,
                 "created": note.created,
                 "updated": note.updated,
             }
@@ -596,6 +635,8 @@ def list_(
                     "vault": n.vault,
                     "title": n.title,
                     "topics": list(n.topics),
+                    "author": n.author,
+                    "updated_by": n.updated_by,
                     "updated": n.updated,
                 },
             )

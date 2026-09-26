@@ -458,6 +458,40 @@ def _v11(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+# 作者契約與可復原的 note 刪除（v12，A22）：
+# - notes.author：寫入者自報的名稱（未填 NULL，不代填）；principal：服務依憑證判定
+#   的主體；updated_by／updated_by_principal：最後一次寫入者。可為 NULL 且不設
+#   DEFAULT：漏設 principal 的寫入路徑不會被默默記成某人，由儲存層拒收、doctor
+#   `notes.attribution` 對帳
+# - 回填：principal 一律 'xavier'（v12 前唯一的憑證）；舊 PM 匯入成功的 note（對帳
+#   清單 imported_updated 非 NULL）author／updated_by 標 'legacy'，其餘 author 維持
+#   NULL。清單有列但 imported_updated 為 NULL 的是「id 已存在但非本工具匯入」，不算
+# - note_tombstones.snapshot：刪除當下 note 的完整內容（JSON），undelete 據此還原原 id；
+#   v12 前的舊墓碑為 NULL，維持「只移除墓碑」的舊行為
+_V12_STATEMENTS: tuple[str, ...] = (
+    "ALTER TABLE notes ADD COLUMN author TEXT",
+    "ALTER TABLE notes ADD COLUMN principal TEXT",
+    "ALTER TABLE notes ADD COLUMN updated_by TEXT",
+    "ALTER TABLE notes ADD COLUMN updated_by_principal TEXT",
+    "UPDATE notes SET principal = 'xavier', updated_by_principal = 'xavier'",
+    """
+    UPDATE notes SET author = 'legacy', updated_by = 'legacy'
+    WHERE id IN (
+        SELECT note_id FROM import_sources WHERE imported_updated IS NOT NULL
+    )
+    """,
+    """
+    ALTER TABLE note_tombstones ADD COLUMN snapshot TEXT
+        CHECK (snapshot IS NULL OR json_valid(snapshot))
+    """,
+)
+
+
+def _v12(conn: sqlite3.Connection) -> None:
+    for statement in _V12_STATEMENTS:
+        conn.execute(statement)
+
+
 # 有序遷移：索引 i 的函式把版本從 i 升到 i+1。只能往後加，不可改動已發佈的項目。
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _v1,
@@ -471,6 +505,7 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _v9,
     _v10,
     _v11,
+    _v12,
 )
 
 SCHEMA_VERSION = len(MIGRATIONS)

@@ -60,7 +60,11 @@ async def seeded(app, db_path, snapshot_dir):
     async with session(shell) as client:
         s = Session(client)
         notes[VAULT_A] = await s.ok(
-            "write", vault=VAULT_A, title="記憶快照 A", body="甲專案的記憶內容"
+            "write",
+            vault=VAULT_A,
+            title="記憶快照 A",
+            body="甲專案的記憶內容",
+            author="Minka",
         )
         notes[VAULT_B] = await s.ok(
             "write", vault=VAULT_B, title="記憶快照 B", body="乙專案的記憶內容"
@@ -85,6 +89,9 @@ async def test_reads_degrade_writes_fail(seeded, snapshot_dir, project, cause):
         got = await s.ok("get", vault=VAULT_A, ids=[seeded[VAULT_A]["id"]])
         assert got["degraded"] is True
         assert got["items"][0]["body"] == "甲專案的記憶內容"
+        # 快照帶作者欄位（A22）
+        assert got["items"][0]["author"] == "Minka"
+        assert recalled["items"][0]["author"] == "Minka"
 
         listed = await s.ok("list", vault=VAULT_A)
         assert listed["degraded"] is True

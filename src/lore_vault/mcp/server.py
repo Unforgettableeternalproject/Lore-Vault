@@ -131,6 +131,12 @@ _HINTS = {
 }
 
 
+AUTHOR_FIELD_DESCRIPTION = (
+    "你自己的角色名（例如 Minka；子代理用各自的名稱），單行、最多 64 字。"
+    "不可代填別人的名字，也不可填 legacy；省略記為未具名"
+)
+
+
 def _tool_error(
     code: str,
     message: str,
@@ -580,7 +586,9 @@ class Shell:
         topics: list[str] | None = None,
         links: list[str] | None = None,
         supersedes: str | None = None,
+        author: str | None = None,
     ) -> dict[str, Any]:
+        # principal 不從殼送：服務依憑證判定（A22）
         payload = _compact(
             vault=vault,
             title=title,
@@ -588,6 +596,7 @@ class Shell:
             topics=topics,
             links=links,
             supersedes=supersedes,
+            author=author,
         )
         try:
             return await self._post("/v1/write", payload)
@@ -604,6 +613,7 @@ class Shell:
         topics: list[str] | None = None,
         links: list[str] | None = None,
         supersedes: str | None = None,
+        author: str | None = None,
     ) -> dict[str, Any]:
         payload = _compact(
             vault=vault,
@@ -613,6 +623,7 @@ class Shell:
             body=body,
             topics=topics,
             links=links,
+            author=author,
         )
         if supersedes is not None:
             # 空字串 = 清除更正關係（服務端以 null 表示）
@@ -864,8 +875,16 @@ def build_server(shell: Shell) -> MCPServer:
         supersedes: Annotated[
             str | None, Field(description="此 note 取代的舊 note id")
         ] = None,
+        author: Annotated[
+            str | None,
+            Field(description=AUTHOR_FIELD_DESCRIPTION),
+        ] = None,
     ) -> str:
-        return _dump(await shell.write(vault, title, body, topics, links, supersedes))
+        return _dump(
+            await shell.write(
+                vault, title, body, topics, links, supersedes, author=author
+            )
+        )
 
     async def update(
         vault: Annotated[str, Field(description="vault key（單一 vault）")],
@@ -885,10 +904,22 @@ def build_server(shell: Shell) -> MCPServer:
         supersedes: Annotated[
             str | None, Field(description="取代的舊 note id；空字串 = 清除")
         ] = None,
+        author: Annotated[
+            str | None,
+            Field(description=AUTHOR_FIELD_DESCRIPTION + "（記為最後修改者）"),
+        ] = None,
     ) -> str:
         return _dump(
             await shell.update(
-                vault, id, expected_updated, title, body, topics, links, supersedes
+                vault,
+                id,
+                expected_updated,
+                title,
+                body,
+                topics,
+                links,
+                supersedes,
+                author=author,
             )
         )
 
@@ -948,11 +979,14 @@ def build_server(shell: Shell) -> MCPServer:
         ),
         "write": (
             "寫入新的 note。回傳 id 與疑似重複清單（duplicates）；若與既有 note 重複，"
-            "改用 update 修正原 note，不要另建更正篇。服務不可達時直接失敗。"
+            "改用 update 修正原 note，不要另建更正篇。author 請填你自己的角色名"
+            "（例如 Minka；子代理用各自的名稱），不要填別人的名字；不確定就省略"
+            "（記為未具名）。服務不可達時直接失敗。"
         ),
         "update": (
             "修改既有 note；必須帶讀到的 expected_updated。版本衝突時錯誤內附 "
-            "current（目前版本），確認後以 current.updated 重試。服務不可達時直接失敗。"
+            "current（目前版本），確認後以 current.updated 重試。author 填你自己的"
+            "角色名（記為最後修改者，原作者不變）。服務不可達時直接失敗。"
         ),
         "upload": (
             "上傳本機文件（md、txt、程式碼、json、yaml、toml、pdf、docx、pptx；單檔 "

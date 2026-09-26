@@ -120,6 +120,7 @@ def add_note(conn, embedder):
             conn,
             vault,
             Note(
+                principal="xavier",
                 id=note_id,
                 vault=vault,
                 title=title,

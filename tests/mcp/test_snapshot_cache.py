@@ -34,7 +34,7 @@ def seeded(db_path):
     try:
         ids = [
             notes_service.write(
-                conn, VAULT, f"記憶 {i}", f"內容 {i}", space="dev"
+                conn, VAULT, f"記憶 {i}", f"內容 {i}", space="dev", principal="xavier"
             ).note.id
             for i in range(3)
         ]
@@ -82,12 +82,20 @@ async def test_etag_and_304(app, seeded):
 
 def _mutations():
     def write(conn, ids):
-        notes_service.write(conn, VAULT, "新的", "新內容", space="dev")
+        notes_service.write(
+            conn, VAULT, "新的", "新內容", space="dev", principal="xavier"
+        )
 
     def update_title(conn, ids):
         note = notes_service.get(conn, VAULT, [ids[0]], space="dev").items[0]
         notes_service.update(
-            conn, VAULT, ids[0], note["updated"], space="dev", title="改標題"
+            conn,
+            VAULT,
+            ids[0],
+            note["updated"],
+            space="dev",
+            principal="xavier",
+            title="改標題",
         )
 
     def summary_only(conn, ids):
@@ -102,7 +110,9 @@ def _mutations():
     def delete_then_write(conn, ids):
         # 筆數不變
         delete_note(conn, VAULT, ids[2], space="dev")
-        notes_service.write(conn, VAULT, "替代", "替代內容", space="dev")
+        notes_service.write(
+            conn, VAULT, "替代", "替代內容", space="dev", principal="xavier"
+        )
 
     def add_alias(conn, ids):
         upsert_vault(

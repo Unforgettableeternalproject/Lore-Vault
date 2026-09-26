@@ -30,7 +30,8 @@ UPDATABLE_FIELDS = frozenset(
 _EMBEDDING_FIELDS = frozenset({"title", "body"})
 
 
-def _row_to_note(row: sqlite3.Row) -> Note:
+def note_from_row(row: sqlite3.Row) -> Note:
+    """notes 表的一列 → Note（含作者欄位）。"""
     return Note(
         id=row["id"],
         vault=row["vault"],
@@ -42,7 +43,14 @@ def _row_to_note(row: sqlite3.Row) -> Note:
         supersedes=row["supersedes"],
         created=row["created"],
         updated=row["updated"],
+        author=row["author"],
+        principal=row["principal"],
+        updated_by=row["updated_by"],
+        updated_by_principal=row["updated_by_principal"],
     )
+
+
+_row_to_note = note_from_row
 
 
 def _note_text_fields(note: Note) -> dict[str, object]:
@@ -54,6 +62,8 @@ def _note_text_fields(note: Note) -> dict[str, object]:
         "topics": note.topics,
         "links": note.links,
         "supersedes": note.supersedes,
+        "author": note.author,
+        "updated_by": note.updated_by,
     }
 
 
@@ -74,8 +84,11 @@ def insert_note(
     `vault` 參數必填且必須與 `note.vault` 指向同一個 vault（別名會解析成現行 key）。
     含控制字元或孤立 surrogate 的欄位拋 `InvalidCharacters`（所有寫入路徑的最底層防線；
     匯入工具要先清理）。
+    `note.principal` 必填（A22：每則 note 都要能追到憑證主體；缺少拋 `SchemaError`）。
     """
     check_fields(_note_text_fields(note))
+    if note.principal is None:
+        raise SchemaError("note.principal 必填（由服務依憑證判定）")
     with transaction(conn):
         key = resolve_write(conn, vault, space=space)
         _check_vault_matches(conn, key, note, space)
@@ -92,8 +105,9 @@ def insert_note(
         cursor = conn.execute(
             """
             INSERT INTO notes (id, vault, title, summary, body, topics, links,
-                               supersedes, created, updated)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                               supersedes, created, updated, author, principal,
+                               updated_by, updated_by_principal)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 stored.id,
@@ -106,6 +120,10 @@ def insert_note(
                 stored.supersedes,
                 stored.created,
                 stored.updated,
+                stored.author,
+                stored.principal,
+                stored.updated_by,
+                stored.updated_by_principal,
             ),
         )
         seq = cursor.lastrowid
@@ -210,6 +228,7 @@ def update_note_if(
     *,
     space: str,
     now: str | None = None,
+    editor: tuple[str | None, str] | None = None,
 ) -> Note | None:
     """條件更新原語（樂觀鎖）：只有資料庫中的 `updated` 字串與
     `expected_updated` 完全相同才寫入。
@@ -219,6 +238,9 @@ def update_note_if(
     - note 不在該 vault：拋 `NotFound`
     - 變動欄位含控制字元或孤立 surrogate：拋 `InvalidCharacters`，不寫入
     title／body 變動時同一交易內刪除舊 embedding。
+    `editor`：(自報名或 None, principal)，寫入 `updated_by`／`updated_by_principal`
+    （A22；自報名 None 就記 None，不沿用上一位）。省略＝作者欄位不動，只給不代表
+    任何寫入者的內部呼叫用；服務層與匯入一律傳入。
     """
     unknown = sorted(set(changes) - UPDATABLE_FIELDS)
     if unknown:
@@ -235,13 +257,22 @@ def update_note_if(
             return None
         current = _row_to_note(row)
         # 透過 dataclass 重新驗證（空標題、非字串 topics 等在這裡擋下）
+        attribution: dict[str, Any] = {}
+        if editor is not None:
+            by, by_principal = editor
+            check_fields({"updated_by": by})
+            attribution = {"updated_by": by, "updated_by_principal": by_principal}
         updated = dataclasses.replace(
-            current, **changes, updated=next_after(current.updated, now)
+            current,
+            **changes,
+            **attribution,
+            updated=next_after(current.updated, now),
         )
         cursor = conn.execute(
             """
             UPDATE notes SET title = ?, summary = ?, body = ?, topics = ?, links = ?,
-                             supersedes = ?, updated = ?
+                             supersedes = ?, updated = ?, updated_by = ?,
+                             updated_by_principal = ?
             WHERE seq = ? AND updated = ?
             """,
             (
@@ -252,6 +283,8 @@ def update_note_if(
                 json.dumps(list(updated.links), ensure_ascii=False),
                 updated.supersedes,
                 updated.updated,
+                updated.updated_by,
+                updated.updated_by_principal,
                 row["seq"],
                 expected_updated,
             ),

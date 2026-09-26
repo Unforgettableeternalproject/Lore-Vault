@@ -142,6 +142,7 @@ def test_recall_returns_index_without_body(client, db_path, seeded):
         "summary_source",
         "score",
         "updated",
+        "author",
     }
     assert data["degraded"] is False
     assert set(data["legs"]) == {"lexical", "vector"}

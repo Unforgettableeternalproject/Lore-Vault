@@ -8,6 +8,10 @@
 `POST /v1/status`（純健康檢查）與 `GET /v1/snapshot`（整庫唯讀副本，由殼端依
 目前 space 過濾）。
 
+作者（A22）：`write`／`update` 接受 `author`（寫入者自報名，未填存 null、不代填）；
+`principal` 由認證中介層依憑證判定（`api.principals`），body 帶 `principal` 與其他
+未知欄位一樣 422 拒絕。
+
 `POST /v1/documents`（T-67）是唯一的 multipart 端點：欄位 `file`、`vault`、`space`
 （必填）、`filename?`、`mime?`；大小上限在讀取 body 時就擋（413 `too_large`）。
 """
@@ -52,6 +56,7 @@ from lore_vault.storage.vaults import (
 )
 
 from .errors import DocumentsNotConfigured, PayloadTooLarge, VaultExists
+from .principals import principal_of
 from .state import AppState
 
 router = APIRouter(prefix="/v1")
@@ -113,6 +118,8 @@ class WriteRequest(_ScopedReq):
     vault: str | None = None
     title: str
     body: str
+    # 寫入者自報名（agent 角色名、UI 的 `Xavier (Bernie)`）；未填為 null
+    author: str | None = None
     topics: list[str] = Field(default_factory=list)
     links: list[str] = Field(default_factory=list)
     supersedes: str | None = None
@@ -122,6 +129,8 @@ class UpdateRequest(_ScopedReq):
     vault: str | None = None
     id: str
     expected_updated: str
+    # 這次修改者的自報名，寫進 updated_by（未填為 null，不沿用上一位）
+    author: str | None = None
     title: str | None = None
     body: str | None = None
     topics: list[str] | None = None
@@ -263,6 +272,8 @@ def write(request: Request, req: WriteRequest) -> dict[str, Any]:
             req.title,
             req.body,
             space=req.space,  # type: ignore[arg-type]
+            principal=principal_of(request),
+            author=req.author,
             topics=req.topics,
             links=req.links,
             supersedes=req.supersedes,
@@ -286,6 +297,8 @@ def update(request: Request, req: UpdateRequest) -> dict[str, Any]:
             req.id,
             req.expected_updated,
             space=req.space,  # type: ignore[arg-type]
+            principal=principal_of(request),
+            author=req.author,
             title=req.title,
             body=req.body,
             topics=req.topics,

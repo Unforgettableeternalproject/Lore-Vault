@@ -186,6 +186,7 @@ def test_should_stop_aborts_mid_batch(tmp_path):
                 conn,
                 "folder/s",
                 Note(
+                    principal="xavier",
                     id=f"n{i}",
                     vault="folder/s",
                     title=f"t{i}",

@@ -259,6 +259,63 @@ def test_move_space_requires_formal_key_in_space(client):
         assert resp.status_code == 404 and code(resp) == "unknown_vault"
 
 
+def test_move_space_plan_changed_after_new_note(client):
+    """規劃後 vault 內多了一則 note：引用筆數變了，確認時 409 plan_changed、不搬。"""
+    _lore_vault(client)
+    write_note(client, LORE, "一", "內容", space="lore")
+    body = {"space": "lore", "key": LORE, "to_space": "personal"}
+    planned = ok(post(client, "/v1/vault_move_space", **body))
+    assert planned["plan"]["counts"]["notes.vault"] == 1
+    write_note(client, LORE, "二", "規劃後新增", space="lore")
+    resp = post(
+        client, "/v1/vault_move_space", **body, confirm_token=planned["confirm_token"]
+    )
+    assert resp.status_code == 409 and code(resp) == "plan_changed"
+    assert resp.json()["error"]["plan"]["counts"]["notes.vault"] == 2
+    # 沒有搬：仍在 lore、兩則都在
+    got = ok(post(client, "/v1/vault_resolve", key=LORE, space="lore"))
+    assert got["note_count"] == 2
+    assert (
+        post(client, "/v1/vault_resolve", key="personal/world", space="personal")
+    ).status_code == 404
+
+
+def test_move_space_new_key_conflict(client):
+    """目標 key（預設換前綴或指定 new_key）已被佔用：規劃階段就 409，不發 token。"""
+    _lore_vault(client)
+    client.post(
+        "/v1/vaults",
+        json={"key": "personal/world", "display": "占用", "space": "personal"},
+    ).raise_for_status()
+    client.post(
+        "/v1/vaults",
+        json={
+            "key": "personal/other",
+            "display": "別名占用",
+            "space": "personal",
+            "aliases": ["personal/taken"],
+        },
+    ).raise_for_status()
+    for extra in ({}, {"new_key": "personal/taken"}):
+        resp = post(
+            client,
+            "/v1/vault_move_space",
+            space="lore",
+            key=LORE,
+            to_space="personal",
+            **extra,
+        )
+        assert resp.status_code == 409 and code(resp) == "vault_conflict"
+        assert "confirm_token" not in resp.text
+    assert ok(post(client, "/v1/vault_resolve", key=LORE, space="lore"))["key"] == LORE
+
+
+def test_move_space_same_space_is_refused(client):
+    _lore_vault(client)
+    resp = post(client, "/v1/vault_move_space", space="lore", key=LORE, to_space="lore")
+    assert resp.status_code == 400 and code(resp) == "space_change_refused"
+
+
 # ── 兩段式確認：竄改、過期、資料變動、誤用 ──
 
 
@@ -372,10 +429,19 @@ def test_note_delete_tombstone_and_undelete(client):
         ("note", note["id"], "測試")
     ]
     assert stones["items"][0]["reimportable"] is False
+    # v12 起墓碑有內容快照：可還原，列表帶標題供辨識
+    assert stones["items"][0]["restorable"] is True
+    assert stones["items"][0]["title"] == "要刪"
     assert doctor_fails(client) == []
     data = ok(post(client, "/v1/note_undelete", space="dev", id=note["id"]))
-    assert data["restored"] is False and data["undeleted"]["note_id"] == note["id"]
+    assert data["restored"] is True and data["undeleted"]["note_id"] == note["id"]
+    assert data["reimportable"] is False
+    assert data["note"]["id"] == note["id"] and data["note"]["title"] == "要刪"
     assert ok(post(client, "/v1/tombstones", space="dev", vault=DEV))["items"] == []
+    assert [i["id"] for i in ok(post(client, "/v1/list", vault=DEV))["items"]] == [
+        note["id"]
+    ]
+    assert doctor_fails(client) == []
     resp = post(client, "/v1/note_undelete", space="dev", id=note["id"])
     assert resp.status_code == 404
 
