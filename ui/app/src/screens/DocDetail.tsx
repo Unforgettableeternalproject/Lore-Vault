@@ -2,7 +2,7 @@
 // 從檢索跳進來（?chunk=<idx>&q=）時捲到並標示該段。非 ready 的文件只顯示狀態、失敗原因與重試。
 import { useEffect, useRef, useState } from 'preact/hooks';
 
-import { Banner, ErrorState, Loading } from '../components/ui';
+import { Banner, EmptyState, ErrorState, Loading } from '../components/ui';
 import { useApp } from '../lib/context';
 import {
   describeError,
@@ -226,11 +226,9 @@ export function DocDetail({ id, chunk, fromQuery }: { id: string; chunk: number 
         </Banner>
       )}
       {isProcessing(doc) && (
-        <div class="zone-state" role="status">
-          {st.label}：抽取完成後會自動顯示段落。
-        </div>
+        <EmptyState title={`${st.label}…`}>抽取完成後會自動顯示段落。</EmptyState>
       )}
-      {ready && count === 0 && <div class="zone-state">這份文件沒有段落。</div>}
+      {ready && count === 0 && <EmptyState title="這份文件沒有段落">抽取完成但沒有取出任何文字段落。</EmptyState>}
 
       {chunkError !== null && <ErrorState error={chunkError} onRetry={() => setTick((t) => t + 1)} />}
       {ready && count > 0 && !chunks && chunkError === null && <Loading label="載入段落…" />}

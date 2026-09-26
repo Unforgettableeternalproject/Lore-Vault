@@ -3,7 +3,7 @@
 // 覆寫＝二次確認後以目前版本的 updated 重送，放棄＝不重送、顯示目前版本。
 import { useEffect, useState } from 'preact/hooks';
 
-import { Banner, Dialog, ErrorState, Loading, SourceTag, TwoPhaseDelete } from '../components/ui';
+import { Banner, Dialog, EmptyState, ErrorState, Loading, SourceTag, TwoPhaseDelete } from '../components/ui';
 import { ApiError } from '../lib/api';
 import { useApp } from '../lib/context';
 import { diffLines, hasConflictMarkers, mergeDraft } from '../lib/diff';
@@ -583,7 +583,7 @@ export function NoteDetail({ id }: { id: string }) {
         </div>
         <div class="lv-side-block">
           <div class="lv-side-block__label">互連 · {note.links.length}</div>
-          {note.links.length === 0 && <p class="lv-muted lv-small">沒有已解析的互連。</p>}
+          {note.links.length === 0 && <EmptyState size="sm" title="沒有已解析的互連" />}
           <ul class="lv-side-list">
             {note.links.map((lid) =>
               links.titles[lid] ? (

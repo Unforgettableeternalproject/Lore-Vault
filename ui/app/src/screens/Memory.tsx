@@ -7,6 +7,7 @@ import { Badge, EmptyState, ErrorState, Loading } from '../components/ui';
 import { VaultPicker } from '../components/VaultPicker';
 import { ALL, useApp, vaultName } from '../lib/context';
 import { formatTime, isAbort } from '../lib/format';
+import { routePath } from '../lib/router';
 import { formatAge, hoursSince } from '../lib/health';
 import type { ConceptItem, ConceptPage, EpisodeGroup, EpisodeSummary } from '../lib/types';
 
@@ -25,16 +26,23 @@ const SCOPE_STATES = [
 ] as const;
 
 export function Memory() {
-  const { space } = useApp();
+  const { space, switchSpace } = useApp();
   return (
     <section class="lv-screen lv-screen--wide">
       <div class="lv-eyebrow">MEMORY LAYER · 唯讀 · {space.en}</div>
       <h1 class="lv-title">記憶層</h1>
       {space.id !== 'dev' ? (
-        <div class="zone-state" role="status" data-testid="memory-dev-only">
-          記憶層（concept 與收料 episode）只屬於 dev space：它們從 coding agent 的對話蒸餾而來、綁定 repo。{space.en}{' '}
-          space 沒有記憶層，請切換到 DEV 檢視。
-        </div>
+        <EmptyState
+          testId="memory-dev-only"
+          title={`${space.en} space 沒有記憶層`}
+          action={
+            <button type="button" class="btn-outline btn-outline--gold" onClick={() => switchSpace('dev', routePath('memory'))}>
+              切換到 DEV 檢視
+            </button>
+          }
+        >
+          記憶層（concept 與收料 episode）只屬於 dev space：它們從 coding agent 的對話蒸餾而來、綁定 repo。
+        </EmptyState>
       ) : (
         <>
           <p class="lv-section__desc">

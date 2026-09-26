@@ -402,9 +402,13 @@ describe('系統健康', () => {
 describe('記憶層', () => {
   it('非 dev space：顯示只屬於 dev 的說明，不查 concept', () => {
     const { api, calls } = makeApi({});
-    renderWithApp(<Memory />, api, { space: 'personal', vaults: [] });
-    expect(screen.getByTestId('memory-dev-only').textContent).toContain('只屬於 dev');
+    const { switchSpace } = renderWithApp(<Memory />, api, { space: 'personal', vaults: [] });
+    const empty = screen.getByTestId('memory-dev-only');
+    expect(empty.textContent).toContain('只屬於 dev');
+    expect(empty.className).toContain('lv-empty-state');
     expect(calls).toHaveLength(0);
+    fireEvent.click(screen.getByRole('button', { name: '切換到 DEV 檢視' }));
+    expect(switchSpace).toHaveBeenCalledWith('dev', '/ui/memory');
   });
 
   it('dev：依 kind／scope 篩選查 concept_query，只顯示 statement 與 metadata', async () => {

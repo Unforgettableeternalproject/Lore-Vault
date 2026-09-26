@@ -78,9 +78,17 @@ export function Maint({ vaultKey }: { vaultKey: string | null }) {
         {vaults.error ? (
           <ErrorState error={`vault 列表載入失敗：${vaults.error}`} />
         ) : (
-          <div class="zone-state" role="status" data-testid="maint-missing">
-            {space.en} space 沒有這個 vault（可能已刪除，或屬於其他 space）。已刪除 vault 的墓碑仍可在下方以原 key 查到。
-          </div>
+          <EmptyState
+            testId="maint-missing"
+            title={`${space.en} space 沒有這個 vault`}
+            action={
+              <button type="button" class="btn-outline" onClick={() => navigate(routePath('maint'))}>
+                回維護頁
+              </button>
+            }
+          >
+            可能已刪除，或屬於其他 space。已刪除 vault 的墓碑仍可在下方以原 key 查到。
+          </EmptyState>
         )}
         <TombstoneSection vault={vaultKey} />
       </section>
@@ -219,7 +227,11 @@ function AliasSection({ vault, onChanged }: { vault: VaultSummary; onChanged: (v
             </button>
           </li>
         ))}
-        {vault.aliases.length === 0 && <li class="lv-muted lv-small">尚無別名。</li>}
+        {vault.aliases.length === 0 && (
+          <li>
+            <EmptyState size="sm" title="尚無別名">repo 改名後，把新 key 加在下方就會導向這個 vault。</EmptyState>
+          </li>
+        )}
       </ul>
       <form class="lv-inline-form" onSubmit={(e) => void add(e)}>
         <input
