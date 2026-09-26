@@ -13,6 +13,7 @@
   --lv-info-text: #1d5fa8;
   --lv-zone-text: var(--accent-ink);
   --lv-focus: var(--accent-ink);
+  --lv-content-max: 1600px;
 }
 [data-theme='dark'] {
   --ink-mute: #9a9585;
@@ -307,7 +308,8 @@ button { font: inherit; }
 .lv-write-target__label { font-family: var(--font-mono); font-size: 9px; letter-spacing: .22em; color: var(--ink-mute); }
 .lv-write-target__value { margin-top: 6px; font-size: 13px; font-weight: 600; }
 .lv-main { padding: 40px 56px 80px; min-width: 0; }
-.lv-screen { max-width: 940px; }
+/* 主內容吃滿可用寬度；只在超寬螢幕設上限。正文的閱讀寬度由各檢視頁自己限制（.lv-detail__main、.lv-new__main） */
+.lv-screen { max-width: var(--lv-content-max); }
 .lv-placeholder { margin-top: 8px; }
 
 /* ── 共用小元件（T-79～T-81）──────────────────────────── */
@@ -324,6 +326,9 @@ button { font: inherit; }
 }
 .lv-muted { color: var(--ink-mute); }
 .lv-mono { font-family: var(--font-mono); font-size: 11px; }
+/* 橫向溢出的根因：vault key、錨點路徑等不含空白的長 mono 字串撐破容器。一律允許任意處斷行 */
+.lv-mono, .lv-code-tag, .lv-crumb, .lv-crumb__link, .lv-eyebrow { overflow-wrap: anywhere; min-width: 0; }
+.lv-crumb__link { text-align: left; }
 .lv-small { font-size: 11px; }
 .lv-upper { text-transform: uppercase; }
 .lv-spacer { flex: 1; }
@@ -338,7 +343,7 @@ button { font: inherit; }
   font-family: var(--font-mono); font-size: 10px; padding: 1px 5px; margin: 0 4px;
   border: 1px solid var(--line-strong); border-radius: 3px; color: var(--ink-soft);
 }
-.lv-screen--wide { max-width: 1100px; }
+.lv-screen--wide { max-width: var(--lv-content-max); }
 .lv-screen__head { display: flex; justify-content: space-between; align-items: flex-end; gap: 24px; flex-wrap: wrap; }
 .lv-title--tight { margin-bottom: 0; }
 .lv-hint--inline { margin: 8px 0 0; }
