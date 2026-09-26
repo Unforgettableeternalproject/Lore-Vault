@@ -11,6 +11,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from os import PathLike
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from lore_vault.config import (
     API_TOKEN_ENV,
@@ -25,11 +26,18 @@ from lore_vault.enrich.clients import Transport
 from lore_vault.enrich.worker import EnrichWorker
 from lore_vault.recall.embedder import Embedder
 
+if TYPE_CHECKING:
+    from lore_vault.documents.worker import DocumentWorker
+
 # token 最短長度：擋掉 "test"、"1234" 這類一看就猜得到的值
 MIN_TOKEN_LENGTH = 16
 
 # (背景執行緒自己的連線, should_stop) -> worker
 WorkerFactory = Callable[[sqlite3.Connection, Callable[[], bool]], EnrichWorker]
+# 文件 worker 的建構方式（同上；預設 documents.worker.build_document_worker）
+DocumentWorkerFactory = Callable[
+    [sqlite3.Connection, Callable[[], bool]], "DocumentWorker"
+]
 
 
 @dataclass(frozen=True)
@@ -54,12 +62,25 @@ class ApiSettings:
     embedding_warmup: bool | None = None
     # 快照快取目錄（`GET /v1/snapshot`）；None = 啟動後在系統暫存目錄建一個，關閉時刪除
     snapshot_cache_dir: Path | None = None
+    # 文件 worker 的建構方式（預設 documents.worker.build_document_worker）
+    document_worker_factory: DocumentWorkerFactory | None = None
+    # 覆寫 config.api.document_worker
+    document_worker: bool | None = None
 
     @property
     def run_worker(self) -> bool:
         if self.enrich_worker is not None:
             return self.enrich_worker
         return self.config.api.enrich_worker
+
+    @property
+    def run_document_worker(self) -> bool:
+        """blob_dir 未設定時文件功能整個關閉，worker 不啟動。"""
+        if not self.config.documents.blob_dir:
+            return False
+        if self.document_worker is not None:
+            return self.document_worker
+        return self.config.api.document_worker
 
     @property
     def run_warmup(self) -> bool:

@@ -1,7 +1,7 @@
 """HTTP 服務進入點：`uvicorn --factory lore_vault.api.app:create_app`。
 
 啟動順序（lifespan）：遷移資料庫 → 背景 embedding 暖機（不等它完成）→
-啟動背景補算 worker（可關閉）；
+啟動背景補算 worker 與文件 worker（各自可關閉；文件 worker 需 documents.blob_dir）；
 關閉時（uvicorn 收到 SIGTERM／SIGINT → lifespan 結束）停止 worker 並等它結束。
 token 缺少或不合格時 `create_app` 直接拋 `ConfigError`，服務不會啟動。
 """
@@ -60,11 +60,15 @@ def create_app(
         state.warmup.start()
         if state.enricher is not None:
             state.enricher.start()
+        if state.documents_worker is not None:
+            state.documents_worker.start()
         try:
             yield
         finally:
             if state.enricher is not None:
                 state.enricher.stop()
+            if state.documents_worker is not None:
+                state.documents_worker.stop()
             state.close()
 
     app = FastAPI(

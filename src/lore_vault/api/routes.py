@@ -7,6 +7,9 @@
 （服務端無狀態；「目前 space」由 MCP 殼持有並注入）。例外只有無 body 的
 `POST /v1/status`（純健康檢查）與 `GET /v1/snapshot`（整庫唯讀副本，由殼端依
 目前 space 過濾）。
+
+`POST /v1/documents`（T-67）是唯一的 multipart 端點：欄位 `file`、`vault`、`space`
+（必填）、`filename?`、`mime?`；大小上限在讀取 body 時就擋（413 `too_large`）。
 """
 
 from __future__ import annotations
@@ -16,17 +19,23 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Request, Response, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import UploadFile
+from starlette.formparsers import MultiPartException, MultiPartParser
 
 from lore_vault import notes as notes_service
 from lore_vault.doctor import DoctorContext, default_registry
 from lore_vault.doctor.builtin import DEFAULT_BACKLOG_MAX_AGE
+from lore_vault.documents import service as document_service
 from lore_vault.notes.service import DEFAULT_GET_BUDGET, DEFAULT_LIST_LIMIT
 from lore_vault.recall import recall as recall_service
 from lore_vault.recall.service import DEFAULT_BUDGET as RECALL_DEFAULT_BUDGET
 from lore_vault.recall.service import DEFAULT_LIMIT as RECALL_DEFAULT_LIMIT
 from lore_vault.recall.service import MODE_HYBRID
 from lore_vault.schema import Vault, canonical_key
+from lore_vault.storage import document_index as storage_document_index
 from lore_vault.storage import enrichment as storage_enrichment
 from lore_vault.storage import snapshot as storage_snapshot
 from lore_vault.storage.db import transaction
@@ -42,7 +51,7 @@ from lore_vault.storage.vaults import (
     validate_space,
 )
 
-from .errors import VaultExists
+from .errors import DocumentsNotConfigured, PayloadTooLarge, VaultExists
 from .state import AppState
 
 router = APIRouter(prefix="/v1")
@@ -97,6 +106,7 @@ class ListRequest(_ScopedReq):
     topics: list[str] | None = None
     cursor: str | None = None
     limit: int = DEFAULT_LIST_LIMIT
+    kinds: list[str] | None = None
 
 
 class WriteRequest(_ScopedReq):
@@ -238,6 +248,7 @@ def list_(request: Request, req: ListRequest) -> dict[str, Any]:
             topics=req.topics,
             cursor=req.cursor,
             limit=req.limit,
+            kinds=req.kinds,
         )
     return result.to_dict()
 
@@ -315,6 +326,11 @@ def status_(
                     # 未設定備份目錄時 backup.recent 記為 skipped
                     "backup_dir": state.settings.config.backup.dir,
                     "backup_max_age_hours": state.settings.config.backup.max_age_hours,
+                    # 未設定 blob_dir 時 blob 對帳記為 skipped
+                    "blob_dir": state.settings.config.documents.blob_dir,
+                    "documents_stuck_seconds": (
+                        state.settings.config.documents.stuck_seconds
+                    ),
                 },
                 resources={"db": conn},
             )
@@ -322,11 +338,17 @@ def status_(
         backlog = storage_enrichment.enrichment_backlog(
             conn, now=now, max_age_seconds=DEFAULT_BACKLOG_MAX_AGE
         )
+        doc_backlog = storage_document_index.backlog(
+            conn, now=now, max_age_seconds=DEFAULT_BACKLOG_MAX_AGE
+        )
         schema = {"version": current_version(conn), "expected": SCHEMA_VERSION}
     worker = state.worker_status()
+    doc_worker = state.documents_worker_status()
     return {
         # 同程序的 worker 起不來（fatal_error）也算不健康
-        "ok": report.ok and not worker.get("fatal_error"),
+        "ok": report.ok
+        and not worker.get("fatal_error")
+        and not doc_worker.get("fatal_error"),
         "checked_at": format_utc(now),
         "schema": schema,
         "space": space,
@@ -341,8 +363,104 @@ def status_(
                 "counts": dict(backlog.counts),
             },
         },
+        "documents": {
+            "enabled": bool(state.settings.config.documents.blob_dir),
+            "worker": doc_worker,
+            "backlog": {
+                "status": doc_backlog.status,
+                "summary": doc_backlog.summary,
+                "counts": dict(doc_backlog.counts),
+            },
+        },
         "doctor": report.to_dict(),
     }
+
+
+# ── 文件上傳（T-67）──
+
+# multipart 除了檔案本身以外的額外空間（邊界、表頭、vault／space 等欄位）
+MULTIPART_OVERHEAD = 64 * 1024
+UPLOAD_FIELDS = frozenset({"file", "vault", "space", "filename", "mime"})
+
+
+def _form_text(form: Any, name: str) -> str | None:
+    value = form.get(name)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"欄位 {name} 必須是文字")
+    return value
+
+
+@router.post("/documents")
+async def upload_document(request: Request) -> JSONResponse:
+    """multipart 上傳文件。同 vault 同內容回既有文件（200、`duplicate: true`），
+    其餘建列或重排抽取（201）；抽取在背景 worker，回應時 status 多為 pending。"""
+    state = _state(request)
+    docs = state.settings.config.documents
+    if not docs.blob_dir:
+        raise DocumentsNotConfigured(
+            "服務未設定 documents.blob_dir，不能收文件（見 docs/DEVELOPMENT.md）"
+        )
+    max_body = docs.max_file_bytes + MULTIPART_OVERHEAD
+    length = request.headers.get("content-length")
+    if length is not None and length.isdigit() and int(length) > max_body:
+        raise PayloadTooLarge(
+            f"請求 {length} 位元組，超過上限（檔案 {docs.max_file_bytes} 位元組）"
+        )
+    if not request.headers.get("content-type", "").startswith("multipart/form-data"):
+        raise ValueError("必須是 multipart/form-data（欄位 file、vault、space）")
+
+    async def limited() -> Any:
+        received = 0
+        async for chunk in request.stream():
+            received += len(chunk)
+            if received > max_body:
+                raise PayloadTooLarge(
+                    f"上傳內容超過上限（檔案 {docs.max_file_bytes} 位元組）"
+                )
+            yield chunk
+
+    parser = MultiPartParser(request.headers, limited(), max_files=1, max_fields=8)
+    try:
+        form = await parser.parse()
+    except MultiPartException as exc:
+        raise ValueError(f"multipart 格式錯誤：{exc.message}") from None
+    try:
+        unknown = sorted(set(form.keys()) - UPLOAD_FIELDS)
+        if unknown:
+            raise ValueError(f"未知的欄位：{unknown}；可用 {sorted(UPLOAD_FIELDS)}")
+        upload = form.get("file")
+        if not isinstance(upload, UploadFile):
+            raise ValueError("缺少檔案欄位 file")
+        data = await upload.read()
+        filename = _form_text(form, "filename") or upload.filename or ""
+        mime = _form_text(form, "mime") or upload.content_type
+        vault = _form_text(form, "vault")
+        space = _form_text(form, "space")
+    finally:
+        await form.close()
+
+    def run() -> Any:
+        with state.connection() as conn:
+            return document_service.upload(
+                conn,
+                state.blob_store(),
+                vault,  # type: ignore[arg-type]  # None → VaultRequired
+                data,
+                space=space,  # type: ignore[arg-type]  # None → SpaceRequired
+                filename=filename,
+                mime=mime,
+                max_bytes=docs.max_file_bytes,
+            )
+
+    result = await run_in_threadpool(run)
+    if not result.duplicate:
+        state.wake_documents()
+    return JSONResponse(
+        result.to_dict(),
+        status_code=status.HTTP_200_OK if result.duplicate else status.HTTP_201_CREATED,
+    )
 
 
 # ── 唯讀快照（T-31）──

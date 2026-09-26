@@ -378,6 +378,47 @@ def _v8(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+# 文件抽取 worker 與索引（T-63～T-67）：
+# - documents.encoding：文字類文件偵測到的編碼（utf-8／utf-8-sig／utf-16／cp950）；
+#   二進位格式與尚未抽取為 NULL
+# - document_chunks.overlap：本 chunk 開頭與前一個 chunk 重疊的字元數。
+#   `get(doc:…)` 串接全文時略過重疊段，才能還原原文而不重複
+# - document_enrichment.kind 加 'embedding'：chunk 向量補算的嘗試／失敗以文件為單位
+#   記錄（有上限重試）。STRICT 表無法改 CHECK，重建（沒有其他表參照它）
+_V9_STATEMENTS: tuple[str, ...] = (
+    "ALTER TABLE documents ADD COLUMN encoding TEXT",
+    """
+    ALTER TABLE document_chunks
+        ADD COLUMN overlap INTEGER NOT NULL DEFAULT 0 CHECK (overlap >= 0)
+    """,
+    """
+    CREATE TABLE document_enrichment_v9 (
+        document_id  TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+        kind         TEXT NOT NULL CHECK (kind IN ('extract', 'embedding')),
+        attempts     INTEGER NOT NULL CHECK (attempts >= 0),
+        status       TEXT NOT NULL CHECK (status IN ('pending', 'failed')),
+        last_error   TEXT,
+        last_attempt TEXT NOT NULL,
+        next_attempt TEXT NOT NULL,
+        PRIMARY KEY (document_id, kind)
+    ) STRICT
+    """,
+    """
+    INSERT INTO document_enrichment_v9
+    SELECT document_id, kind, attempts, status, last_error, last_attempt, next_attempt
+    FROM document_enrichment
+    """,
+    "DROP TABLE document_enrichment",
+    "ALTER TABLE document_enrichment_v9 RENAME TO document_enrichment",
+    "CREATE INDEX document_enrichment_status ON document_enrichment(kind, status)",
+)
+
+
+def _v9(conn: sqlite3.Connection) -> None:
+    for statement in _V9_STATEMENTS:
+        conn.execute(statement)
+
+
 # 有序遷移：索引 i 的函式把版本從 i 升到 i+1。只能往後加，不可改動已發佈的項目。
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _v1,
@@ -388,6 +429,7 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _v6,
     _v7,
     _v8,
+    _v9,
 )
 
 SCHEMA_VERSION = len(MIGRATIONS)

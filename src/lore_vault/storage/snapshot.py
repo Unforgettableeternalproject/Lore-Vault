@@ -6,6 +6,8 @@
   同一交易內跨表讀取落在同一個 WAL 讀取快照上，不會拿到半套寫入
 - 白名單而非「整庫複製再刪」：episode／concept／injection 含對話原文，新增資料表
   也不會因為忘了刪而被送到其他機器。向量不帶（降級只走 lexical，省下大半體積）
+- 文件（T-69）明確排除（`SNAPSHOT_EXCLUDED_TABLES`）：文件檢索只走線上服務，降級時
+  recall／get／list 把文件標成不支援而不是讀空表
 - 快照是單一檔（rollback journal，非 WAL），客戶端以 `mode=ro` 開啟
 
 客戶端：
@@ -42,6 +44,23 @@ SNAPSHOT_DB_NAME = "snapshot.db"
 MANIFEST_NAME = "snapshot.json"
 MEDIA_TYPE = "application/vnd.sqlite3"
 PARTIAL_SUFFIX = ".partial"
+
+# 快照複製的資料表（白名單；`build_snapshot` 只複製這些）
+SNAPSHOT_TABLES = ("vaults", "vault_aliases", "notes", "note_fts")
+# 明確不進快照的表（守門測試：這些表不可出現在白名單，快照裡必為空）
+SNAPSHOT_EXCLUDED_TABLES = (
+    "note_embeddings",
+    "note_enrichment",
+    "episodes",
+    "concepts",
+    "injections",
+    "documents",
+    "document_chunks",
+    "chunk_fts",
+    "document_chunk_embeddings",
+    "document_tombstones",
+    "document_enrichment",
+)
 
 # HTTP header（服務端回應 `GET /v1/snapshot` 時帶）
 HEADER_GENERATED_AT = "X-Lore-Vault-Snapshot-Generated-At"
@@ -189,6 +208,7 @@ def build_snapshot(
             )
             conn.execute("COMMIT")
             conn.execute("DETACH DATABASE src")
+            _assert_excluded_empty(conn)
             rows = [r[0] for r in conn.execute("PRAGMA integrity_check")]
             if rows != ["ok"]:
                 raise SnapshotError(f"快照 integrity_check 失敗：{rows[:5]}")
@@ -211,6 +231,19 @@ def build_snapshot(
         sha256=file_sha256(target),
         fingerprint=fingerprint,
     )
+
+
+def _assert_excluded_empty(conn: sqlite3.Connection) -> None:
+    """白名單以外的表在快照裡必須是空的（含文件，T-69）；否則拒絕產生快照。"""
+    leaked = []
+    for table in SNAPSHOT_EXCLUDED_TABLES:
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = ? AND type = 'table'", (table,)
+        ).fetchone()
+        if exists and conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]:
+            leaked.append(table)
+    if leaked:
+        raise SnapshotError(f"快照含不應帶出的資料表內容：{leaked}")
 
 
 def etag(sha256: str) -> str:

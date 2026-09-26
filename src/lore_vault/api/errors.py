@@ -12,6 +12,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from lore_vault.documents.service import UploadRejected
 from lore_vault.notes import InvalidCursor, NoChanges, VersionConflict
 from lore_vault.recall import UnsupportedKind
 from lore_vault.schema import InvalidCharacters
@@ -31,6 +32,14 @@ CREATE_VAULT_HINT = (
     "以 POST /v1/vaults 建立（key、display；key 由客戶端用 lore_vault.binding 算出），"
     "或確認 key 是否打錯；write 不會自動建立 vault"
 )
+
+
+class PayloadTooLarge(Exception):
+    """上傳超過大小上限（讀取 body 時就擋，不讀完整份）。"""
+
+
+class DocumentsNotConfigured(Exception):
+    """服務未設定 documents.blob_dir，文件功能關閉。"""
 
 
 class VaultExists(Exception):
@@ -117,6 +126,13 @@ def install_error_handlers(app: FastAPI) -> None:
             kind=exc.kind,
         )
 
+    async def upload_rejected(request: Request, exc: Exception) -> JSONResponse:
+        assert isinstance(exc, UploadRejected)
+        return _json(413 if exc.code == "too_large" else 400, exc.code, exc)
+
+    simple(PayloadTooLarge, 413, "too_large")
+    simple(DocumentsNotConfigured, 500, "documents_not_configured")
+    app.add_exception_handler(UploadRejected, upload_rejected)
     app.add_exception_handler(InvalidCharacters, invalid_characters)
     app.add_exception_handler(UnknownVault, unknown_vault)
     app.add_exception_handler(VersionConflict, version_conflict)

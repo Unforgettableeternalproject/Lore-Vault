@@ -22,11 +22,12 @@ EXPECTED = {
     "list",
     "write",
     "update",
+    "upload",
     "status",
 }
 
 
-async def test_stdio_lists_exactly_the_eight_tools(tmp_path):
+async def test_stdio_lists_exactly_the_nine_tools(tmp_path):
     home = tmp_path / "home"
     home.mkdir()
     params = StdioServerParameters(

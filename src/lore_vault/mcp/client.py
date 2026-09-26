@@ -158,6 +158,36 @@ class ServiceClient:
             )
         return data
 
+    async def post_multipart(
+        self,
+        path: str,
+        fields: dict[str, str],
+        *,
+        filename: str,
+        content: bytes,
+        content_type: str = "application/octet-stream",
+    ) -> dict[str, Any]:
+        """POST multipart/form-data（欄位 + 一個 `file`）；錯誤分類同 `post`。"""
+        try:
+            response = await self._client.post(
+                path,
+                data=fields,
+                files={"file": (filename, content, content_type)},
+            )
+        except httpx2.TransportError as exc:
+            raise _unreachable_from_exc(exc) from None
+        if response.status_code in UNREACHABLE_STATUSES:
+            raise _unreachable_from_status(response)
+        if not 200 <= response.status_code < 300:
+            raise _status_error(response)
+        data = _json_or_none(response)
+        if data is None:
+            raise ServiceError(
+                response.status_code,
+                "服務回應不是 JSON 物件（可能被中間層攔截，確認 mcp.base_url）",
+            )
+        return data
+
     async def download_snapshot(
         self, dest: Path, *, if_none_match: str | None = None
     ) -> tuple[int, dict[str, str]]:

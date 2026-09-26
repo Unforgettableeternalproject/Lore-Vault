@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from os import PathLike
@@ -41,6 +42,10 @@ class ShellSettings:
     concept_snapshot_path: Path | None = None
     # 殼啟動時是否在背景拉快照（測試關掉以便手動控制）
     snapshot_on_start: bool = True
+    # `upload` 可讀的額外目錄（殼的工作目錄一律可讀，見 `Shell.upload_roots`）
+    upload_roots: tuple[Path, ...] = ()
+    # `upload` 在殼端先擋的檔案大小上限（服務端另有同一上限）
+    max_upload_bytes: int = 25 * 1024 * 1024
 
 
 def load_shell_settings(
@@ -72,4 +77,17 @@ def load_shell_settings(
         snapshot_interval=mcp.snapshot_interval,
         snapshot_max_age_hours=mcp.snapshot_max_age_hours,
         concept_snapshot_path=concept_path,
+        upload_roots=parse_upload_roots(mcp.upload_roots),
+        max_upload_bytes=config.documents.max_file_bytes,
+    )
+
+
+def parse_upload_roots(value: str | None) -> tuple[Path, ...]:
+    """`mcp.upload_roots`：以 os.pathsep 分隔的目錄清單；空白項忽略。"""
+    if not value:
+        return ()
+    return tuple(
+        Path(part.strip()).expanduser()
+        for part in value.split(os.pathsep)
+        if part.strip()
     )

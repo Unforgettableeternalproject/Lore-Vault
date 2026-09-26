@@ -2,8 +2,11 @@
 
 - `delete-note --space SPACE --vault KEY --id NOTE_ID [--reason TEXT]`：vault 在
   該 space 內解析（space 必填，與服務端相同無預設）
-- `delete-vault --key KEY [--force] [--reason TEXT]`：vault 內有 note 或其他紀錄時
-  必須 `--force`
+- `delete-vault --key KEY [--force] [--reason TEXT]`：vault 內有 note、文件或其他
+  紀錄時必須 `--force`
+- `delete-document --space SPACE --vault KEY --id DOC_ID [--reason TEXT]`：刪一份
+  文件（chunk、FTS、向量、抽取紀錄），寫文件墓碑；blob 不刪（沒人引用時 doctor
+  `documents.orphan_blobs` 回報）。不提供 undelete：要恢復就重新上傳
 - `undelete-note --id NOTE_ID`：移除墓碑，下次重跑匯入時該 note 會匯回來
 - `set-space --key KEY --space SPACE [--new-key NEW]`：把 vault 換到另一個 space
   （A19／D-space-3 只走管理指令；A20 規則）。只允許 `lore`↔`personal`，dev 與非 dev
@@ -65,6 +68,19 @@ def _parser() -> argparse.ArgumentParser:
         "--reason", default=admin.DEFAULT_VAULT_REASON, help="刪除原因"
     )
     p_vault.add_argument("--yes", action="store_true", help="真的刪除（預設 dry-run）")
+
+    p_doc = sub.add_parser("delete-document", help="刪除單份文件")
+    p_doc.add_argument(
+        "--space", required=True, choices=sorted(SPACES), help="vault 所屬 space"
+    )
+    p_doc.add_argument("--vault", required=True, help="vault key 或別名")
+    p_doc.add_argument(
+        "--id", required=True, dest="document_id", help="文件 id（doc:…）"
+    )
+    p_doc.add_argument(
+        "--reason", default=admin.DEFAULT_DOCUMENT_REASON, help="刪除原因"
+    )
+    p_doc.add_argument("--yes", action="store_true", help="真的刪除（預設 dry-run）")
 
     p_space = sub.add_parser("set-space", help="把 vault 換到另一個 space")
     p_space.add_argument("--key", required=True, help="vault 正式 key（不接受別名）")
@@ -148,6 +164,27 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> 
         if args.command == "set-space":
             changed = _set_space(conn, args)
             out.write(json.dumps(changed, ensure_ascii=False, indent=2) + "\n")
+            return 0
+        if args.command == "delete-document":
+            if args.yes:
+                doc_plan = admin.delete_document(
+                    conn,
+                    args.vault,
+                    args.document_id,
+                    space=args.space,
+                    reason=args.reason,
+                )
+            else:
+                doc_plan = admin.plan_document_deletion(
+                    conn, args.vault, args.document_id, space=args.space
+                )
+            doc_result = {
+                "mode": "deleted" if args.yes else "dry_run",
+                **doc_plan.to_dict(),
+            }
+            if not args.yes:
+                doc_result["hint"] = "確認無誤後加 --yes 執行"
+            out.write(json.dumps(doc_result, ensure_ascii=False, indent=2) + "\n")
             return 0
         if args.command == "delete-note":
             if args.yes:

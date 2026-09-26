@@ -16,6 +16,8 @@ from lore_vault.enrich.clients import EnrichTimeout, OllamaEmbedder, urllib_tran
 from lore_vault.enrich.command import build_worker
 from lore_vault.enrich.worker import EnrichWorker
 from lore_vault.recall.embedder import Embedder
+from lore_vault.storage import document_index
+from lore_vault.storage.blobs import BlobStore
 from lore_vault.storage.db import connect
 from lore_vault.storage.snapshot import SnapshotCache
 
@@ -55,6 +57,18 @@ def default_query_embedder(settings: ApiSettings) -> Embedder:
     )
 
 
+def _document_progress(conn: sqlite3.Connection, stats: dict[str, Any]) -> str | None:
+    from lore_vault.documents.worker import has_activity, progress_line
+
+    if not has_activity(stats):
+        return None
+    try:
+        pending = document_index.pending_counts(conn)
+    except Exception:  # noqa: BLE001 - 進度 log 失敗不影響 worker
+        pending = (-1, -1)
+    return progress_line(stats, pending)
+
+
 def default_warmup_embedder(settings: ApiSettings) -> Embedder:
     """暖機用完整的 `embedding.timeout`：冷啟動可能超過 query_timeout，
     用短逾時等於沒暖。"""
@@ -82,6 +96,17 @@ class AppState:
                 poll_interval=settings.config.worker.poll_interval,
                 join_timeout=settings.worker_join_timeout,
             )
+        self.documents_worker: BackgroundEnricher | None = None
+        if settings.run_document_worker:
+            self.documents_worker = BackgroundEnricher(
+                settings.db_path,
+                settings.document_worker_factory or self._default_document_worker,
+                poll_interval=settings.config.worker.poll_interval,
+                join_timeout=settings.worker_join_timeout,
+                name="lore-vault-documents",
+                label="文件",
+                progress=_document_progress,
+            )
         self._snapshot_cache: SnapshotCache | None = None
         self._snapshot_tmp: Path | None = None
         self._snapshot_lock = threading.Lock()
@@ -93,6 +118,18 @@ class AppState:
             conn,
             self.settings.config,
             self.settings.openai_key,
+            should_stop=should_stop,
+        )
+
+    def _default_document_worker(
+        self, conn: sqlite3.Connection, should_stop: Callable[[], bool]
+    ) -> Any:
+        from lore_vault.documents.worker import build_document_worker
+
+        return build_document_worker(
+            conn,
+            self.settings.config,
+            transport=_transport(self.settings),
             should_stop=should_stop,
         )
 
@@ -135,3 +172,18 @@ class AppState:
         if self.enricher is None:
             return {"enabled": False, "running": False}
         return self.enricher.status()
+
+    def blob_store(self) -> BlobStore:
+        blob_dir = self.settings.config.documents.blob_dir
+        if not blob_dir:
+            raise RuntimeError("未設定 documents.blob_dir")
+        return BlobStore(blob_dir)
+
+    def wake_documents(self) -> None:
+        if self.documents_worker is not None:
+            self.documents_worker.wake()
+
+    def documents_worker_status(self) -> dict[str, Any]:
+        if self.documents_worker is None:
+            return {"enabled": False, "running": False}
+        return self.documents_worker.status()

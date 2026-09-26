@@ -153,7 +153,9 @@ def test_doctor_skips_without_blob_dir(doc_db):
     conn, _ = doc_db
     ctx = DoctorContext(settings={"environ": {}}, resources={"db": conn})
     report = default_registry().run(ctx, categories=["documents"])
-    assert {r.result.status.value for r in report.outcomes} == {"skipped"}
+    blob_checks = {"documents.blob_exists", "documents.orphan_blobs"}
+    statuses = {r.result.status.value for r in report.outcomes if r.name in blob_checks}
+    assert statuses == {"skipped"}
 
 
 def test_doctor_reads_blob_dir_from_config(doc_db, store, tmp_path):

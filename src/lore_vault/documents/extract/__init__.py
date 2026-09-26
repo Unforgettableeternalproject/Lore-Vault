@@ -21,9 +21,15 @@
 4. 以上皆不符 → unsupported_format。
 
 判定為文字類（md／txt／json／yaml／toml）後還要通過內容檢查（`decode_text`）：
-UTF-8（可帶 BOM）或帶 BOM 的 UTF-16 才收；含 NUL 或控制字元比例 > 1% 視為二進位
-（unsupported_format）；其他編碼（Big5 等）→ unsupported_encoding。
+依序試 UTF-8（可帶 BOM）→ 帶 BOM 的 UTF-16 → cp950（Big5，台灣常見）；cp950 必須
+嚴格解碼成功且通過文字性檢查才採用。含 NUL 或控制字元比例 > 1% 視為二進位
+（unsupported_format）；都不符 → unsupported_encoding。偵測到的編碼記在
+`Extraction.encoding`。
 pdf／docx／pptx 另驗檔頭魔數，副檔名與內容不符 → unsupported_format。
+
+空結果：任何格式抽不出可見字元都是 empty_extraction；另外只有 pdf 在去空白字數
+< `min_chars` 時也算（多半是掃描件）。docx／pptx 與文字格式不套門檻（短簡報、
+短設定檔是正常內容）。
 """
 
 from __future__ import annotations
@@ -60,6 +66,7 @@ __all__ = [
     "ERROR_CODES",
     "FORMATS",
     "LOCATOR_KINDS",
+    "MIN_CHARS_FORMATS",
     "TEXT_EXTENSIONS",
     "TEXT_FILENAMES",
     "TOO_LARGE",
@@ -76,9 +83,10 @@ __all__ = [
 ]
 
 FORMATS = ("md", "txt", "json", "yaml", "toml", "pdf", "docx", "pptx")
-# 二進位文件格式：去空白後字數 < min_chars 即 empty_extraction（多半是掃描件／純圖片）。
-# 文字格式只在完全沒有可見字元時才 empty_extraction（十幾個字的設定檔是正常內容）。
 BINARY_FORMATS = frozenset({"pdf", "docx", "pptx"})
+# 套 min_chars 門檻的格式（B1 裁決：只有 pdf，用來判掃描件）。docx／pptx 與文字格式
+# 只在完全沒有可見字元時才 empty_extraction（短簡報、十幾個字的設定檔是正常內容）。
+MIN_CHARS_FORMATS = frozenset({"pdf"})
 
 _EXTENSIONS = {
     ".md": "md",
@@ -238,7 +246,7 @@ def extract(
     chars = sum(visible_chars(s.text) for s in segments)
     if chars == 0:
         raise ExtractionError(EMPTY_EXTRACTION, "抽不出任何文字")
-    if fmt in BINARY_FORMATS and chars < limits.min_chars:
+    if fmt in MIN_CHARS_FORMATS and chars < limits.min_chars:
         raise ExtractionError(
             EMPTY_EXTRACTION,
             f"只抽出 {chars} 個字（門檻 {limits.min_chars}），多半是掃描件或純圖片",
@@ -248,4 +256,5 @@ def extract(
         segments=tuple(segments),
         char_count=chars,
         garbled_chars=sum(garbled_chars(s.text) for s in segments),
+        encoding=budget.encoding,
     )

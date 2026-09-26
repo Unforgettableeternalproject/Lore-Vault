@@ -1,8 +1,12 @@
-"""本地 stdio MCP 殼（A15）：八個工具轉發到服務 HTTP，服務不可達時讀本地快照降級。
+"""本地 stdio MCP 殼（A15）：九個工具轉發到服務 HTTP，服務不可達時讀本地快照降級。
 
 工具刻意只有 `space`、`vault_resolve`、`recall`、`get`、`list`、`write`、`update`、
-`status`；建 vault 併入 `vault_resolve(create=True)`，不另開工具。不暴露 chat／ask／
-model／settings／source。
+`upload`、`status`；建 vault 併入 `vault_resolve(create=True)`，不另開工具。不暴露
+chat／ask／model／settings／source。
+
+`upload`（T-67）：殼讀本機檔案、以 multipart 轉送 `POST /v1/documents`。只能讀
+`upload_roots`（殼的工作目錄＋設定 `mcp.upload_roots`）底下的一般檔案：路徑含 `..`
+一律拒絕；以 realpath（解開 symlink／junction）比對，逃出白名單回 `path_not_allowed`。
 
 「目前 space」（A18）由殼持有：每個殼行程一份、不持久化，新行程一律 `dev`。
 `space` 工具查詢／切換（不打服務）；其他工具不帶 space 參數，由殼在每個服務請求
@@ -15,7 +19,10 @@ model／settings／source。
   `recall`／`get`／`list`／`vault_resolve` 改讀本地快照（只走 lexical），
   回傳標 `degraded: true`、
   `degraded_reason: "service_unreachable"` 與快照時間；
-  `write`／`update` 直接失敗、不排離線佇列
+  `write`／`update`／`upload` 直接失敗、不排離線佇列。
+  快照不含文件（T-69）：降級時 recall 的 chunk 列在 `unsupported_kinds`、get 的
+  文件／chunk id 列在 `unavailable`、list 的 document 列在 `unsupported_kinds`，
+  不以空結果冒充「沒有」
 """
 
 from __future__ import annotations
@@ -46,7 +53,7 @@ from lore_vault.recall import UnsupportedKind
 from lore_vault.recall import recall as recall_service
 from lore_vault.recall.service import DEFAULT_BUDGET as RECALL_DEFAULT_BUDGET
 from lore_vault.recall.service import DEFAULT_LIMIT as RECALL_DEFAULT_LIMIT
-from lore_vault.recall.service import MODE_LEXICAL
+from lore_vault.recall.service import KIND_CHUNK, MODE_LEXICAL
 from lore_vault.schema import SPACE_DEV, SPACES, canonical_key
 from lore_vault.storage import snapshot as storage_snapshot
 from lore_vault.storage.errors import (
@@ -65,6 +72,7 @@ from lore_vault.storage.vaults import ALL_VAULTS, get_vault, validate_space
 from .client import ServiceClient, ServiceError, ServiceUnreachable
 from .settings import ShellSettings
 from .snapshot import pull_concepts, pull_snapshot
+from .upload import UploadPathError, read_upload
 
 logger = logging.getLogger("lore_vault.mcp")
 
@@ -76,6 +84,7 @@ TOOL_NAMES = (
     "list",
     "write",
     "update",
+    "upload",
     "status",
 )
 SPACE_ACTIONS = ("get", "set")
@@ -88,7 +97,9 @@ INSTRUCTIONS = (
     "（只涵蓋目前 space）。內容分 space：dev（開發記憶，預設）、lore（世界觀）、"
     "personal（私人）；所有工具只看得到目前 space，要看別的 space 先用 "
     "space(action='set') 切換，新 session 一律回到 dev。"
-    "回傳 degraded=true 代表服務不可達、結果來自本地快照（可能過時、只有關鍵字檢索）。"
+    "回傳 degraded=true 代表服務不可達、結果來自本地快照（可能過時、只有關鍵字檢索、"
+    "不含文件）。文件用 upload 上傳後在背景抽取；recall 會一併回文件段落（kind=chunk，"
+    "含檔名與 locator 位置），全文用 get 取 doc:／chunk: id。"
 )
 
 _HINTS = {
@@ -109,6 +120,14 @@ _HINTS = {
     "invalid_cursor": "cursor 只能用上一頁 list 回傳的 next_cursor 原樣傳回",
     "no_changes": "update 至少要改一個欄位（title／body／topics／links／supersedes）",
     "duplicate": "已有相同 id 的 note；改用 update",
+    "path_not_allowed": (
+        "只能上傳殼工作目錄或設定 mcp.upload_roots 底下的檔案；"
+        "請把檔案放進專案目錄，或請使用者加入白名單"
+    ),
+    "too_large": "單檔上限 25MB（設定 documents.max_file_bytes）",
+    "unsupported_format": (
+        "支援 md、txt（含程式碼等純文字）、json、yaml、toml、pdf、docx、pptx"
+    ),
 }
 
 
@@ -493,6 +512,8 @@ class Shell:
                     limit=RECALL_DEFAULT_LIMIT if limit is None else limit,
                     budget=RECALL_DEFAULT_BUDGET if budget is None else budget,
                     mode=MODE_LEXICAL,
+                    # 快照不含文件：chunk 明確列進 unsupported_kinds（T-69）
+                    unavailable_kinds=(KIND_CHUNK,),
                 ).to_dict(),
             )
 
@@ -512,6 +533,7 @@ class Shell:
                     ids,
                     space=self.space,
                     budget=DEFAULT_GET_BUDGET if budget is None else budget,
+                    documents_available=False,
                 ).to_dict(),
             )
 
@@ -522,9 +544,15 @@ class Shell:
         topics: list[str] | None = None,
         cursor: str | None = None,
         limit: int | None = None,
+        kinds: list[str] | None = None,
     ) -> dict[str, Any]:
         body = _compact(
-            vault=vault, since=since, topics=topics, cursor=cursor, limit=limit
+            vault=vault,
+            since=since,
+            topics=topics,
+            cursor=cursor,
+            limit=limit,
+            kinds=kinds,
         )
         try:
             return await self._post("/v1/list", body)
@@ -539,6 +567,8 @@ class Shell:
                     topics=topics,
                     cursor=cursor,
                     limit=DEFAULT_LIST_LIMIT if limit is None else limit,
+                    kinds=kinds,
+                    documents_available=False,
                 ).to_dict(),
             )
 
@@ -591,6 +621,53 @@ class Shell:
             return await self._post("/v1/update", payload)
         except ServiceUnreachable as exc:
             raise self._write_unreachable(exc) from None
+
+    def upload_roots(self) -> tuple[Path, ...]:
+        """可上傳的目錄：殼的工作目錄一律在內，另加設定的 `mcp.upload_roots`。"""
+        return (Path(self._cwd()), *self.settings.upload_roots)
+
+    async def upload(self, path: str, vault: str | None = None) -> dict[str, Any]:
+        """讀本機檔案上傳到目前 space 的 vault。
+
+        `vault` 省略時只在 dev 以殼工作目錄的 binding 解析（不建立 vault），並在回應
+        標 `vault_source: "cwd_binding"`；lore／personal 必須明示。
+        """
+        try:
+            local = read_upload(
+                path,
+                self.upload_roots(),
+                cwd=self._cwd(),
+                max_bytes=self.settings.max_upload_bytes,
+            )
+        except UploadPathError as exc:
+            raise _tool_error(exc.code, str(exc), hint=_HINTS.get(exc.code)) from None
+        vault_source = "explicit"
+        if vault is None:
+            if self.space != SPACE_DEV:
+                raise _tool_error(
+                    "vault_required",
+                    f"space {self.space!r} 沒有 repo 可推算，upload 必須帶 vault",
+                    hint=_HINTS["vault_required"],
+                )
+            try:
+                binding = resolve_binding(self._cwd())
+            except NotADirectoryError as exc:
+                raise _tool_error("invalid_cwd", str(exc)) from None
+            vault, vault_source = binding.key, "cwd_binding"
+        try:
+            result = await self.client.post_multipart(
+                "/v1/documents",
+                {"vault": vault, "space": self.space},
+                filename=local.name,
+                content=local.data,
+            )
+        except ServiceError as exc:
+            raise _from_service_error(exc) from None
+        except ServiceUnreachable as exc:
+            raise self._write_unreachable(exc) from None
+        result["vault_source"] = vault_source
+        result["path"] = str(local.path)
+        return result
 
     def local_status(self) -> dict[str, Any]:
         """殼端可獨立判斷的狀態：快照對帳（不需要服務）。"""
@@ -724,7 +801,10 @@ def build_server(shell: Shell) -> MCPServer:
         vault: VaultArg,
         kinds: Annotated[
             list[str] | None,
-            Field(description="要查的種類，預設只有 note（concept 尚未支援）"),
+            Field(
+                description="要查的種類：'note'、'chunk'（文件段落），預設兩者；"
+                "concept 尚未支援"
+            ),
         ] = None,
         limit: Annotated[
             int | None, Field(description="最多幾筆，預設 10、上限 100")
@@ -738,7 +818,13 @@ def build_server(shell: Shell) -> MCPServer:
 
     async def get(
         vault: VaultArg,
-        ids: Annotated[list[str], Field(description="note id 清單，一次最多 50")],
+        ids: Annotated[
+            list[str],
+            Field(
+                description="note id、文件 id（doc:…，取整份）或 chunk id（chunk:…，"
+                "取該段），一次最多 50"
+            ),
+        ],
         budget: Annotated[
             int | None,
             Field(description="所有 body 字數總和上限，預設 12000；超過的截斷並標示"),
@@ -760,8 +846,12 @@ def build_server(shell: Shell) -> MCPServer:
         limit: Annotated[
             int | None, Field(description="每頁筆數，預設 50、上限 200")
         ] = None,
+        kinds: Annotated[
+            list[str] | None,
+            Field(description="'note'／'document'，預設兩者；指定 topics 時只列 note"),
+        ] = None,
     ) -> str:
-        return _dump(await shell.list_(vault, since, topics, cursor, limit))
+        return _dump(await shell.list_(vault, since, topics, cursor, limit, kinds))
 
     async def write(
         vault: Annotated[str, Field(description="vault key（單一 vault，不可 '*'）")],
@@ -802,6 +892,24 @@ def build_server(shell: Shell) -> MCPServer:
             )
         )
 
+    async def upload(
+        path: Annotated[
+            str,
+            Field(
+                description="本機檔案路徑（絕對，或相對於殼的工作目錄）；必須在殼工作"
+                "目錄或 mcp.upload_roots 之下，不可含 '..'"
+            ),
+        ],
+        vault: Annotated[
+            str | None,
+            Field(
+                description="vault key（單一 vault）。dev 省略時用殼工作目錄 binding；"
+                "lore／personal 必填"
+            ),
+        ] = None,
+    ) -> str:
+        return _dump(await shell.upload(path, vault))
+
     async def status(
         vault: Annotated[
             str | None, Field(description="另附該 vault 的筆數與最近更新")
@@ -822,16 +930,20 @@ def build_server(shell: Shell) -> MCPServer:
             "vault 不存在會回錯誤；確認要建記憶時才用 create=true 建立。"
         ),
         "recall": (
-            "在 vault 內檢索記憶（關鍵字 + 語意）。只回 id、標題、1–2 句摘要、分數、"
-            "更新時間，不含全文；字數受 budget 限制，被裁掉的筆數見 omitted。"
-            "需要全文時再用 get。degraded=true 表示服務不可達、結果來自本地快照。"
+            "在 vault 內檢索記憶與已上傳文件（關鍵字 + 語意）。note 只回 id、標題、"
+            "1–2 句摘要；文件段落（kind=chunk）回檔名、locator（頁／投影片／標題）與"
+            "片段摘錄。不含全文；字數受 budget 限制，被裁掉的筆數見 omitted。"
+            "需要全文時再用 get。degraded=true 表示服務不可達、結果來自本地快照"
+            "（不含文件，chunk 列在 unsupported_kinds）。"
         ),
         "get": (
-            "依 id 批次取 note 全文。body 字數總和受 budget 限制（依 ids 順序分配），"
-            "超過的標 truncated；不在該 vault 的 id 列在 missing。"
+            "依 id 批次取全文：note id 回 body；doc:… 回整份文件文字；chunk:… 回該段。"
+            "字數總和受 budget 限制（依 ids 順序分配），超過的標 truncated；"
+            "不在該 vault 的 id 列在 missing。"
         ),
         "list": (
-            "列出 vault 的 note 標題（新到舊，分頁）。用來瀏覽或確認近期寫入；"
+            "列出 vault 的 note 標題與文件（新到舊，分頁；文件含 status、error_code、"
+            "version、superseded_by）。用來瀏覽或確認近期寫入與文件抽取狀態；"
             "找特定主題請用 recall。has_more=true 時用 next_cursor 取下一頁。"
         ),
         "write": (
@@ -841,6 +953,12 @@ def build_server(shell: Shell) -> MCPServer:
         "update": (
             "修改既有 note；必須帶讀到的 expected_updated。版本衝突時錯誤內附 "
             "current（目前版本），確認後以 current.updated 重試。服務不可達時直接失敗。"
+        ),
+        "upload": (
+            "上傳本機文件（md、txt、程式碼、json、yaml、toml、pdf、docx、pptx；單檔 "
+            "25MB）到目前 space 的 vault。回 document_id 與 status（pending：背景抽取"
+            "中）；同內容再傳回 duplicate=true；同檔名不同內容為新版本（supersedes）。"
+            "只能讀殼工作目錄或 mcp.upload_roots 之下的檔案。服務不可達時直接失敗。"
         ),
         "status": (
             "服務健康狀態（doctor 對帳、補算積壓、schema 版本）與本地快照狀態。"
@@ -855,6 +973,7 @@ def build_server(shell: Shell) -> MCPServer:
         ("list", list_),
         ("write", write),
         ("update", update),
+        ("upload", upload),
         ("status", status),
     ):
         # 非結構化輸出：只回一份緊湊 JSON 文字，不重複送 structuredContent

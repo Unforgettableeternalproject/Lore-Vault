@@ -87,9 +87,28 @@
 side-car 紀錄：`{session_id, prompt_id, injected: [concept_id]}`，不含原文。
 用來辨識哪些語料輪次被記憶影響過，避免污染後續校準。
 
+### Document（上傳的文件，A19）
+
+設計見 `docs/design/SPACES_AND_DOCUMENTS.md` 第 3～6 節；實作細節見 docs/DEVELOPMENT.md「文件存儲與檢索」。
+
+| 欄位 | 說明 |
+|---|---|
+| `id`, `vault` | `doc:<uuid>`；vault 為硬範圍（space 由 vault 決定），同 note |
+| `filename`, `mime`, `size_bytes`, `sha256` | 原始檔 metadata；原始檔以 sha256 內容定址存 blob 目錄（跨 vault 共用、去重） |
+| `version`, `supersedes` | 同 vault 同檔名、內容不同的上傳為新版本；被 ready 版本（遞移）取代的文件退出索引，但仍可 get／list（`superseded_by`） |
+| `status`, `error_code`, `error_detail` | `pending → extracting → ready／failed`；failed 必有錯誤碼（`encrypted`、`corrupt`、`empty_extraction`、`too_large`、`unsupported_format`、`unsupported_encoding`） |
+| `chunk_count`, `encoding` | ready 後的 chunk 數；文字檔偵測到的編碼（utf-8／utf-8-sig／utf-16／cp950） |
+
+**Chunk**：文件內依結構（標題／頁／投影片）再定長切的段落（約 400 token、12.5% 重疊），外部 id
+`chunk:<document uuid>:<idx>`；`locator` 為 `{"kind": "heading"|"page"|"slide"|"offset"|"header"|"footer",
+"value": …, "part"?: n}`。chunk 有獨立的 FTS（CJK bigram）與向量（bge-m3）索引，只收可索引文件
+（ready、未被取代）。
+
 ## MCP 介面（草案）
 
-HTTP 契約為 `POST /v1/<工具名>` + JSON body，另有 `POST /v1/vaults` 建 vault（write 不自動建）；所有 `/v1` 需 bearer token，`GET /healthz` 公開。`GET /v1/snapshot` 提供降級用唯讀快照（只含 vaults（含 `space`）、notes、FTS，不含向量與 episode／concept／injection；整庫不分 space，由殼端依目前 space 過濾）。
+HTTP 契約為 `POST /v1/<工具名>` + JSON body，另有 `POST /v1/vaults` 建 vault（write 不自動建）；所有 `/v1` 需 bearer token，`GET /healthz` 公開。`GET /v1/snapshot` 提供降級用唯讀快照（只含 vaults（含 `space`）、notes、FTS，不含向量與 episode／concept／injection，**明確排除文件**（T-69）；整庫不分 space，由殼端依目前 space 過濾）。
+
+**文件上傳**（T-67）：`POST /v1/documents` 是唯一的 multipart 端點，欄位 `file`、`vault`、`space`（必填）、`filename?`、`mime?`（未知欄位 400）。大小在讀取 body 時就擋（413 `too_large`，單檔上限 `documents.max_file_bytes`，預設 25MB）；格式不支援 400 `unsupported_format`；服務未設 `documents.blob_dir` 500 `documents_not_configured`。回應 `{document_id, status, sha256, duplicate, retried, vault, space, filename, version, supersedes, size_bytes}`：新列或重試 201、`duplicate: true` 200。抽取在服務程序內的背景 worker，回應時 status 多為 `pending`。重複上傳（同 vault）：同內容且現行 → 回既有（不重新排隊）；同內容只有 failed → 沿用該列重跑（`retried: true`）；同檔名不同內容 → 新版本（`supersedes`）。
 
 **space（A18）**：`/v1/vault_resolve`、`/v1/vaults`、`/v1/recall`、`/v1/get`、`/v1/list`、`/v1/write`、`/v1/update`、`/v1/status` 的 body 必帶 `space`（`dev`／`lore`／`personal`），**服務端無預設**：缺少、null 或空字串回 400 `space_required`，不在白名單回 400 `invalid_space`。唯一例外是無 body 的 `POST /v1/status`（純健康檢查，回應 `space: null`）。範圍語意：
 - vault key（或別名）存在但屬於別的 space → 與不存在相同（404 `unknown_vault`），不透露存在性
@@ -111,17 +130,18 @@ MCP 為各機器本地 stdio 殼（`python -m lore_vault.mcp`，A15）：服務�
 
 殼持有「目前 space」：每個殼行程一份、只在記憶體、不持久化，新行程一律 `dev`。其他工具沒有 space 參數，殼在每個 `/v1/*` 請求自動注入目前 space（唯一出口 `Shell._send`）。
 
-目標是讓 agent 用最少的上下文拿到足夠決策的資訊。工具數量刻意壓在個位數（目前 8 個）。
+目標是讓 agent 用最少的上下文拿到足夠決策的資訊。工具數量刻意壓在個位數（目前 9 個）。
 
 | 工具 | 回傳 | 說明 |
 |---|---|---|
 | `space(action, value?)` | `{space, spaces}` | `action="get"` 查詢、`"set"` 切換（`value` 為 `dev`／`lore`／`personal`）；純殼端狀態，不打服務；非法值回工具錯誤 `invalid_space`、狀態不變 |
 | `vault_resolve(cwd?, create?, display?, space?, key?)` | vault key、display、space、note 數、binding（dev 由 cwd 推算時） | dev：key 省略時 MCP 殼以 `lore_vault.binding` 從 cwd 算 key，服務端做別名解析；lore／personal：沒有 repo，必須帶 `key`（`<space>/名稱`，缺少回 `key_required`），傳了 `cwd` 會忽略並回 `cwd_ignored: true`。`space` 省略用目前 space，顯式傳入只影響這一次。`create=True` 才建 vault（HTTP `POST /v1/vaults`）；取代 pm-bind 的手動步驟 |
-| `recall(query, vault, kinds?, limit?, budget?)` | `[{id, kind, title, summary, score, updated}]` | 統一檢索 Notes 與 Concepts；**預設不含全文**；`vault` 必填，跨範圍用 `vault="*"` 明示 |
-| `get(vault, ids, budget?)` | 全文 | 可批次；超過預算時截斷並標示；vault 必填（A5） |
-| `list(vault, since?, topics?, cursor?)` | 標題清單 | 分頁，回傳是否還有下一頁 |
+| `recall(query, vault, kinds?, limit?, budget?)` | `[{id, kind, vault, title, summary, summary_source, score, updated}]`；chunk 另帶 `document_id`、`chunk_id`、`locator` | 統一檢索 note 與文件段落（`kinds` 預設 `["note", "chunk"]`；concept 未實作）；note 與 chunk 的 lexical／vector 四路一次 RRF。chunk 的 `title` 為檔名、`summary` 為段落摘錄（`summary_source: "excerpt"`），同樣受 `budget`；**預設不含全文**；`vault` 必填，跨範圍用 `vault="*"` 明示。回應另有 `kinds`（實際查的）、`missing_chunk_embeddings`；降級時 `chunk` 列在 `unsupported_kinds` |
+| `get(vault, ids, budget?)` | 全文 | 可批次；`ids` 可混 note id、`doc:…`（整份文件文字，重疊段已去除）、`chunk:…`（單段，含 `locator`）；字數預算依 ids 順序分配，超過時截斷並標示（`truncated`、`body_chars`／`text_chars`）；vault 必填（A5）。範圍外或不存在列在 `missing`，降級時文件 id 列在 `unavailable` |
+| `list(vault, since?, topics?, cursor?, limit?, kinds?)` | 標題清單 | note 與文件合併分頁（`kinds` 預設兩者）；文件項含 `status`、`error_code`、`version`、`supersedes`、`superseded_by`、`chunk_count`、`encoding`；指定 `topics` 時只列 note；降級時 `document` 列在 `unsupported_kinds` |
 | `write(vault, title, body, topics?, supersedes?)` | id、疑似重複清單 | 寫入前自動查重，回傳相似 note 讓 agent 決定改用 `update` |
 | `update(id, body?, title?, topics?)` | id | |
+| `upload(path, vault?)` | `document_id`、`status`、`duplicate`、`version`、`supersedes` | 殼讀本機檔案（只限殼工作目錄與 `mcp.upload_roots`；拒絕 `..` 與 symlink 逃逸）轉送 `POST /v1/documents`；`vault` 省略時只在 dev 用殼工作目錄 binding；服務不可達直接失敗 |
 | `status(vault?)` | 健康狀態、最近更新、管線狀態 | 合併 doctor 摘要與 health alert |
 
 刻意**不做**：chat / ask（把記憶包成對話）、model 管理、settings、source 匯入。

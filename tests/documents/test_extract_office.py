@@ -79,8 +79,26 @@ def test_docx_without_headings_is_single_offset_segment(make_docx):
     assert result.segments[0].text.count("\n") == 1
 
 
-def test_docx_nearly_empty_is_empty_extraction(make_docx):
-    assert _code(make_docx(lambda d: d.add_paragraph("圖")), "scan.docx") == (
+def test_short_docx_is_not_blocked_by_min_chars(make_docx):
+    """B1 裁決：min_chars 只套 pdf；只有一個字的 docx 仍是可檢索內容。"""
+    result = extract(make_docx(lambda d: d.add_paragraph("圖")), "scan.docx")
+    assert result.char_count == 1
+
+
+def test_short_pptx_is_not_blocked_by_min_chars(make_pptx):
+    def build(presentation):
+        slide = presentation.slides.add_slide(presentation.slide_layouts[5])
+        slide.shapes.title.text = "結論"
+
+    result = extract(make_pptx(build), "短簡報.pptx")
+    assert [s.locator.to_dict() for s in result.segments] == [
+        {"kind": "slide", "value": 1}
+    ]
+    assert result.char_count == 2 and result.encoding is None
+
+
+def test_docx_without_any_text_is_empty_extraction(make_docx):
+    assert _code(make_docx(lambda d: d.add_paragraph("   ")), "blank.docx") == (
         EMPTY_EXTRACTION
     )
 

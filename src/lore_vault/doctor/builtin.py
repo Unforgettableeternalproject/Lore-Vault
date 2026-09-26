@@ -19,7 +19,17 @@ from .concept_snapshot_check import (
     concept_snapshot_age,
     concept_snapshot_path_agreement,
 )
-from .documents_check import documents_blob_exists, documents_orphan_blobs
+from .documents_check import (
+    documents_backlog,
+    documents_blob_exists,
+    documents_chunk_count,
+    documents_failed,
+    documents_fts_rows,
+    documents_orphan_blobs,
+    documents_stuck,
+    documents_superseded_removed,
+    documents_vector_rows,
+)
 from .framework import Check, CheckResult, CheckSkipped, DoctorContext, Registry
 from .hook_imports import DEFAULT_HOOKS_DIR, DEFAULT_SPIKE_DIR, check_hook_imports
 from .snapshot_check import snapshot_age, snapshot_schema
@@ -237,6 +247,41 @@ def default_registry() -> Registry:
             "documents.orphan_blobs",
             documents_orphan_blobs,
             "沒有 document 引用的 blob、不明檔案、遺留暫存檔（非零為 warn）",
+        ),
+        (
+            "documents.chunk_count_matches",
+            documents_chunk_count,
+            "ready 文件的 chunk_count 與實際 chunk 數一致；非 ready 文件沒有 chunk",
+        ),
+        (
+            "documents.fts_rows_match_chunks",
+            documents_fts_rows,
+            "chunk_fts 與可索引文件（ready、未被取代）的 chunk 一對一",
+        ),
+        (
+            "documents.superseded_chunks_removed",
+            documents_superseded_removed,
+            "被取代或非 ready 的文件不在 FTS／向量索引內",
+        ),
+        (
+            "documents.vector_rows_match_chunks",
+            documents_vector_rows,
+            "chunk 向量沒有孤兒與維度不符（fail）；可索引 chunk 缺向量為 warn",
+        ),
+        (
+            "documents.stuck_processing",
+            documents_stuck,
+            "卡在 extracting 超過門檻的文件（fail：worker 中斷或沒在跑）",
+        ),
+        (
+            "documents.failed",
+            documents_failed,
+            "抽取失敗與向量補算放棄的文件數（非零為 warn，附錯誤碼）",
+        ),
+        (
+            "documents.backlog",
+            documents_backlog,
+            "待抽取文件與缺向量 chunk；最舊一筆等太久為 warn",
         ),
     ):
         registry.add(Check(name, "documents", func, description))

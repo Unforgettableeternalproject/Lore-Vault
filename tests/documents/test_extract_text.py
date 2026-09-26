@@ -101,10 +101,59 @@ def test_utf16_with_bom_is_accepted():
     assert result.segments[0].text == "UTF-16 的中文檔案"
 
 
-def test_non_utf8_text_is_unsupported_encoding():
-    assert (
-        _err("繁體中文 Big5 檔案".encode("big5"), "a.txt").code == UNSUPPORTED_ENCODING
-    )
+def test_big5_text_falls_back_to_cp950_and_records_encoding():
+    text = "繁體中文 Big5 檔案：記憶系統的設定說明，含「引號」與全形標點。\n第二行"
+    result = extract(text.encode("big5"), "a.txt")
+    assert result.segments[0].text == text
+    assert result.encoding == "cp950"
+
+
+def test_big5_markdown_and_yaml_are_accepted():
+    md = extract("# 標題\n內容說明".encode("cp950"), "a.md")
+    assert md.encoding == "cp950"
+    assert md.segments[0].locator.to_dict() == {"kind": "heading", "value": "標題"}
+    yml = extract("名稱: 世界觀設定\n".encode("cp950"), "a.yaml")
+    assert yml.segments[0].text == "名稱: 世界觀設定" and yml.encoding == "cp950"
+
+
+def test_utf8_encodings_are_recorded():
+    assert extract("中文".encode(), "a.txt").encoding == "utf-8"
+    bom = b"\xef\xbb\xbf" + "中文".encode()
+    assert extract(bom, "a.txt").encoding == "utf-8-sig"
+    assert extract("中文".encode("utf-16"), "a.txt").encoding == "utf-16"
+
+
+@pytest.mark.parametrize(
+    "text, encoding",
+    [
+        # Latin-1：é 後接空白，cp950 嚴格解碼就失敗
+        ("café résumé naïve", "latin-1"),
+        # GBK 簡體：cp950 解得出一串合法漢字，但散在 Big5 次常用字區
+        ("简体中文说明书这是一个测试", "gbk"),
+        (
+            "世界观设定：艾斯维尔是命运织者的领导者，诺薇亚是生体机械，负责主要的实作。",
+            "gbk",
+        ),
+        ("说明", "gbk"),
+        # Shift_JIS：cp950 嚴格解碼失敗
+        ("日本語のテキストファイルです", "shift_jis"),
+    ],
+)
+def test_non_big5_legacy_encodings_are_unsupported(text, encoding):
+    assert _err(text.encode(encoding), "a.txt").code == UNSUPPORTED_ENCODING
+
+
+def test_gbk_decodes_as_cp950_but_fails_textuality_check():
+    """拿掉常用字比例檢查就會把 GBK 誤收成 Big5：確認這個樣本確實能被 cp950 解開。"""
+    data = "简体中文说明书这是一个测试".encode("gbk")
+    data.decode("cp950")  # 不拋例外：光靠嚴格解碼擋不住
+    assert _err(data, "a.txt").code == UNSUPPORTED_ENCODING
+
+
+def test_cp950_user_defined_area_is_rejected():
+    """cp950 使用者自定區（造字）：嚴格解碼失敗，不猜。"""
+    data = "說明".encode("cp950") + b"\xfa\x40\xfa\x41"
+    assert _err(data, "a.txt").code == UNSUPPORTED_ENCODING
 
 
 @pytest.mark.parametrize(

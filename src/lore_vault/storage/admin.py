@@ -6,7 +6,13 @@
 連帶資料：
 - note：FTS 列（虛擬表無外鍵，手動刪）、向量與補算紀錄（外鍵 CASCADE）
 - vault：上述 + 別名（CASCADE）+ episodes／concepts／injections
-  （外鍵無 CASCADE，手動刪）
+  （外鍵無 CASCADE，手動刪）+ 文件（見下）
+- 文件（T-68）：chunk_fts 列（手動刪）、chunk（手動刪；向量隨 chunk CASCADE）、
+  抽取／補算紀錄（隨文件 CASCADE），並寫 `document_tombstones`。blob **不刪**：
+  可能被其他 vault 或其他版本引用；沒人引用時由 doctor `documents.orphan_blobs`
+  回報，清理是另一個明確操作。刪單一文件時，以 `supersedes` 指向它的新版本改指向
+  它的前一版（版本鏈不斷），並在同一交易內重算前後版本的索引資格（刪掉現行版本時，
+  前一版回到索引；向量由 worker 補算）。
 - 墓碑（`note_tombstones`，schema v5）：每則被刪的 note 寫一筆墓碑（id、vault、
   對帳清單記載的來源、刪除時間、原因）。匯入對帳清單（`import_sources`／
   `import_vault_counts`）**不動**：對帳把「清單有、note 沒有、有墓碑」算成刻意刪除，
@@ -29,6 +35,7 @@ from typing import Any
 
 from lore_vault.schema import SPACE_DEV, canonical_key
 
+from . import document_index
 from .db import transaction
 from .errors import NotFound, StorageError, UnknownVault, VaultConflict
 from .timeutil import utc_now
@@ -36,6 +43,7 @@ from .vaults import check_key_prefix, resolve_write, validate_space
 
 DEFAULT_NOTE_REASON = "admin delete-note"
 DEFAULT_VAULT_REASON = "admin delete-vault"
+DEFAULT_DOCUMENT_REASON = "admin delete-document"
 
 
 class NeedsForce(StorageError):
@@ -192,6 +200,165 @@ def undelete_note(conn: sqlite3.Connection, note_id: str) -> dict[str, Any]:
         return grave
 
 
+# ── 單份文件（T-68）──
+
+
+@dataclass(frozen=True)
+class DocumentDeletePlan:
+    """將刪除的文件 metadata（不含檔名以外的內容）。"""
+
+    document_id: str
+    vault: str
+    sha256: str
+    filename: str
+    supersedes: str | None
+    # 以 supersedes 指向它、刪除後改指向它前一版的新版本
+    relinked: tuple[str, ...]
+    counts: dict[str, int] = field(default_factory=dict)
+    # 刪除後 blob 仍被其他文件引用（False＝變成孤兒，doctor 會回報）
+    blob_still_referenced: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "target": "document",
+            "document_id": self.document_id,
+            "vault": self.vault,
+            "sha256": self.sha256,
+            "filename": self.filename,
+            "supersedes": self.supersedes,
+            "relinked": list(self.relinked),
+            "counts": dict(self.counts),
+            "blob_still_referenced": self.blob_still_referenced,
+        }
+
+
+def _document_counts(conn: sqlite3.Connection, where: str, params: tuple) -> dict:
+    """`where` 篩選 documents（別名 d）；回傳連帶資料筆數。"""
+    docs = f"SELECT d.id FROM documents d WHERE {where}"
+    chunks = f"SELECT seq FROM document_chunks WHERE document_id IN ({docs})"
+    return {
+        "documents": _count(conn, f"SELECT count(*) FROM ({docs})", params),
+        "chunks": _count(conn, f"SELECT count(*) FROM ({chunks})", params),
+        "chunk_fts_rows": _count(
+            conn, f"SELECT count(*) FROM chunk_fts WHERE rowid IN ({chunks})", params
+        ),
+        "chunk_embeddings": _count(
+            conn,
+            f"SELECT count(*) FROM document_chunk_embeddings "
+            f"WHERE chunk_seq IN ({chunks})",
+            params,
+        ),
+        "document_enrichment": _count(
+            conn,
+            f"SELECT count(*) FROM document_enrichment WHERE document_id IN ({docs})",
+            params,
+        ),
+    }
+
+
+def plan_document_deletion(
+    conn: sqlite3.Connection, vault: str, document_id: str, *, space: str
+) -> DocumentDeletePlan:
+    key = resolve_write(conn, vault, space=space)
+    row = conn.execute(
+        "SELECT id, sha256, filename, supersedes FROM documents "
+        "WHERE id = ? AND vault = ?",
+        (document_id, key),
+    ).fetchone()
+    if row is None:
+        raise NotFound(f"vault {key!r} 內找不到文件 {document_id!r}")
+    relinked = tuple(
+        r[0]
+        for r in conn.execute(
+            "SELECT id FROM documents WHERE supersedes = ? ORDER BY id", (document_id,)
+        )
+    )
+    counts = _document_counts(conn, "d.id = ?", (document_id,))
+    counts["tombstones"] = 1
+    others = _count(
+        conn,
+        "SELECT count(*) FROM documents WHERE sha256 = ? AND id != ?",
+        (row["sha256"], document_id),
+    )
+    return DocumentDeletePlan(
+        document_id=document_id,
+        vault=key,
+        sha256=row["sha256"],
+        filename=row["filename"],
+        supersedes=row["supersedes"],
+        relinked=relinked,
+        counts=counts,
+        blob_still_referenced=others > 0,
+    )
+
+
+def _write_document_tombstones(
+    conn: sqlite3.Connection, where: str, params: tuple, reason: str
+) -> int:
+    if not reason.strip():
+        raise StorageError("刪除原因不可為空")
+    return conn.execute(
+        f"""
+        INSERT OR REPLACE INTO document_tombstones
+            (document_id, vault, sha256, deleted_at, reason)
+        SELECT d.id, d.vault, d.sha256, ?, ? FROM documents d WHERE {where}
+        """,
+        (utc_now(), reason, *params),
+    ).rowcount
+
+
+def _delete_documents(conn: sqlite3.Connection, where: str, params: tuple) -> dict:
+    """刪 chunk_fts、chunk（向量 CASCADE）、文件（補算紀錄 CASCADE）。"""
+    docs = f"SELECT d.id FROM documents d WHERE {where}"
+    chunks = f"SELECT seq FROM document_chunks WHERE document_id IN ({docs})"
+    done = {
+        "chunk_fts_rows": conn.execute(
+            f"DELETE FROM chunk_fts WHERE rowid IN ({chunks})", params
+        ).rowcount,
+    }
+    done["chunks"] = conn.execute(
+        f"DELETE FROM document_chunks WHERE document_id IN ({docs})", params
+    ).rowcount
+    done["documents"] = conn.execute(
+        f"DELETE FROM documents WHERE id IN ({docs})", params
+    ).rowcount
+    return done
+
+
+def delete_document(
+    conn: sqlite3.Connection,
+    vault: str,
+    document_id: str,
+    *,
+    space: str,
+    reason: str = DEFAULT_DOCUMENT_REASON,
+) -> DocumentDeletePlan:
+    """刪一份文件與其 chunk、FTS、向量、抽取紀錄，並寫墓碑（單一交易）。"""
+    with transaction(conn):
+        plan = plan_document_deletion(conn, vault, document_id, space=space)
+        # 版本鏈不斷：指向它的新版本改指向它的前一版
+        conn.execute(
+            "UPDATE documents SET supersedes = ? WHERE supersedes = ?",
+            (plan.supersedes, document_id),
+        )
+        done = {
+            "tombstones": _write_document_tombstones(
+                conn, "d.id = ?", (document_id,), reason
+            )
+        }
+        done.update(_delete_documents(conn, "d.id = ?", (document_id,)))
+        done["chunk_embeddings"] = plan.counts["chunk_embeddings"]
+        done["document_enrichment"] = plan.counts["document_enrichment"]
+        _check_cascade(conn)
+        _verify_counts(plan.counts, done)
+        # 前後版本的索引資格可能改變（刪掉現行版本 → 前一版回到索引）
+        for newer in plan.relinked:
+            document_index.sync_chain(conn, newer)
+        if plan.supersedes is not None:
+            document_index.sync_chain(conn, plan.supersedes)
+        return plan
+
+
 # ── 整個 vault ──
 
 # 參照 vaults(key) 但沒有 ON DELETE CASCADE 的表
@@ -238,8 +405,14 @@ def plan_vault_deletion(conn: sqlite3.Connection, key: str) -> DeletePlan:
         counts[table] = _count(
             conn, f"SELECT count(*) FROM {table} WHERE vault = ?", (key,)
         )
-    requires_force = counts["notes"] > 0 or any(
-        counts[t] > 0 for t in _VAULT_RECORD_TABLES
+    if _has_table(conn, "documents"):
+        doc_counts = _document_counts(conn, "d.vault = ?", (key,))
+        counts.update(doc_counts)
+        counts["document_tombstones"] = doc_counts["documents"]
+    requires_force = (
+        counts["notes"] > 0
+        or counts.get("documents", 0) > 0
+        or any(counts[t] > 0 for t in _VAULT_RECORD_TABLES)
     )
     return DeletePlan(
         target="vault",
@@ -285,6 +458,17 @@ def delete_vault(
             done[table] = conn.execute(
                 f"DELETE FROM {table} WHERE vault = ?", (key,)
             ).rowcount
+        if "documents" in plan.counts:
+            done["document_tombstones"] = _write_document_tombstones(
+                conn, "d.vault = ?", (key,), reason
+            )
+            # 同 vault 內的版本鏈一起刪：先解開自我參照再刪
+            conn.execute(
+                "UPDATE documents SET supersedes = NULL WHERE vault = ?", (key,)
+            )
+            done.update(_delete_documents(conn, "d.vault = ?", (key,)))
+            done["chunk_embeddings"] = plan.counts["chunk_embeddings"]
+            done["document_enrichment"] = plan.counts["document_enrichment"]
         done["aliases"] = plan.counts["aliases"]
         if conn.execute("DELETE FROM vaults WHERE key = ?", (key,)).rowcount != 1:
             raise PlanChanged(f"vault {key!r} 刪除失敗")
@@ -298,15 +482,23 @@ def delete_vault(
         return plan
 
 
+_CASCADE_CHECKS = (
+    ("note_embeddings", "note_seq NOT IN (SELECT seq FROM notes)"),
+    ("note_enrichment", "note_seq NOT IN (SELECT seq FROM notes)"),
+    (
+        "document_chunk_embeddings",
+        "chunk_seq NOT IN (SELECT seq FROM document_chunks)",
+    ),
+    ("document_enrichment", "document_id NOT IN (SELECT id FROM documents)"),
+)
+
+
 def _check_cascade(conn: sqlite3.Connection) -> None:
     """向量與補算紀錄靠外鍵 CASCADE 刪除；外鍵沒開時這裡會抓到孤兒列並 rollback。"""
-    for table in ("note_embeddings", "note_enrichment"):
-        orphans = _count(
-            conn,
-            f"SELECT count(*) FROM {table} "
-            "WHERE note_seq NOT IN (SELECT seq FROM notes)",
-            (),
-        )
+    for table, condition in _CASCADE_CHECKS:
+        if not _has_table(conn, table):
+            continue
+        orphans = _count(conn, f"SELECT count(*) FROM {table} WHERE {condition}", ())
         if orphans:
             raise PlanChanged(f"{table} 有 {orphans} 列孤兒資料（外鍵 CASCADE 未生效）")
 

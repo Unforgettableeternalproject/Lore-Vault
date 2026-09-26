@@ -57,6 +57,8 @@ enrich_worker = true
 # 啟動後在背景做一次 embedding 暖機（用完整 embedding.timeout；不阻擋啟動、失敗只記 log，
 # 結果見 /v1/status 的 embedding.warmup）
 embedding_warmup = true
+# 同程序的文件 worker（抽取 → 切段 → 索引 → chunk 向量）；documents.blob_dir 未設定時不啟動
+document_worker = true
 
 [mcp]
 # 各機器本地 MCP 殼（python -m lore_vault.mcp）。token 與 CF 憑證是密鑰，不寫在這裡：
@@ -76,6 +78,9 @@ snapshot_max_age_hours = 24.0
 # PreToolUse 讀的 concept 快照檔（GET /v1/concepts/export）；未設定時為 <snapshot_dir>/concepts.json
 # hook 端以 client.env 的 LORE_VAULT_CONCEPT_SNAPSHOT 指向同一個檔才會改讀它
 # concept_snapshot_path = "C:/path/to/lore-vault/snapshot/concepts.json"
+# upload 工具可讀的額外目錄（os.pathsep 分隔，Windows 為 ';'）。殼的工作目錄一律可讀——
+# 殼能讀到工作目錄下的任何檔案；路徑含 '..' 或 symlink 逃出白名單一律拒絕
+# upload_roots = "C:/Users/<you>/Documents/lore;D:/worldbuilding"
 
 [documents]
 # 文件原始檔（blob，依 sha256 內容定址、去重）目錄；無預設，未設定時不能收文件。
@@ -85,5 +90,10 @@ snapshot_max_age_hours = 24.0
 max_file_bytes = 26214400
 # 抽出文字總長上限（字元）；超過標 too_large
 max_chars = 2000000
-# pdf／docx／pptx 抽出文字去空白後少於此字數標 empty_extraction（多半是掃描件）
+# pdf 抽出文字去空白後少於此字數標 empty_extraction（多半是掃描件；docx／pptx 不套）
 min_chars = 50
+# 切段：每個 chunk 的估算 token 上限與相鄰 chunk 重疊（只影響之後抽取的文件）
+chunk_max_tokens = 400
+chunk_overlap_tokens = 50
+# 卡在 extracting 超過此秒數 doctor documents.stuck_processing 為 fail
+stuck_seconds = 3600.0

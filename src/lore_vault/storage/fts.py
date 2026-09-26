@@ -24,6 +24,7 @@ import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass
 
+from .documents import eligible_clause
 from .vaults import resolve_read, vault_clause
 
 # CJK 統一表意文字（含擴充 A–F、相容區）、日文假名、韓文音節
@@ -157,3 +158,45 @@ def search_notes(
         (match, *params, limit),
     ).fetchall()
     return [FtsHit(r["id"], r["vault"], -float(r["rank"])) for r in rows]
+
+
+# ── 文件 chunk（T-64）──────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class ChunkFtsHit:
+    document_id: str
+    idx: int
+    vault: str
+    # -bm25：越大越相關（只在同一次查詢內可比較）
+    score: float
+
+
+def search_chunks(
+    conn: sqlite3.Connection, vault: str, query: str, *, space: str, limit: int = 20
+) -> list[ChunkFtsHit]:
+    """在 vault（或明示 `"*"`）內對可索引文件的 chunk 做 BM25 全文檢索。
+
+    vault／space 條件、可索引條件（ready、未被取代）與 MATCH 在同一個 SQL 內、
+    LIMIT 之前套用。
+    """
+    scope = resolve_read(conn, vault, space=space)
+    if limit <= 0:
+        raise ValueError(f"limit 必須大於 0，得到 {limit}")
+    match = build_match_query(query)
+    if match is None:
+        return []
+    clause, params = vault_clause(scope, "d.vault")
+    rows = conn.execute(
+        f"""
+        SELECT c.document_id, c.idx, d.vault, bm25(chunk_fts) AS rank
+        FROM chunk_fts
+        JOIN document_chunks c ON c.seq = chunk_fts.rowid
+        JOIN documents d ON d.id = c.document_id
+        WHERE chunk_fts MATCH ? AND {clause} AND {eligible_clause("d")}
+        ORDER BY rank, c.document_id, c.idx
+        LIMIT ?
+        """,
+        (match, *params, limit),
+    ).fetchall()
+    return [ChunkFtsHit(r[0], int(r[1]), r[2], -float(r[3])) for r in rows]

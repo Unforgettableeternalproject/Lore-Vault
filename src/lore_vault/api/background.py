@@ -7,12 +7,15 @@
   `join_timeout` 秒；執行緒是 daemon，不會卡住程序結束
 - SIGTERM 由 uvicorn 接手 → lifespan 結束 → `stop()`；這裡不另裝訊號處理
 - 單輪例外記 log 後繼續下一輪，執行緒不會靜默死掉；狀態由 `status()` 回報
+- 同一個類別也跑文件 worker（抽取／切段／chunk 向量）：以 `name`、`label`、
+  `progress`（有動作時的一行 log）區分，預設是 note 補算
 """
 
 from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Callable
 from os import PathLike
 from typing import Any
 
@@ -60,6 +63,21 @@ def _has_activity(stats: dict[str, dict[str, Any]]) -> bool:
     )
 
 
+def _note_progress(conn: Any, stats: dict[str, Any]) -> str | None:
+    """note 補算：有動作的輪次回一行進度，否則 None。"""
+    if not _has_activity(stats):
+        return None
+    try:
+        pending = _pending(conn)
+    except Exception:  # noqa: BLE001 - 進度 log 失敗不影響補算
+        pending = (-1, -1)
+    return _progress_line(stats, pending)
+
+
+# (背景執行緒自己的連線, 本輪 stats dict) -> 一行進度 log 或 None（沒動作不印）
+ProgressFormatter = Callable[[Any, dict[str, Any]], str | None]
+
+
 def _describe(exc: BaseException) -> str:
     text = f"{type(exc).__name__}: {exc}"
     return text if len(text) <= _MAX_ERROR else text[: _MAX_ERROR - 1] + "…"
@@ -73,7 +91,13 @@ class BackgroundEnricher:
         *,
         poll_interval: float,
         join_timeout: float = 5.0,
+        name: str = "lore-vault-enrich",
+        label: str = "補算",
+        progress: ProgressFormatter = _note_progress,
     ) -> None:
+        self._name = name
+        self._label = label
+        self._progress = progress
         self._db_path = db_path
         self._factory = factory
         self._poll_interval = poll_interval
@@ -93,9 +117,7 @@ class BackgroundEnricher:
     def start(self) -> None:
         if self._thread is not None:
             raise RuntimeError("worker 已啟動")
-        self._thread = threading.Thread(
-            target=self._run, name="lore-vault-enrich", daemon=True
-        )
+        self._thread = threading.Thread(target=self._run, name=self._name, daemon=True)
         self._thread.start()
 
     def wake(self) -> None:
@@ -112,7 +134,10 @@ class BackgroundEnricher:
         thread.join(self._join_timeout if timeout is None else timeout)
         stopped = not thread.is_alive()
         if not stopped:
-            logger.warning("補算 worker 未在時限內結束（可能卡在進行中的模型呼叫）")
+            logger.warning(
+                "%s worker 未在時限內結束（可能卡在進行中的模型呼叫或抽取）",
+                self._label,
+            )
         return stopped
 
     @property
@@ -132,7 +157,7 @@ class BackgroundEnricher:
                     stats = worker.run_once()
                 except Exception as exc:  # noqa: BLE001 - 單輪失敗不能讓執行緒死掉
                     message = _describe(exc)
-                    logger.warning("補算 worker 本輪失敗：%s", message)
+                    logger.warning("%s worker 本輪失敗：%s", self._label, message)
                     with self._lock:
                         self._last_error = message
                         self._last_run = utc_now()
@@ -140,12 +165,12 @@ class BackgroundEnricher:
                 else:
                     stats_dict = stats.to_dict()
                     # 有動作的輪次才印一行進度，避免每 poll_interval 洗版
-                    if _has_activity(stats_dict):
-                        try:
-                            pending = _pending(conn)
-                        except Exception:  # noqa: BLE001 - 進度 log 失敗不影響補算
-                            pending = (-1, -1)
-                        logger.info(_progress_line(stats_dict, pending))
+                    try:
+                        line = self._progress(conn, stats_dict)
+                    except Exception:  # noqa: BLE001 - 進度 log 失敗不影響補算
+                        line = None
+                    if line:
+                        logger.info(line)
                     with self._lock:
                         self._last_stats = stats_dict
                         self._last_error = None
@@ -154,7 +179,7 @@ class BackgroundEnricher:
                 self._wake.wait(self._poll_interval)
         except Exception as exc:  # noqa: BLE001 - 啟動失敗（開不了 DB 等）要能在 status 看到
             message = _describe(exc)
-            logger.error("補算 worker 無法執行：%s", message)
+            logger.error("%s worker 無法執行：%s", self._label, message)
             with self._lock:
                 self._fatal = message
         finally:

@@ -83,7 +83,7 @@ def _single(lines: list[str]) -> list[Segment]:
 
 
 def extract_json(data: bytes, budget: Budget) -> list[Segment]:
-    text = decode_text(data)
+    text = decode_text(data, budget)
     try:
         value = json.loads(text)
     except (ValueError, RecursionError) as exc:
@@ -92,7 +92,7 @@ def extract_json(data: bytes, budget: Budget) -> list[Segment]:
 
 
 def extract_toml(data: bytes, budget: Budget) -> list[Segment]:
-    text = decode_text(data)
+    text = decode_text(data, budget)
     try:
         value = tomllib.loads(text)
     except (tomllib.TOMLDecodeError, RecursionError) as exc:
@@ -101,7 +101,7 @@ def extract_toml(data: bytes, budget: Budget) -> list[Segment]:
 
 
 def extract_yaml(data: bytes, budget: Budget) -> list[Segment]:
-    text = decode_text(data)
+    text = decode_text(data, budget)
     lines: list[str] = []
     try:
         for index, document in enumerate(yaml.load_all(text, Loader=_YamlLoader)):

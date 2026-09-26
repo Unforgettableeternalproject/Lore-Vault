@@ -26,6 +26,7 @@ ENDPOINTS = [
         {"vault": "folder/a", "id": "x", "expected_updated": "t", "title": "x"},
     ),
     ("post", "/v1/status", None),
+    ("post", "/v1/documents", None),
     ("get", "/v1/openapi.json", None),
     # 不存在的路徑也先過認證：未認證者連 404 都拿不到
     ("get", "/v1/nope", None),
@@ -110,6 +111,7 @@ def test_openapi_is_served_behind_auth(anon):
         "/v1/update",
         "/v1/status",
         "/v1/vaults",
+        "/v1/documents",
         "/v1/snapshot",
         "/v1/episodes",
         "/v1/concepts",

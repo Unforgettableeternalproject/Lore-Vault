@@ -20,7 +20,7 @@ _FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 
 
 def extract_txt(data: bytes, budget: Budget) -> list[Segment]:
-    text = budget.add(decode_text(data))
+    text = budget.add(decode_text(data, budget))
     if not text.strip():
         return []
     return [Segment(text, Locator("offset", 0))]
@@ -37,7 +37,7 @@ def _heading(line: str) -> tuple[int, str] | None:
 
 
 def extract_md(data: bytes, budget: Budget) -> list[Segment]:
-    text = budget.add(decode_text(data))
+    text = budget.add(decode_text(data, budget))
     segments: list[Segment] = []
     stack: list[tuple[int, str]] = []
     locator = Locator("offset", 0)

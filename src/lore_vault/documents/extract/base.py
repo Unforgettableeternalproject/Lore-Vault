@@ -90,6 +90,8 @@ class Extraction:
     char_count: int
     # 亂碼跡象：U+FFFD、私用區字元、`(cid:n)` 殘留的總數（品質警示，不影響成敗）
     garbled_chars: int = 0
+    # 文字類格式偵測到的編碼（utf-8／utf-8-sig／utf-16／cp950）；二進位格式為 None
+    encoding: str | None = None
 
     def __post_init__(self) -> None:
         if not self.segments:
@@ -100,8 +102,8 @@ class Extraction:
 
 @dataclass(frozen=True)
 class Limits:
-    """上限（A19）：單檔 25MB、抽出文字 200 萬字元；二進位文件格式去空白後
-    少於 `min_chars` 視為 empty_extraction（T-57 裁決）。"""
+    """上限（A19）：單檔 25MB、抽出文字 200 萬字元；pdf 去空白後少於 `min_chars`
+    視為 empty_extraction（T-57 裁決；B1 裁決限縮為只套 pdf）。"""
 
     max_bytes: int = 25 * 1024 * 1024
     max_chars: int = 2_000_000
@@ -141,6 +143,8 @@ class Budget:
     def __init__(self, max_chars: int) -> None:
         self.max_chars = max_chars
         self.used = 0
+        # 文字類抽取器解碼時記下偵測到的編碼（`decode_text`），交給 Extraction
+        self.encoding: str | None = None
 
     def add(self, text: str) -> str:
         self.used += len(text)
@@ -220,41 +224,104 @@ _UTF8_BOM = b"\xef\xbb\xbf"
 _TEXT_CONTROL_OK = frozenset("\t\n\r\f\v\x1b")
 # 其他 C0 控制字元佔比超過此值 → 視為二進位
 _BINARY_CONTROL_RATIO = 0.01
+# cp950 文字性檢查：非 ASCII 字元中「中文字、注音、CJK 標點、全形符號」至少佔此比例。
+# cp950 對 Latin-1／cp1252 等其他 8-bit 編碼的高位元組配對常能解出合法漢字，
+# 光靠嚴格解碼成功不足以判定是 Big5
+_CP950_CJK_RATIO = 0.9
+# 中文字中 Big5 常用字（第一級）至少佔此比例
+_CP950_COMMON_RATIO = 0.8
+CP950 = "cp950"
+_CP950_TEXT_RE = re.compile(f"[{CJK_CLASS}㄀-ㄯㆠ-ㆿ]")
 
 
-def decode_text(data: bytes) -> str:
-    """純文字判定與解碼：UTF-8（可帶 BOM）或帶 BOM 的 UTF-16。
-
-    - 含 NUL（UTF-16 以外）或其他 C0 控制字元佔比超過 1% → unsupported_format（二進位）
-    - 不是合法 UTF-8 → unsupported_encoding（例如 Big5、GBK 存檔的文字檔）
-    """
-    if data.startswith(_UTF16_BOMS):
-        try:
-            text = data.decode("utf-16")
-        except UnicodeDecodeError as exc:
-            raise ExtractionError(
-                UNSUPPORTED_ENCODING, f"UTF-16 解碼失敗：{exc.reason}"
-            ) from None
-    else:
-        if b"\x00" in data:
-            raise ExtractionError(
-                UNSUPPORTED_FORMAT, "內容含 NUL 位元組，判定為二進位檔"
-            )
-        if data.startswith(_UTF8_BOM):
-            data = data[len(_UTF8_BOM) :]
-        try:
-            text = data.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise ExtractionError(
-                UNSUPPORTED_ENCODING,
-                f"不是 UTF-8 文字（位置 {exc.start}）；請轉成 UTF-8 後再上傳",
-            ) from None
+def _check_controls(text: str) -> None:
     if text:
         controls = sum(1 for ch in text if ch < " " and ch not in _TEXT_CONTROL_OK)
         if controls / len(text) > _BINARY_CONTROL_RATIO:
             raise ExtractionError(
                 UNSUPPORTED_FORMAT, "控制字元比例過高，判定為二進位檔"
             )
+
+
+def _is_big5_common(ch: str) -> bool:
+    """Big5 常用字（第一級，lead byte 0xA4–0xC6）。"""
+    try:
+        return 0xA4 <= ch.encode(CP950)[0] <= 0xC6
+    except UnicodeEncodeError:
+        return False
+
+
+def looks_like_cp950_text(text: str) -> bool:
+    """cp950 解出的文字是否像真的 Big5 文字：
+
+    - 沒有使用者自定區（私用區）字元
+    - 非 ASCII 字元大多（≥ 90%）是中文字／注音／CJK 標點／全形符號
+    - 中文字大多（≥ 80%）落在 Big5 常用字區：GBK 等其他雙位元組編碼誤解成 cp950
+      時也是一串合法漢字，但會散進次常用字區（自造樣本實測：繁中文字 100%、
+      GBK 誤解 ≤ 40%）
+    """
+    non_ascii = [ch for ch in text if ord(ch) > 0x7F]
+    if not non_ascii:
+        return False
+    if any("" <= ch <= "" for ch in non_ascii):
+        return False
+    cjk = sum(1 for ch in non_ascii if _CP950_TEXT_RE.match(ch))
+    if cjk / len(non_ascii) < _CP950_CJK_RATIO:
+        return False
+    hanzi = [ch for ch in non_ascii if "一" <= ch <= "鿿"]
+    if not hanzi:
+        return False
+    common = sum(1 for ch in hanzi if _is_big5_common(ch))
+    return common / len(hanzi) >= _CP950_COMMON_RATIO
+
+
+def _decode(data: bytes) -> tuple[str, str]:
+    """回傳 (文字, 編碼名)。依序：UTF-16 BOM → UTF-8（可帶 BOM）→ cp950。"""
+    if data.startswith(_UTF16_BOMS):
+        try:
+            return data.decode("utf-16"), "utf-16"
+        except UnicodeDecodeError as exc:
+            raise ExtractionError(
+                UNSUPPORTED_ENCODING, f"UTF-16 解碼失敗：{exc.reason}"
+            ) from None
+    if b"\x00" in data:
+        raise ExtractionError(UNSUPPORTED_FORMAT, "內容含 NUL 位元組，判定為二進位檔")
+    has_bom = data.startswith(_UTF8_BOM)
+    try:
+        if has_bom:
+            return data[len(_UTF8_BOM) :].decode("utf-8"), "utf-8-sig"
+        return data.decode("utf-8"), "utf-8"
+    except UnicodeDecodeError as exc:
+        position = exc.start
+    if not has_bom:
+        try:
+            text = data.decode(CP950)
+        except UnicodeDecodeError:
+            pass
+        else:
+            _check_controls(text)
+            if looks_like_cp950_text(text):
+                return text, CP950
+    raise ExtractionError(
+        UNSUPPORTED_ENCODING,
+        f"不是 UTF-8 或 Big5（cp950）文字（UTF-8 解碼失敗於位置 {position}）；"
+        "請轉成 UTF-8 後再上傳",
+    )
+
+
+def decode_text(data: bytes, budget: Budget | None = None) -> str:
+    """純文字判定與解碼：UTF-8（可帶 BOM）、帶 BOM 的 UTF-16，或 cp950（Big5）。
+
+    - 含 NUL（UTF-16 以外）或其他 C0 控制字元佔比超過 1% → unsupported_format（二進位）
+    - cp950 必須嚴格解碼成功且通過文字性檢查（`looks_like_cp950_text`）才採用
+    - 都不符 → unsupported_encoding（例如 GBK、Shift_JIS、Latin-1 存檔的文字檔）
+
+    有傳 `budget` 時把偵測到的編碼記在 `budget.encoding`。
+    """
+    text, encoding = _decode(data)
+    _check_controls(text)
+    if budget is not None:
+        budget.encoding = encoding
     return normalize_newlines(text)
 
 

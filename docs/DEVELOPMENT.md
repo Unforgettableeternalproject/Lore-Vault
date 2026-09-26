@@ -142,6 +142,7 @@ stdout 是 MCP 協定通道，log 一律寫 stderr（UTF-8）。設定錯誤時�
 | `mcp.snapshot_max_age_hours` | `LORE_VAULT_MCP_SNAPSHOT_MAX_AGE_HOURS` | 24 | doctor 快照年齡門檻 |
 | `mcp.cf_access_env_file` | `LORE_VAULT_MCP_CF_ACCESS_ENV_FILE` | 無 | CF Access token 檔（格式同 `~/.cloudflared/pm-token.env`） |
 | `mcp.concept_snapshot_path` | `LORE_VAULT_MCP_CONCEPT_SNAPSHOT_PATH` | `<snapshot_dir>/concepts.json` | PreToolUse 讀的 concept 快照（T-40）；snapshot_dir 也未設＝不拉 |
+| `mcp.upload_roots` | `LORE_VAULT_MCP_UPLOAD_ROOTS` | 無 | `upload` 可讀的**額外**目錄（`os.pathsep` 分隔，Windows 為 `;`）。殼的工作目錄一律可讀——**殼能讀到工作目錄下的任何檔案** |
 
 密鑰只走環境變數或 `--env-file`，設定檔出現 token／secret 類的鍵會拒絕載入：
 
@@ -155,9 +156,10 @@ stdout 是 MCP 協定通道，log 一律寫 stderr（UTF-8）。設定錯誤時�
 
 `space(action, value?)`、`vault_resolve(cwd?, create?, display?, space?, key?)`、
 `recall(query, vault, kinds?, limit?, budget?)`、
-`get(vault, ids, budget?)`、`list(vault, since?, topics?, cursor?, limit?)`、
+`get(vault, ids, budget?)`、`list(vault, since?, topics?, cursor?, limit?, kinds?)`、
 `write(vault, title, body, topics?, links?, supersedes?)`、
-`update(vault, id, expected_updated, title?, body?, topics?, links?, supersedes?)`、`status(vault?)`。
+`update(vault, id, expected_updated, title?, body?, topics?, links?, supersedes?)`、
+`upload(path, vault?)`、`status(vault?)`（共 9 個）。
 
 - **目前 space**（A18）：殼行程持有、只在記憶體，新行程一律 `dev`；`space(action="set", value=...)`
   切換（不打服務）。其他工具沒有 space 參數，殼在每個 `/v1/*` 請求自動注入（`Shell._send`）；
@@ -168,6 +170,14 @@ stdout 是 MCP 協定通道，log 一律寫 stderr（UTF-8）。設定錯誤時�
   `cwd` 被忽略（回應 `cwd_ignored: true`）；不自動建 `<space>/global`
 - 成功回服務 JSON 原樣（緊湊、不縮排）；錯誤是工具錯誤，內容 `{"error": {...}, "hint", "http_status"}`。
   409 版本衝突附 `current`，以 `current.updated` 當 `expected_updated` 重試
+- `upload(path, vault?)`（T-67）：殼讀本機檔案，multipart 轉送 `POST /v1/documents`（帶目前 space）。
+  `path` 可為絕對或相對殼工作目錄；任何一段是 `..` 直接拒絕；以 realpath（解開 symlink／junction）
+  比對白名單（殼工作目錄＋`mcp.upload_roots`），逃出去回 `path_not_allowed`。殼端先擋大小
+  （`documents.max_file_bytes`，同服務端上限）。`vault` 省略時只在 dev 以殼工作目錄的 binding 解析
+  （不建 vault，回應 `vault_source: "cwd_binding"`）；lore／personal 必須帶。錯誤碼：
+  `path_not_allowed`、`file_not_found`、`not_a_file`、`too_large`、`read_failed`、`vault_required`
+- `recall` 預設同時查 note 與文件段落（`kinds` 預設 `["note", "chunk"]`）；`get` 的 `ids` 可混 note id、
+  `doc:…`（整份文件文字）、`chunk:…`（單段）；`list` 預設同時列 note 與文件（`kinds: ["note"|"document"]`）
 
 ### 快照與降級
 
@@ -185,7 +195,7 @@ stdout 是 MCP 協定通道，log 一律寫 stderr（UTF-8）。設定錯誤時�
 
 | 服務回應 | `recall`／`get`／`list`／`vault_resolve` | `write`／`update`／建 vault | `status` |
 |---|---|---|---|
-| 連線失敗、逾時、協定錯誤、502／503／504 | 讀快照（只走 lexical），標 `degraded`、`degraded_reason: "service_unreachable"`、`snapshot.generated_at`／`checked_at` | 失敗，不排佇列 | 回殼端狀態、`ok: false` |
+| 連線失敗、逾時、協定錯誤、502／503／504 | 讀快照（只走 lexical），標 `degraded`、`degraded_reason: "service_unreachable"`、`snapshot.generated_at`／`checked_at`；快照不含文件：recall 的 `chunk` 列在 `unsupported_kinds`、get 的 `doc:`／`chunk:` id 列在 `unavailable`、list 的 `document` 列在 `unsupported_kinds`（不以空結果冒充「沒有」） | 失敗，不排佇列（含 `upload`） | 回殼端狀態、`ok: false` |
 | 3xx（Access 導向登入）、401、403、其他 4xx、500 等其餘 5xx | 直接報錯（設定、請求或服務端資料錯誤，不降級） | 同左 | 同左 |
 
 - 降級路徑沿用服務層函式對快照唯讀查詢，vault／space 硬範圍、別名、參數驗證與服務端一致
@@ -226,7 +236,8 @@ token 放在 repo 外的 env 檔，不寫進 `.claude.json`：
 | 子指令 | 說明 |
 |---|---|
 | `delete-note --space SPACE --vault KEY --id NOTE_ID [--reason TEXT] [--yes]` | 刪單則 note（vault 在該 space 內解析，可用別名；`--space` 必填） |
-| `delete-vault --key KEY [--force] [--reason TEXT] [--yes]` | 刪整個 vault；只接受正式 key。vault 內有 note 或 episode／concept／injection 時必須 `--force` |
+| `delete-vault --key KEY [--force] [--reason TEXT] [--yes]` | 刪整個 vault；只接受正式 key。vault 內有 note、文件或 episode／concept／injection 時必須 `--force`；文件一併刪並各寫文件墓碑 |
+| `delete-document --space SPACE --vault KEY --id DOC_ID [--reason TEXT] [--yes]` | 刪單份文件：chunk、chunk_fts、向量（CASCADE）、抽取／補算紀錄（CASCADE），寫 `document_tombstones`。blob 不刪（其他 vault／版本可能共用），沒人引用時 doctor `documents.orphan_blobs` 回報。指向它的新版本改指向它的前一版；刪的是現行版本時前一版同交易回到索引（向量由 worker 補）。不提供 undelete：要恢復就重新上傳 |
 | `undelete-note --id NOTE_ID [--yes]` | 移除墓碑；下次重跑匯入時該 note 會匯回 |
 | `set-space --key KEY --space SPACE [--yes]` | 把 vault 換到另一個 space（A19）；只接受正式 key。前綴規則與建立時相同：目標非 dev 時 key 與別名都必須以 `<space>/` 開頭，不合即拒（dry-run 就擋，不改 key）。換完後 MCP 殼的降級快照要等下次快照更新才反映 |
 
@@ -406,17 +417,59 @@ KEY=VALUE、只用標準庫解析；行程環境變數中同名鍵優先。
 `pipeline.py --push-concepts [--dry-run]`（`POST /v1/concepts` upsert；刪除＝上次推過、這次已不在池內的 id，
 記在 `pipeline_state.json`）。尚未接進 STAGES，三個判卷階段不變。
 
-## 文件存儲與抽取（T-58～T-62，上傳／worker／索引尚未接上）
+## 文件存儲與檢索（T-58～T-69）
 
 - schema v8：`documents`（必屬某 vault，查詢經 `vault_clause` 強制 space＋vault）、`document_chunks`、
   `chunk_fts`（比照 `note_fts`）、`document_chunk_embeddings`、`document_tombstones`、`document_enrichment`。
-  metadata 原語在 `storage/documents.py`。
+  v9：`documents.encoding`（文字檔偵測到的編碼）、`document_chunks.overlap`（與前一段重疊的字元數，
+  `get(doc:…)` 串回全文時略過）、`document_enrichment.kind` 加 `'embedding'`（向量補算的嘗試紀錄）。
+  metadata 與版本在 `storage/documents.py`；chunk、索引同步、worker 佇列與對帳在 `storage/document_index.py`；
+  chunk 向量在 `storage/chunk_vectors.py`
 - blob：`storage/blobs.py` 的 `BlobStore`，`<documents.blob_dir>/<sha256 前 2 碼>/<sha256>`，同目錄暫存檔＋`os.replace`，
-  讀取驗雜湊。容器內 `blob_dir = "/data/blobs"`（named volume），不刪 blob（孤兒由 doctor 回報）。
+  讀取驗雜湊。容器內 `blob_dir = "/data/blobs"`（named volume），不刪 blob（孤兒由 doctor 回報）
 - 抽取器：`lore_vault.documents.extract.extract(data, filename, mime, limits=Limits.from_config(cfg.documents))`，
-  成功回 `Extraction`（segments 非空），失敗拋 `ExtractionError(code, detail)`；格式判定與錯誤碼見模組 docstring。
-- 設定 `[documents]`：`blob_dir`、`max_file_bytes`（25MB）、`max_chars`（200 萬）、`min_chars`（50，pdf／docx／pptx
-  去空白字數低於此值為 `empty_extraction`）。
-- doctor 分類 `documents`（`--blob-dir`，未給則取設定 `documents.blob_dir`，都沒有為 skipped）：
+  成功回 `Extraction`（segments 非空、`encoding`），失敗拋 `ExtractionError(code, detail)`；格式判定與錯誤碼見模組 docstring。
+  文字檔編碼依序：UTF-16 BOM → UTF-8（可帶 BOM）→ cp950（Big5）；cp950 須嚴格解碼成功且通過文字性檢查
+  （非 ASCII 字元 ≥ 90% 為中文字／注音／CJK 標點、中文字 ≥ 80% 落在 Big5 常用字區——擋 GBK 等誤解），否則
+  `unsupported_encoding`。`min_chars`（預設 50）只套 pdf（判掃描件），docx／pptx／文字格式只在完全沒字時 `empty_extraction`
+- 切段（`documents/chunking.py`）：先依結構段（標題／頁／投影片／整份），超過上限才段內定長切。
+  預設每 chunk 估算 ≤ 400 token、重疊 50 token（12.5%）；token 以字元粗估（CJK 1.5、其他非空白 0.25、空白 0，
+  約 266 個中文字／1600 個英文字元）。切點優先：空行 → 換行 → 句末標點 → 空白／逗號 → 硬切。
+  locator：`offset` 類改成段內起始位置；其他類加 `part`（1 起算）。不設最小長度（短投影片照收）
+- 上傳（`POST /v1/documents`，multipart：`file`、`vault`、`space` 必填，`filename?`、`mime?`）：
+  大小在讀 body 時就擋（`Content-Length` 超過先拒；chunked 則邊讀邊數），413 `too_large`；格式不支援 400
+  `unsupported_format`；兩者都不寫 blob、不建列。未設 `blob_dir` 回 500 `documents_not_configured`。
+  回應 `{document_id, status, sha256, duplicate, retried, vault, space, filename, version, supersedes, size_bytes}`
+  （新列或重試 201、duplicate 200）。重複上傳規則（同 vault 內）：
+  - 同 sha256 且現行（ready／pending／extracting、未被取代）→ 回既有文件、`duplicate: true`、不重新排隊
+  - 同 sha256 的現行列只有 failed → 沿用那一列改回 pending 重跑（檔名／MIME 換成這次的）、`retried: true`
+  - 同檔名、內容不同 → 新版本：`supersedes` 指向同檔名的現行版本（非 failed、未被取代），`version` = 該檔名最大版本 + 1
+  - 同 sha256 的列都已被取代（改回舊內容）→ 當新內容處理（新版本），blob 共用
+- 版本與索引資格：「被取代」＝任一 ready 文件沿 `supersedes` 一路往前追到的版本（遞移；中間版本失敗也算）。
+  被取代的文件在新版 ready 的**同一交易**退出 chunk_fts 與向量（新版沒 ready 前舊版照常可搜），但仍可
+  `get`／`list`（標 `superseded_by`）
+- 背景 worker（`documents/worker.py`，`api.background.BackgroundEnricher` 以 `name="lore-vault-documents"` 在服務程序內跑；
+  `api.document_worker`，預設開，`blob_dir` 未設時不啟動；上傳時喚醒）：pending → extracting → ready／failed。
+  `ExtractionError` 直接 failed（不重試）；其他例外（含 blob 遺失／損毀）有上限重試（`worker.max_attempts`、
+  `worker.retry_backoff` 指數退避），達上限 failed（`error_code=corrupt`，detail 記原因）。程序中斷遺留的
+  extracting 在 worker 第一輪收回 pending。ready 後補 chunk 向量（`embedding.*` 設定，含 keep_alive、每分鐘上限）；
+  向量失敗以文件為單位記嘗試，達上限不再自動補（lexical 仍可命中）。每輪有動作印一行
+  `文件本輪：抽取 完成 …／失敗 …／重試 …／放棄 …；向量 …。剩餘 待抽取 …、缺向量 chunk …`
+- recall／get／list：見 docs/ARCHITECTURE.md「MCP 介面」。快照（`GET /v1/snapshot`）明確排除文件表
+  （`storage.snapshot.SNAPSHOT_EXCLUDED_TABLES`，產生時核對為空，否則拒絕產生）
+- 設定 `[documents]`：`blob_dir`、`max_file_bytes`（25MB）、`max_chars`（200 萬）、`min_chars`（50，只套 pdf）、
+  `chunk_max_tokens`（400）、`chunk_overlap_tokens`（50，不可超過上限一半）、`stuck_seconds`（3600）；
+  `[api] document_worker`（true）；`[mcp] upload_roots`
+- doctor 分類 `documents`（`--blob-dir`，未給則取設定 `documents.blob_dir`，都沒有時 blob 兩項為 skipped；
+  沒有 documents 表的舊 schema 全部 skipped）：
   - `documents.blob_exists`：任何 document 引用的 blob 遺失或雜湊不符為 fail（不分狀態）
   - `documents.orphan_blobs`：無引用的 blob、不符佈局的檔案、超過 1 小時的遺留暫存檔為 warn
+  - `documents.chunk_count_matches`：ready 文件的 `chunk_count` ≠ 實際 chunk 數、或非 ready 文件有 chunk 為 fail
+  - `documents.fts_rows_match_chunks`：chunk_fts 與可索引文件（ready、未被取代）的 chunk 不是一對一為 fail
+  - `documents.superseded_chunks_removed`：被取代或非 ready 的文件仍有 FTS／向量列為 fail（recall 會回舊版）
+  - `documents.vector_rows_match_chunks`：孤兒向量或維度不符為 fail；可索引 chunk 缺向量為 warn
+  - `documents.stuck_processing`：extracting 超過 `documents_stuck_seconds`（預設 3600）為 fail
+  - `documents.failed`：抽取失敗與向量補算放棄的文件數（附錯誤碼分布）為 warn
+  - `documents.backlog`：待抽取文件與缺向量 chunk，最舊一筆等超過 1 小時為 warn
+  - 以上每項都有「破壞資料後變紅／黃」的測試（`tests/storage/test_document_checks.py`）
+- `/v1/status` 另附 `documents: {enabled, worker, backlog}`；文件 worker 起不來（fatal）時 `ok: false`

@@ -21,6 +21,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from lore_vault.documents import service as document_service
 from lore_vault.recall.embedder import REASON_UNAVAILABLE, Embedder, embed_text
 from lore_vault.schema import Note
 from lore_vault.schema.chars import check_fields
@@ -34,7 +35,7 @@ from lore_vault.storage.notes import (
     update_note_if,
 )
 from lore_vault.storage.timeutil import normalize_utc, utc_now
-from lore_vault.storage.vaults import resolve_write
+from lore_vault.storage.vaults import resolve_read, resolve_write
 
 from .summary import display_summary
 from .text import embedding_text
@@ -382,11 +383,14 @@ class GetResult:
     truncated: bool
     budget: int
     used_chars: int
+    # 這個模式下查不了的 id（降級讀快照時的文件／chunk id）：不是不存在
+    unavailable: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "items": self.items,
             "missing": self.missing,
+            "unavailable": self.unavailable,
             "truncated": self.truncated,
             "budget": self.budget,
             "used_chars": self.used_chars,
@@ -400,9 +404,16 @@ def get(
     *,
     space: str,
     budget: int = DEFAULT_GET_BUDGET,
+    documents_available: bool = True,
 ) -> GetResult:
-    """批次取全文。依傳入順序分配 body 字數預算；超過時該篇 body 截斷、之後各篇
-    body 為空字串，並在該項標 `truncated: true`、`body_chars` 為原文字數。"""
+    """批次取全文。`ids` 可混 note id、文件 id（`doc:…`，回整份文件文字）與
+    chunk id（`chunk:…`，回該段全文），依前綴分派（T-66）。
+
+    依傳入順序分配字數預算（note 的 body、文件／chunk 的 text）；超過時該項截斷、
+    之後各項為空字串，並在該項標 `truncated: true`、`body_chars`／`text_chars`
+    為原文字數。
+    `documents_available=False`（降級讀快照）時文件／chunk id 列在 `unavailable`。
+    """
     if isinstance(ids, str):
         raise TypeError("ids 必須是清單，不可傳單一字串")
     unique = list(dict.fromkeys(ids))
@@ -412,12 +423,36 @@ def get(
         raise ValueError(f"一次最多取 {MAX_GET_IDS} 則，得到 {len(unique)}")
     if isinstance(budget, bool) or not isinstance(budget, int) or budget <= 0:
         raise ValueError(f"budget 必須是正整數，得到 {budget!r}")
-    found = {n.id: n for n in get_notes(conn, vault, unique, space=space)}
+    refs = [i for i in unique if document_service.is_document_ref(i)]
+    note_ids = [i for i in unique if not document_service.is_document_ref(i)]
+    found = {n.id: n for n in get_notes(conn, vault, note_ids, space=space)}
+    doc_items: dict[str, dict[str, Any]] = {}
+    unavailable: list[str] = []
+    if refs and documents_available:
+        doc_items = document_service.resolve_refs(conn, vault, refs, space=space)
+    elif refs:
+        unavailable = refs
     items: list[dict[str, Any]] = []
     remaining = budget
     any_truncated = False
-    for note_id in unique:
-        note = found.get(note_id)
+    for item_id in unique:
+        doc_item = doc_items.get(item_id)
+        if doc_item is not None:
+            full = doc_item["text"]
+            text = full[:remaining]
+            truncated = len(text) < len(full)
+            remaining -= len(text)
+            any_truncated = any_truncated or truncated
+            items.append(
+                {
+                    **doc_item,
+                    "text": text,
+                    "text_chars": len(full),
+                    "truncated": truncated,
+                }
+            )
+            continue
+        note = found.get(item_id)
         if note is None:
             continue
         body = note.body[:remaining]
@@ -428,6 +463,7 @@ def get(
         items.append(
             {
                 "id": note.id,
+                "kind": "note",
                 "vault": note.vault,
                 "title": note.title,
                 "summary": summary,
@@ -442,8 +478,14 @@ def get(
                 "updated": note.updated,
             }
         )
-    missing = [i for i in unique if i not in found]
-    return GetResult(items, missing, any_truncated, budget, budget - remaining)
+    missing = [
+        i
+        for i in unique
+        if i not in found and i not in doc_items and i not in unavailable
+    ]
+    return GetResult(
+        items, missing, any_truncated, budget, budget - remaining, unavailable
+    )
 
 
 # ── list ────────────────────────────────────────────────────────────
@@ -453,6 +495,8 @@ def get(
 class ListResult:
     items: list[dict[str, Any]]
     next_cursor: str | None
+    # 要求了但這個模式下列不出來的種類（降級讀快照時的 document）
+    unsupported_kinds: list[str] = field(default_factory=list)
 
     @property
     def has_more(self) -> bool:
@@ -463,6 +507,7 @@ class ListResult:
             "items": self.items,
             "next_cursor": self.next_cursor,
             "has_more": self.has_more,
+            "unsupported_kinds": self.unsupported_kinds,
         }
 
 
@@ -485,6 +530,25 @@ def _decode_cursor(cursor: str) -> tuple[str, str]:
     return data[0], data[1]
 
 
+LIST_KIND_NOTE = "note"
+LIST_KIND_DOCUMENT = "document"
+LIST_KINDS = (LIST_KIND_NOTE, LIST_KIND_DOCUMENT)
+
+
+def _list_kinds(kinds: Sequence[str] | None) -> tuple[str, ...]:
+    if kinds is None:
+        return LIST_KINDS
+    if isinstance(kinds, str):
+        raise TypeError("kinds 必須是清單，不可傳單一字串")
+    requested = tuple(dict.fromkeys(kinds))
+    if not requested:
+        raise ValueError("kinds 不可為空清單；用預設請傳 None")
+    unknown = sorted(set(requested) - set(LIST_KINDS))
+    if unknown:
+        raise ValueError(f"未知的 kinds：{unknown}；可用 {list(LIST_KINDS)}")
+    return requested
+
+
 def list_(
     conn: sqlite3.Connection,
     vault: str,
@@ -494,30 +558,70 @@ def list_(
     topics: Sequence[str] | None = None,
     cursor: str | None = None,
     limit: int = DEFAULT_LIST_LIMIT,
+    kinds: Sequence[str] | None = None,
+    documents_available: bool = True,
 ) -> ListResult:
-    """標題清單，依 updated 由新到舊。`next_cursor` 非 None 代表還有下一頁。"""
+    """標題清單，依 updated 由新到舊；note 與文件（`kinds` 預設兩者）合併分頁。
+
+    `next_cursor` 非 None 代表還有下一頁。文件沒有 topics：指定 `topics` 時只列 note。
+    `documents_available=False`（降級讀快照）時 document 列在 `unsupported_kinds`。
+    """
     if isinstance(limit, bool) or not isinstance(limit, int):
         raise TypeError("limit 必須是整數")
     if not 1 <= limit <= MAX_LIST_LIMIT:
         raise ValueError(f"limit 必須在 1–{MAX_LIST_LIMIT}，得到 {limit}")
+    wanted = _list_kinds(kinds)
     decoded = _decode_cursor(cursor) if cursor is not None else None
-    notes, next_cursor = list_notes(
-        conn,
-        vault,
-        space=space,
-        since=since,
-        topics=topics,
-        limit=limit,
-        cursor=decoded,
+    unsupported: list[str] = []
+    rows: list[tuple[str, str, dict[str, Any]]] = []
+    more = False
+    if LIST_KIND_NOTE in wanted:
+        notes, next_notes = list_notes(
+            conn,
+            vault,
+            space=space,
+            since=since,
+            topics=topics,
+            limit=limit,
+            cursor=decoded,
+        )
+        more = more or next_notes is not None
+        rows.extend(
+            (
+                n.updated,
+                n.id,
+                {
+                    "id": n.id,
+                    "kind": LIST_KIND_NOTE,
+                    "vault": n.vault,
+                    "title": n.title,
+                    "topics": list(n.topics),
+                    "updated": n.updated,
+                },
+            )
+            for n in notes
+        )
+    if LIST_KIND_DOCUMENT in wanted and topics is None:
+        if documents_available:
+            page, next_docs = document_service.list_page(
+                conn,
+                vault,
+                space=space,
+                since=normalize_utc(since) if since is not None else None,
+                limit=limit,
+                cursor=decoded,
+            )
+            more = more or next_docs is not None
+            rows.extend(page)
+        else:
+            resolve_read(conn, vault, space=space)
+            unsupported.append(LIST_KIND_DOCUMENT)
+    rows.sort(key=lambda r: (r[0], r[1]), reverse=True)
+    more = more or len(rows) > limit
+    page_rows = rows[:limit]
+    next_cursor = (
+        _encode_cursor((page_rows[-1][0], page_rows[-1][1]))
+        if more and page_rows
+        else None
     )
-    items = [
-        {
-            "id": n.id,
-            "vault": n.vault,
-            "title": n.title,
-            "topics": list(n.topics),
-            "updated": n.updated,
-        }
-        for n in notes
-    ]
-    return ListResult(items, _encode_cursor(next_cursor) if next_cursor else None)
+    return ListResult([r[2] for r in page_rows], next_cursor, unsupported)

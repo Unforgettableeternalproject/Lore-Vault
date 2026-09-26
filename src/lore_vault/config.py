@@ -113,6 +113,9 @@ class ApiConfig:
     # 服務啟動後在背景做一次 embedding 暖機（載入 Ollama 模型）；
     # 不阻擋啟動、失敗只記 log
     embedding_warmup: bool = True
+    # 同程序的文件 worker（抽取 → 切段 → 索引 → chunk 向量補算）；
+    # documents.blob_dir 未設定時不啟動
+    document_worker: bool = True
 
 
 @dataclass(frozen=True)
@@ -145,6 +148,9 @@ class McpConfig:
     # `<snapshot_dir>/concepts.json`，snapshot_dir 也未設定就不拉。
     # 刻意不預設成 spike 現行的 concepts.json（切換時再改指向）
     concept_snapshot_path: str | None = None
+    # `upload` 工具可讀取的額外目錄（以 os.pathsep 分隔，Windows 為 ';'）。
+    # 殼的工作目錄一律在白名單內（A19 D10-6）；殼能讀到其下任何檔案
+    upload_roots: str | None = None
 
 
 @dataclass(frozen=True)
@@ -158,8 +164,15 @@ class DocumentsConfig:
     max_file_bytes: int = 25 * 1024 * 1024
     # 抽出文字總長上限（字元），超過標 too_large
     max_chars: int = 2_000_000
-    # pdf／docx／pptx 抽出文字去空白後少於此字數標 empty_extraction（多半是掃描件）
+    # pdf 抽出文字去空白後少於此字數標 empty_extraction（多半是掃描件；B1 裁決只套 pdf）
     min_chars: int = 50
+    # 切段（設計 4.2）：每個 chunk 的估算 token 上限與相鄰 chunk 的重疊 token 數。
+    # token 以字元粗估（`documents.chunking.estimate_tokens`），不是實際 tokenizer。
+    # 只影響之後抽取的文件；已索引的文件不重切
+    chunk_max_tokens: int = 400
+    chunk_overlap_tokens: int = 50
+    # 卡在 extracting 超過此秒數 doctor `documents.stuck_processing` 為 fail
+    stuck_seconds: float = 3600.0
 
 
 @dataclass(frozen=True)
@@ -330,6 +343,8 @@ def _validate(config: Config) -> None:
         "mcp.snapshot_max_age_hours": config.mcp.snapshot_max_age_hours,
         "documents.max_file_bytes": config.documents.max_file_bytes,
         "documents.max_chars": config.documents.max_chars,
+        "documents.chunk_max_tokens": config.documents.chunk_max_tokens,
+        "documents.stuck_seconds": config.documents.stuck_seconds,
     }
     for name, value in positive.items():
         if value <= 0:
@@ -340,10 +355,15 @@ def _validate(config: Config) -> None:
         "worker.retry_backoff": config.worker.retry_backoff,
         "mcp.snapshot_interval": config.mcp.snapshot_interval,
         "documents.min_chars": config.documents.min_chars,
+        "documents.chunk_overlap_tokens": config.documents.chunk_overlap_tokens,
     }
     for name, value in non_negative.items():
         if value < 0:
             raise ConfigError(f"{name} 不可為負")
+    if config.documents.chunk_overlap_tokens * 2 > config.documents.chunk_max_tokens:
+        raise ConfigError(
+            "documents.chunk_overlap_tokens 不可超過 chunk_max_tokens 的一半"
+        )
     if not config.mcp.base_url.startswith(("http://", "https://")):
         raise ConfigError("mcp.base_url 必須以 http:// 或 https:// 開頭")
 
