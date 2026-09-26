@@ -135,3 +135,23 @@ Ollama 另裝了 `nomic-embed-text`，PM 未使用。
 ### D8 跨機器的 MCP transport 與認證
 
 **已定案（A15，先試做）。**
+
+### D9 內容分群（space）
+
+艾斯維爾 2026-09-26 提出：Lore Vault 不只是專案開發記憶，還要承載世界觀構築、私人筆記等（這才是 PM 移植前 Lore Vault 的原意），需依用途分群。提案：
+
+- vault 之上加一層 space（例如 `dev`／`lore`／`personal`），現有 15 本與 `global` 全歸 `dev`
+- 檢索預設限同一 space，跨 space 需明示（同 vault 硬範圍的做法）
+- token 綁可存取的 space：coding agent 與遠端 MCP 殼預設只開 `dev`，U.E.P 開 `lore`，避免私人內容被所有 agent 檢索
+
+待定：space 名稱與數量、token 範圍是否採用、與 PM 切換的先後順序。
+
+### D10 檔案（文件）存儲與檢索
+
+艾斯維爾 2026-09-26 提出：agent 要能加入與檢索檔案（設定檔、簡報、世界觀文件等），U.E.P 需要讀取這些文件理解世界觀。Podcast 不做。提案：
+
+- MCP 殼新增上傳工具（讀本機檔案上傳），HTTP 另開上傳端點；原始檔以內容雜湊存於 docker volume，去重
+- 抽文字：md、txt、json、yaml、toml、pdf、docx、pptx（圖片 OCR 暫不做）
+- 切段後與 notes 共用 FTS + 向量檢索與 vault／space 範圍；recall 可回文件段落並標來源與位置，get 可取整份或指定段落
+
+待定：格式優先序、大小上限、切段策略、與 D9 一起排程。
