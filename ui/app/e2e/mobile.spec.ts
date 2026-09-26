@@ -1,14 +1,25 @@
 // 手機版 smoke（T-86，Pixel 7 profile）：抽屜導覽、觸控目標 ≥ 44px、
-// 375／414／768（與桌面 1280）寬度下逐畫面沒有橫向捲動、檢索與筆記詳情可用；抽屜開著時跑 axe。
+// 360／375／414／768（與桌面 1280）寬度下逐畫面沒有橫向捲動、檢索與筆記詳情可用；抽屜開著時跑 axe。
 import { expect, test, type Page } from '@playwright/test';
 
 import { axeViolations, createVault, login, watchPage, writeNote } from './helpers';
 
 const VAULT = 'folder/e2e-mobile';
+// 正式站的 vault key 多是不含空白的長 GitHub 路徑：出現在 vault 列表、維護頁、麵包屑與記憶層錨點，
+// 是 360px 橫向溢出的根因（短 key 測不出來）。沿用真實形態（含「.」），
+// 直接開 /ui/maint/<encoded key> 也同時驗證服務端 SPA fallback 不會把它當靜態檔回 404。
+const LONG_VAULT = 'github.com/unforgettableeternalproject/u.e.p-s-testseperatememorysystem-e2e-mobile';
 let noteId = '';
+let longNoteId = '';
 
 test.beforeAll(async ({ request }) => {
   await createVault(request, VAULT, 'E2E 手機版：名稱故意取得很長來測試窄螢幕的截斷與換行');
+  await createVault(request, LONG_VAULT, 'TestSeperateMemorySystem');
+  longNoteId = await writeNote(request, {
+    vault: LONG_VAULT,
+    title: 'mobilequartz 長 key vault 的筆記',
+    body: '路徑 `C:/Users/Bernie/source/repos/Unforgettableeternalproject/Chatroom/bridge/chatroom_mcp/watch.py`。',
+  });
   noteId = await writeNote(request, {
     vault: VAULT,
     title: 'mobilequartz 很長的標題用來測試窄螢幕換行 PreToolUse_hook_budget_configuration_value',
@@ -79,6 +90,20 @@ test('抽屜導覽、觸控目標與檢索', async ({ page }) => {
   // 深淺色、登出在抽屜底部
   await page.getByRole('button', { name: '開啟導覽選單' }).click();
   await expect(page.getByRole('button', { name: '切換為淺色' })).toBeVisible();
+  // 三顆是圖示按鈕：有名稱與 title、排成一列、觸控目標 ≥ 44px
+  const tools = page.getByRole('group', { name: '介面工具' }).getByRole('button');
+  await expect(tools).toHaveCount(3);
+  const tops = new Set<number>();
+  for (const [i, name] of ['切換為淺色', '快捷鍵說明', '登出'].entries()) {
+    const btn = tools.nth(i);
+    await expect(btn).toHaveAccessibleName(name);
+    await expect(btn).toHaveAttribute('title', new RegExp(name));
+    const box = (await btn.boundingBox())!;
+    expect(box.height).toBeGreaterThanOrEqual(44);
+    expect(box.width).toBeGreaterThanOrEqual(44);
+    tops.add(Math.round(box.y));
+  }
+  expect(tops.size).toBe(1);
   await page.getByRole('button', { name: '切換為淺色' }).click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
   // 點遮罩關閉
@@ -102,7 +127,7 @@ test('抽屜導覽、觸控目標與檢索', async ({ page }) => {
   await watch.assertClean();
 });
 
-for (const width of [375, 414, 768, 1280]) {
+for (const width of [360, 375, 414, 768, 1280]) {
   test(`${width}px：逐畫面沒有橫向捲動`, async ({ page }) => {
     test.setTimeout(90_000);
     await page.setViewportSize({ width, height: 860 });
@@ -112,11 +137,13 @@ for (const width of [375, 414, 768, 1280]) {
       '/ui/search?q=mobilequartz',
       '/ui/notes',
       `/ui/notes/${noteId}`,
+      `/ui/notes/${longNoteId}`,
       '/ui/notes/new',
       '/ui/docs',
       '/ui/vaults',
       '/ui/maint',
       `/ui/maint/${encodeURIComponent(VAULT)}`,
+      `/ui/maint/${encodeURIComponent(LONG_VAULT)}`,
       '/ui/health',
       '/ui/memory',
       '/ui/settings',

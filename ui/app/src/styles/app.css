@@ -13,6 +13,9 @@
   --lv-info-text: #1d5fa8;
   --lv-zone-text: var(--accent-ink);
   --lv-focus: var(--accent-ink);
+  --lv-content-max: 1600px;
+  /* 按鈕、篩選 chip、徽章的圓角：方形（Eternity 文件站風格），見「按鈕形狀」段 */
+  --lv-radius-control: 2px;
 }
 [data-theme='dark'] {
   --ink-mute: #9a9585;
@@ -111,6 +114,7 @@ button { font: inherit; }
   color: var(--lv-gold-text);
 }
 .lv-icon-btn { min-width: 44px; justify-content: center; }
+.lv-icon { display: block; flex: none; }
 
 /* ── 啟動與登入 ───────────────────────────────────────── */
 .lv-boot {
@@ -183,7 +187,7 @@ button { font: inherit; }
   border: 1px solid rgba(213, 182, 24, .5);
   background: rgba(213, 182, 24, .08);
   padding: 5px 10px;
-  border-radius: var(--radius-pill);
+  border-radius: var(--lv-radius-control);
   cursor: pointer;
 }
 
@@ -197,7 +201,7 @@ button { font: inherit; }
   padding: 0 14px 0 6px;
   background: var(--zone-tint);
   border: 1px solid var(--zone-stroke);
-  border-radius: var(--radius-pill);
+  border-radius: var(--lv-radius-control);
   color: var(--ink);
   cursor: pointer;
 }
@@ -307,7 +311,8 @@ button { font: inherit; }
 .lv-write-target__label { font-family: var(--font-mono); font-size: 9px; letter-spacing: .22em; color: var(--ink-mute); }
 .lv-write-target__value { margin-top: 6px; font-size: 13px; font-weight: 600; }
 .lv-main { padding: 40px 56px 80px; min-width: 0; }
-.lv-screen { max-width: 940px; }
+/* 主內容吃滿可用寬度；只在超寬螢幕設上限。正文的閱讀寬度由各檢視頁自己限制（.lv-detail__main、.lv-new__main） */
+.lv-screen { max-width: var(--lv-content-max); }
 .lv-placeholder { margin-top: 8px; }
 
 /* ── 共用小元件（T-79～T-81）──────────────────────────── */
@@ -324,6 +329,12 @@ button { font: inherit; }
 }
 .lv-muted { color: var(--ink-mute); }
 .lv-mono { font-family: var(--font-mono); font-size: 11px; }
+/* 橫向溢出的根因：vault key、錨點路徑等不含空白的長 mono 字串撐破容器。一律允許任意處斷行 */
+.lv-mono, .lv-code-tag, .lv-crumb, .lv-crumb__link, .lv-eyebrow, .lv-title,
+.lv-table__summary, .lv-summary-box__text { overflow-wrap: anywhere; min-width: 0; }
+/* 摘要裡的長路徑（例如 `C:/Users/.../watch.py`）：flex 子項預設 min-width:auto 會撐寬整列 */
+.lv-table__summary > * { min-width: 0; }
+.lv-crumb__link { text-align: left; }
 .lv-small { font-size: 11px; }
 .lv-upper { text-transform: uppercase; }
 .lv-spacer { flex: 1; }
@@ -338,7 +349,7 @@ button { font: inherit; }
   font-family: var(--font-mono); font-size: 10px; padding: 1px 5px; margin: 0 4px;
   border: 1px solid var(--line-strong); border-radius: 3px; color: var(--ink-soft);
 }
-.lv-screen--wide { max-width: 1100px; }
+.lv-screen--wide { max-width: var(--lv-content-max); }
 .lv-screen__head { display: flex; justify-content: space-between; align-items: flex-end; gap: 24px; flex-wrap: wrap; }
 .lv-title--tight { margin-bottom: 0; }
 .lv-hint--inline { margin: 8px 0 0; }
@@ -413,7 +424,7 @@ button { font: inherit; }
 /* chips */
 .lv-chips { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .lv-chip {
-  padding: 5px 12px; border-radius: var(--radius-pill); border: 1px solid var(--line-strong);
+  padding: 5px 12px; border-radius: var(--lv-radius-control); border: 1px solid var(--line-strong);
   background: transparent; color: var(--ink-soft); font-size: 12px; cursor: pointer;
 }
 .lv-chip:hover { color: var(--ink); }
@@ -454,12 +465,8 @@ button { font: inherit; }
 .lv-result__title { font-family: var(--font-serif-tc); font-size: 17px; font-weight: 600; color: var(--ink-title); line-height: 1.5; overflow-wrap: anywhere; }
 .lv-result__summary { display: flex; gap: 10px; margin-top: 6px; align-items: baseline; }
 .lv-result__text { font-family: var(--font-serif-tc); font-size: 14px; line-height: 1.8; color: var(--ink-soft); min-width: 0; overflow-wrap: anywhere; }
-.lv-result__meta { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; text-align: right; }
-.lv-result__vault { font-size: 12px; color: var(--ink-soft); }
-.lv-result__author { font-family: var(--font-mono); font-size: 11px; color: var(--ink-soft); }
-.lv-table__who { display: flex; flex-direction: column; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
-.lv-result__score { font-family: var(--font-mono); font-size: 10px; color: var(--ink-mute); }
-.lv-result__score.is-degraded { color: var(--lv-gold-text); }
+.lv-result__meta { display: flex; flex-direction: column; gap: 5px; align-items: flex-end; text-align: right; max-width: 220px; }
+.lv-table__who { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; overflow-wrap: anywhere; }
 .lv-truncated {
   margin-top: 20px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
   padding: 14px 18px; border: 1px dashed var(--line-strong); border-radius: 4px;
@@ -469,11 +476,47 @@ button { font: inherit; }
 .lv-truncated__text strong { color: var(--ink-title); }
 
 /* ── 列表（筆記／文件）──────────────────────────────────── */
+/* 頁面內 vault 篩選器（components/VaultPicker）：可搜尋的下拉，與側欄共用 AppEnv.vault */
+.lv-vpick { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.lv-vpick__box { position: relative; flex: 1 1 auto; width: 300px; max-width: 100%; min-width: 0; }
+.lv-vpick__input {
+  width: 100%; box-sizing: border-box; padding: 7px 30px 7px 10px; background: var(--bg-sunken);
+  border: 1px solid var(--line-strong); border-radius: var(--lv-radius-control); color: var(--ink);
+  font-family: var(--font-sans); font-size: 13px; cursor: pointer; text-overflow: ellipsis;
+}
+.lv-vpick__input:focus { border-color: var(--zone-stroke, var(--uep-gold)); cursor: text; }
+.lv-vpick__input::placeholder { color: var(--ink-mute); opacity: 1; }
+.lv-vpick__caret {
+  position: absolute; right: 10px; top: 50%; transform: translateY(-50%); pointer-events: none;
+  font-size: 11px; color: var(--ink-mute);
+}
+.lv-vpick.is-open .lv-vpick__caret { transform: translateY(-50%) rotate(180deg); }
+.lv-vpick__list {
+  position: absolute; left: 0; top: calc(100% + 4px); z-index: 60; width: max(100%, 320px); max-width: min(420px, calc(100vw - 2 * var(--gutter-mobile)));
+  max-height: 340px; overflow-y: auto; margin: 0; padding: 4px; list-style: none;
+  background: var(--bg-card); border: 1px solid var(--line-strong); border-radius: var(--lv-radius-control);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, .35);
+}
+.lv-vpick__opt {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 8px 10px;
+  border-left: 2px solid transparent; cursor: pointer; color: var(--ink-soft);
+}
+/* 卡片底色＋zone tint 上 --ink-soft 仍不到 4.5:1（深色），次要文字直接用主文字色 */
+.lv-vpick__opt.is-active { background: var(--zone-tint); color: var(--ink); --ink-mute: var(--ink); }
+.lv-vpick__opt.is-current { border-left-color: var(--zone-soft); color: var(--ink-title); }
+.lv-vpick__opt-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.lv-vpick__opt-label { font-size: 13px; overflow-wrap: anywhere; }
+.lv-vpick__opt-sub { font-family: var(--font-mono); font-size: 10px; color: var(--ink-mute); overflow-wrap: anywhere; }
+.lv-vpick__opt-count { flex: none; font-family: var(--font-mono); font-size: 10px; color: var(--ink-mute); white-space: nowrap; }
+.lv-vpick__empty { padding: 10px; font-size: 12px; color: var(--ink-mute); }
+.lv-filters--top { margin: -8px 0 20px; }
+.lv-filters--search { margin: 0; }
+
 .lv-filters { display: flex; flex-wrap: wrap; gap: 24px; margin: 28px 0 0; align-items: center; }
 .lv-filters__label { font-family: var(--font-mono); font-size: 10px; letter-spacing: .16em; color: var(--ink-mute); margin-right: 4px; }
 .lv-table { margin-top: 20px; }
 .lv-table__head, .lv-table__row { display: grid; gap: 16px; padding: 12px 14px; align-items: start; }
-.lv-table--notes .lv-table__head, .lv-table--notes .lv-table__row { grid-template-columns: minmax(0, 1fr) 140px 130px 110px; }
+.lv-table--notes .lv-table__head, .lv-table--notes .lv-table__row { grid-template-columns: minmax(0, 1fr) minmax(0, 200px) minmax(0, 180px) 120px; }
 .lv-table--docs .lv-table__head, .lv-table--docs .lv-table__row { grid-template-columns: minmax(0, 1fr) 56px 72px minmax(0, 240px) 90px auto; }
 .lv-table__head {
   border-bottom: 1px solid var(--line-strong); font-family: var(--font-mono); font-size: 10px;
@@ -642,7 +685,7 @@ button.lv-wikilink { background: none; border: none; border-bottom: 1px dashed v
 .lv-row-actions { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
 .lv-pill-btn {
   background: none; border: 1px solid var(--line-strong); color: var(--ink-soft); font-size: 11px;
-  padding: 3px 10px; border-radius: 999px; cursor: pointer; white-space: nowrap;
+  padding: 3px 10px; border-radius: var(--lv-radius-control); cursor: pointer; white-space: nowrap;
 }
 .lv-pill-btn:hover:not(:disabled) { color: var(--ink); border-color: var(--ink-mute); }
 .lv-pill-btn:disabled { opacity: .5; cursor: not-allowed; }
@@ -694,8 +737,6 @@ button.lv-wikilink { background: none; border: none; border-bottom: 1px dashed v
 .lv-section__title { font-family: var(--font-serif-tc); font-weight: 600; font-size: 19px; margin: 0 0 6px; color: var(--ink-title); }
 .lv-section__desc { margin: 0 0 14px; font-size: 13px; line-height: 1.7; color: var(--ink-soft); }
 .lv-section--danger { border-top-color: color-mix(in srgb, var(--status-error) 45%, transparent); }
-.lv-pick-list a { color: var(--ink); text-decoration: none; }
-.lv-pick-list a:hover { color: var(--lv-zone-text); }
 
 .lv-alias-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); }
 .lv-alias { display: grid; grid-template-columns: 64px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
@@ -710,18 +751,48 @@ button.lv-wikilink { background: none; border: none; border-bottom: 1px dashed v
 }
 .lv-move-target:disabled { cursor: not-allowed; opacity: .45; border-style: dashed; background: none; color: var(--ink-mute); }
 
-.lv-graves { list-style: none; margin: 0; padding: 0; }
-.lv-grave { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; gap: 12px; align-items: start; padding: 12px 4px; border-bottom: 1px solid var(--line); }
-.lv-grave__mark { color: var(--ink-mute); }
-.lv-grave__main { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
-.lv-grave__title { font-family: var(--font-serif-tc); font-size: 15px; color: var(--ink-title); overflow-wrap: anywhere; }
-.lv-grave__meta { color: var(--ink-mute); overflow-wrap: anywhere; }
-.lv-grave__warn { color: var(--lv-error-text); }
+/* 維護頁：vault 卡片 */
+.lv-section__stat { font-family: var(--font-mono); font-size: 11px; color: var(--ink-mute); }
+.lv-vcards { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.lv-vcard {
+  height: 100%; box-sizing: border-box; display: flex; flex-direction: column; gap: 10px; padding: 16px 18px;
+  border: 1px solid var(--line-strong); border-top: 2px solid var(--zone-stroke, var(--line-strong));
+  border-radius: var(--lv-radius-control); background: var(--bg-soft); color: var(--ink); text-decoration: none;
+  transition: border-color .2s, background .2s;
+}
+.lv-vcard:hover, .lv-vcard:focus-visible { border-color: var(--zone-stroke, var(--uep-gold)); background: var(--zone-tint); color: var(--ink); --ink-mute: var(--ink-soft); }
+.lv-vcard__head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+.lv-vcard__name { font-family: var(--font-serif-tc); font-weight: 600; font-size: 16px; color: var(--ink-title); overflow-wrap: anywhere; min-width: 0; }
+.lv-vcard__key { color: var(--ink-mute); line-height: 1.5; }
+.lv-vcard__stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.lv-vcard__stat { display: flex; flex-direction: column; gap: 2px; padding: 8px 0; }
+.lv-vcard__stat + .lv-vcard__stat { border-left: 1px solid var(--line); padding-left: 12px; }
+.lv-vcard__n { font-family: var(--font-display); font-size: 24px; line-height: 1.1; color: var(--ink-title); }
+.lv-vcard__k { font-family: var(--font-mono); font-size: 10px; letter-spacing: .14em; color: var(--ink-mute); }
+.lv-vcard__foot { margin-top: auto; display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--ink-mute); }
+.lv-vcard__go { color: var(--lv-zone-text); font-family: var(--font-mono); font-size: 11px; white-space: nowrap; }
+
+/* 維護頁：墓碑 */
+.lv-graves { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.lv-grave {
+  display: grid; grid-template-columns: 56px minmax(0, 1fr) auto; gap: 14px; align-items: start; padding: 14px 16px;
+  border: 1px solid var(--line); border-left: 3px solid var(--line-strong); border-radius: var(--lv-radius-control); background: var(--bg-soft);
+}
+.lv-grave[data-state='ok'] { border-left-color: var(--status-success); }
+.lv-grave[data-state='old'] { border-left-color: var(--uep-gold); }
+.lv-grave[data-state='blocked'] { border-left-color: var(--status-error); }
+.lv-grave__main { min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.lv-grave__title { font-family: var(--font-serif-tc); font-size: 15px; font-weight: 600; color: var(--ink-title); overflow-wrap: anywhere; }
+.lv-grave__meta { display: flex; flex-wrap: wrap; gap: 6px; }
 .lv-grave__state { color: var(--ink-soft); }
+.lv-grave[data-state='ok'] .lv-grave__state { color: var(--lv-success-text); }
+.lv-grave[data-state='old'] .lv-grave__state { color: var(--lv-gold-text); }
+.lv-grave[data-state='blocked'] .lv-grave__state { color: var(--lv-error-text); }
+.lv-graves__empty { border: 1px dashed var(--line-strong); }
 .lv-restore-results { list-style: none; margin: 0 0 12px; padding: 0; }
 
 .lv-nav__badge {
-  min-width: 18px; padding: 1px 6px; border-radius: 999px; text-align: center;
+  min-width: 18px; padding: 1px 6px; border-radius: var(--lv-radius-control); text-align: center;
   font-family: var(--font-mono); font-size: 10px; color: var(--bg-card); background: var(--lv-error-text);
 }
 .lv-health-badge { color: var(--lv-error-text); border-color: color-mix(in srgb, var(--status-error) 55%, transparent); background: color-mix(in srgb, var(--status-error) 8%, transparent); }
@@ -759,7 +830,14 @@ details.lv-check > .lv-check__head { cursor: pointer; }
 .lv-kv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 16px; margin: 0; font-size: 13px; }
 .lv-kv dt { font-family: var(--font-mono); font-size: 10px; letter-spacing: .12em; color: var(--ink-mute); padding-top: 2px; }
 .lv-kv dd { margin: 0; overflow-wrap: anywhere; }
-.lv-kv__btn { margin-left: 12px; }
+/* 寬鬆版 key-value（連線設定）：固定標籤欄寬、拉開行距與欄距；手機改上下堆疊 */
+.lv-kv--roomy { grid-template-columns: minmax(96px, 150px) minmax(0, 1fr); gap: 14px 32px; font-size: 14px; line-height: 1.6; }
+.lv-kv--roomy dt { font-size: 11px; padding-top: 3px; }
+.lv-kv__note { display: block; margin-top: 4px; font-size: 12px; color: var(--ink-mute); }
+.lv-settings .lv-section { margin-top: 40px; padding-top: 28px; }
+.lv-settings .lv-section__title { margin-bottom: 18px; }
+.lv-settings .lv-hint { max-width: 72ch; margin-top: 22px; }
+.lv-settings .lv-actions { margin-top: 18px; }
 .lv-backlog { padding: 10px 0; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 4px; }
 .lv-backlog p { margin: 0; }
 .lv-backlog__head { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; color: var(--ink-title); }
@@ -777,8 +855,8 @@ details.lv-check > .lv-check__head { cursor: pointer; }
 .lv-concepts { list-style: none; margin: 12px 0 0; padding: 0; }
 .lv-concept { display: grid; grid-template-columns: minmax(0, 1fr) 110px; gap: 16px; padding: 14px 4px; border-bottom: 1px solid var(--line); }
 .lv-concept__statement { font-family: var(--font-serif-tc); font-size: 15px; line-height: 1.8; color: var(--ink-title); overflow-wrap: anywhere; }
-.lv-concept__meta { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 6px; align-items: baseline; }
-.lv-concept__side { text-align: right; display: flex; flex-direction: column; gap: 4px; }
+.lv-concept__meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; align-items: center; }
+.lv-concept__side { display: flex; flex-direction: column; gap: 5px; align-items: flex-end; }
 .lv-episode-group { margin-top: 16px; }
 
 .lv-test-rows { list-style: none; margin: 16px 0 0; padding: 0; border: 1px solid var(--line); }
@@ -790,6 +868,13 @@ details.lv-check > .lv-check__head { cursor: pointer; }
 .lv-test-row__label { font-family: var(--font-mono); font-size: 11px; color: var(--ink-mute); }
 .lv-test-row__value { overflow-wrap: anywhere; }
 
+
+/* ── 按鈕形狀 ────────────────────────────────────────────
+   全站按鈕統一為方形（參考 Eternity 文件站：1px 框、直角／極小圓角）。設計系統的 .btn-outline 與對話框按鈕
+   原本是 pill（999px），ds/ 原樣複製不改，在這裡以 --lv-radius-control 覆寫；狀態圓點、space 圖示、品牌標記不是按鈕，維持圓形 */
+.btn-outline, .btn-zone, .btn-terminal, .uep-dialog__btn, .lv-move-target, .zone-state button {
+  border-radius: var(--lv-radius-control);
+}
 
 /* ── 設計系統元件的文字對比覆寫（T-87；ds/components.css 不改）──────────── */
 .btn-outline:hover, .btn-outline--gold, .btn-terminal:hover { color: var(--lv-gold-text); }
@@ -813,6 +898,37 @@ details.lv-check > .lv-check__head { cursor: pointer; }
 .lv-dupes__section .lv-banner { margin-top: 0; }
 .lv-dupes__foot { padding: 14px 16px; }
 .lv-plain-list { margin: 6px 0; padding-left: 1.2em; font-size: 13px; color: var(--ink-soft); overflow-wrap: anywhere; }
+
+/* metadata 標籤（components/ui Badge）：依種類分色。文字色一律走 --lv-*-text（已過 AA），底色只用淡 tint */
+.lv-badge {
+  display: inline-flex; align-items: center; max-width: 100%; min-width: 0; padding: 1px 7px;
+  font-family: var(--font-mono); font-size: 11px; line-height: 1.6; letter-spacing: .02em; white-space: normal;
+  border: 1px solid var(--line-strong); border-radius: var(--lv-radius-control); color: var(--ink-soft);
+  overflow-wrap: anywhere; text-align: left;
+}
+.lv-badge__value { min-width: 0; }
+.lv-badge--vault {
+  color: var(--lv-zone-text); border-color: var(--zone-stroke, var(--line-strong));
+  background: color-mix(in srgb, var(--zone-main, var(--uep-gold)) 8%, transparent);
+  font-family: var(--font-sans); font-weight: 600;
+}
+.lv-badge--author {
+  color: var(--lv-info-text); border-color: color-mix(in srgb, var(--status-info) 45%, transparent);
+  background: color-mix(in srgb, var(--status-info) 7%, transparent);
+}
+.lv-badge--kind {
+  color: var(--lv-info-text); border-color: color-mix(in srgb, var(--status-info) 45%, transparent);
+}
+.lv-badge--time { color: var(--ink-soft); border-color: var(--line-strong); }
+.lv-badge--score { color: var(--ink-soft); border-style: dashed; }
+.lv-badge--degraded, .lv-badge--warn {
+  color: var(--lv-gold-text); border-color: color-mix(in srgb, var(--uep-gold) 55%, transparent);
+  background: color-mix(in srgb, var(--uep-gold) 7%, transparent);
+}
+.lv-badge--tag { color: var(--ink-soft); background: var(--bg-sunken); }
+.lv-badge--anchor { color: var(--ink-soft); border-style: dotted; }
+.lv-badge--plain { color: var(--ink-mute); border-style: dashed; }
+.lv-badges { display: flex; flex-wrap: wrap; gap: 4px; align-content: flex-start; min-width: 0; }
 
 /* 列表的小標籤（更正鏈）、標籤筆數 */
 .lv-table__chain { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -912,7 +1028,8 @@ details.lv-check > .lv-check__head { cursor: pointer; }
     transition: transform var(--dur-panel) var(--ease-out), visibility 0s;
   }
   .lv-scrim { display: block; position: fixed; inset: 0; z-index: 150; background: rgba(0, 0, 0, .45); }
-  .lv-sidebar__tools { display: flex; flex-wrap: wrap; gap: 8px; }
+  .lv-sidebar__tools { display: flex; gap: 8px; }
+  .lv-sidebar__tools .lv-icon-btn { width: 44px; height: 44px; padding: 0; }
   .lv-write-target { margin-top: 0; }
 
   .lv-main { padding: 20px var(--gutter-mobile) 64px; }
@@ -924,7 +1041,7 @@ details.lv-check > .lv-check__head { cursor: pointer; }
   .lv-table__row { border: 1px solid var(--line); border-radius: var(--radius-sm); margin-bottom: 10px; padding: 14px; }
   .lv-result { grid-template-columns: minmax(0, 1fr); gap: 8px; }
   .lv-result__type { flex-direction: row; flex-wrap: wrap; gap: 10px; }
-  .lv-result__meta { flex-direction: row; flex-wrap: wrap; align-items: baseline; text-align: left; gap: 12px; }
+  .lv-result__meta { flex-direction: row; flex-wrap: wrap; align-items: center; text-align: left; gap: 6px; max-width: none; }
 
   /* 檢視頁單欄 */
   .lv-detail { flex-direction: column; gap: 24px; }
@@ -937,10 +1054,19 @@ details.lv-check > .lv-check__head { cursor: pointer; }
   .lv-health-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .lv-check__body { padding-left: 14px; }
   .lv-concept { grid-template-columns: minmax(0, 1fr); }
-  .lv-concept__side { text-align: left; flex-direction: row; flex-wrap: wrap; gap: 12px; }
+  .lv-concept__side { flex-direction: row; flex-wrap: wrap; gap: 6px; align-items: center; }
   .lv-alias { grid-template-columns: minmax(0, 1fr) auto; }
+  .lv-vcards { grid-template-columns: minmax(0, 1fr); }
+  .lv-vcard { padding: 12px 14px; gap: 8px; }
+  .lv-vcard__n { font-size: 20px; }
+  .lv-vcard__stat { padding: 6px 0; }
+  .lv-grave { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .lv-grave > .btn-outline { justify-self: start; }
   .lv-alias__tag { grid-column: 1 / -1; }
   .lv-kbd-list__row { grid-template-columns: 72px minmax(0, 1fr); }
+  .lv-kv--roomy { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .lv-kv--roomy dd + dt { margin-top: 12px; }
+  .lv-settings .lv-section { margin-top: 32px; padding-top: 24px; }
   .lv-search { padding: 0 8px 0 12px; gap: 8px; flex-wrap: wrap; }
   .lv-search__mode { order: 3; flex-basis: 100%; padding-bottom: 8px; }
   .lv-toasts { right: var(--gutter-mobile); left: var(--gutter-mobile); }
@@ -954,5 +1080,9 @@ details.lv-check > .lv-check__head { cursor: pointer; }
   }
   .lv-link-btn { margin-left: 0; padding: 0 4px; }
   .lv-input, .lv-select { min-height: 44px; font-size: 16px; }
+  .lv-vpick { flex: 1 1 100%; }
+  .lv-vpick__box { width: auto; }
+  .lv-vpick__input { min-height: 44px; font-size: 16px; }
+  .lv-vpick__opt { min-height: 44px; }
   .lv-search__input { font-size: 16px; }
 }

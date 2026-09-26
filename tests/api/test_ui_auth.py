@@ -627,6 +627,47 @@ def test_missing_asset_and_unknown_ui_api_are_404_not_index(ui):
     assert resp.json()["error"]["code"] == "not_found"
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        # vault key 是含「.」的 GitHub 路徑，前端以 encodeURIComponent 放進網址
+        "/ui/maint/github.com%2Funforgettableeternalproject%2Fchatroom",
+        "/ui/maint/github.com%2Funforgettableeternalproject%2Fu.e.p-s-core",
+        "/ui/maint/a.b",
+        "/ui/maint/github.com",
+        "/ui/notes/abc.def",
+    ],
+)
+def test_spa_fallback_for_routes_with_dots(ui, path):
+    """前端路由最後一段含「.」（vault key）也回 index.html。
+
+    否則重新整理與直接開連結會 404。
+    """
+    index = ui.get("/ui/")
+    resp = ui.get(path)
+    assert resp.status_code == 200
+    assert resp.text == index.text
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/ui/assets/missing.js",
+        "/ui/assets/missing.css",
+        "/ui/assets/sub/missing",  # assets 底下一律不 fallback，即使沒有副檔名
+        "/ui/missing.js",
+        "/ui/favicon.ico",
+        "/ui/maint/missing.woff2",
+        "/ui/notes/x.js.map",
+    ],
+)
+def test_missing_static_resources_stay_404(ui, path):
+    """缺檔的靜態資源不能回成 index.html（會變成 JS 語法錯誤，難除錯）。"""
+    resp = ui.get(path)
+    assert resp.status_code == 404
+    assert '<div id="app">' not in resp.text
+
+
 def test_static_dir_without_index_refuses_to_start(db_path, tmp_path):
     config = Config(ui=UiConfig(static_dir=str(tmp_path / "empty")))
     with pytest.raises(ConfigError, match="index.html"):

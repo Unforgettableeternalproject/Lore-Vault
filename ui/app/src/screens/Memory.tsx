@@ -2,7 +2,8 @@
 // 以及收料概況（by_machine／by_vault）。concept 與 episode 只屬於 dev，其他 space 只顯示說明。
 import { useEffect, useState } from 'preact/hooks';
 
-import { ErrorState, Loading } from '../components/ui';
+import { Badge, ErrorState, Loading } from '../components/ui';
+import { VaultPicker } from '../components/VaultPicker';
 import { ALL, useApp, vaultName } from '../lib/context';
 import { formatTime, isAbort } from '../lib/format';
 import { formatAge, hoursSince } from '../lib/health';
@@ -98,6 +99,7 @@ function ConceptList() {
   return (
     <div class="lv-memory-concepts">
       <div class="lv-filters lv-filters--tight">
+        <VaultPicker />
         <label class="lv-filters__group">
           <span class="lv-filters__label">類型</span>
           <select class="lv-select" value={kind} aria-label="concept 類型" onChange={(e) => setKind((e.target as HTMLSelectElement).value)}>
@@ -195,6 +197,7 @@ function anchorText(anchors: unknown): string[] {
 }
 
 function ConceptRow({ concept, showVault }: { concept: ConceptItem; showVault: boolean }) {
+  const { vaults } = useApp();
   const anchors = anchorText(concept.anchors);
   const scopeText =
     concept.scope_state === 'global' ? '跨專案' : concept.scope_state === 'missing' ? '缺 scope' : (concept.scope ?? '—');
@@ -203,23 +206,37 @@ function ConceptRow({ concept, showVault }: { concept: ConceptItem; showVault: b
       <div class="lv-concept__main">
         <div class="lv-concept__statement">{concept.statement}</div>
         <div class="lv-concept__meta">
-          <span class="lv-code-tag">{concept.kind}</span>
-          <span class={'lv-mono' + (concept.scope_state === 'missing' ? ' lv-text-warn' : '')}>scope：{scopeText}</span>
-          {showVault && <span class="lv-mono lv-muted">{concept.vault}</span>}
+          {concept.kind && (
+            <Badge tone="kind" label="類型">
+              {concept.kind}
+            </Badge>
+          )}
+          <Badge tone={concept.scope_state === 'missing' ? 'warn' : 'tag'} label="scope">
+            scope：{scopeText}
+          </Badge>
+          {showVault && (
+            <Badge tone="vault" label="vault" title={concept.vault}>
+              {vaultName({ vaults }, concept.vault)}
+            </Badge>
+          )}
           {anchors.slice(0, 3).map((a) => (
-            <span key={a} class="lv-mono lv-muted">
+            <Badge key={a} tone="anchor" label="錨點">
               {a}
-            </span>
+            </Badge>
           ))}
           {anchors.length > 3 && <span class="lv-muted lv-small">+{anchors.length - 3} 個錨點</span>}
         </div>
       </div>
       <div class="lv-concept__side">
-        <div class="lv-mono" title="surprisal">
+        <Badge tone="score" label="surprisal">
           {typeof concept.surprisal === 'number' ? concept.surprisal.toFixed(2) : '—'}
-        </div>
-        <div class="lv-small lv-muted">{concept.usability_verdict ?? '未校準'}</div>
-        <div class="lv-small lv-muted">{formatTime(concept.updated)}</div>
+        </Badge>
+        <Badge tone={concept.usability_verdict ? 'tag' : 'plain'} label="可用性">
+          {concept.usability_verdict ?? '未校準'}
+        </Badge>
+        <Badge tone="time" label="更新">
+          {formatTime(concept.updated)}
+        </Badge>
       </div>
     </li>
   );

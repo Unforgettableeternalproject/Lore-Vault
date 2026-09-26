@@ -1,11 +1,11 @@
 // 連線設定（T-85）：同源部署，沒有「服務位址」與密碼欄位（A23：帳號密碼只在登入頁輸入、session 存在服務端）。
-// 顯示目前連線的服務、登入帳號與顯示名稱、session 期限、測試連線、登出；UI 偏好為深淺色與署名（一律開啟）。
+// 顯示目前連線的服務、登入帳號與顯示名稱、session 期限、測試連線、登出，以及寫入署名（一律開啟）。
+// 深淺色切換只在頂列（手機在抽屜），這頁不重複放。
 import { useEffect, useState } from 'preact/hooks';
 
 import { ErrorState, Loading } from '../components/ui';
 import { useApp } from '../lib/context';
 import { describeError, formatTime, isAbort } from '../lib/format';
-import type { Theme } from '../lib/prefs';
 import { checkSession, type SessionInfo } from '../lib/session';
 import type { StatusResult } from '../lib/types';
 
@@ -15,7 +15,7 @@ interface TestRow {
   value: string;
 }
 
-export function Settings({ theme, onToggleTheme, onLogout }: { theme: Theme; onToggleTheme: () => void; onLogout: () => void }) {
+export function Settings({ onLogout }: { onLogout: () => void }) {
   const { api, author } = useApp();
   const [session, setSession] = useState<SessionInfo | null>(null);
   const [sessionError, setSessionError] = useState<unknown>(null);
@@ -71,7 +71,7 @@ export function Settings({ theme, onToggleTheme, onLogout }: { theme: Theme; onT
   };
 
   return (
-    <section class="lv-screen">
+    <section class="lv-screen lv-settings">
       <div class="lv-eyebrow">CONNECTION</div>
       <h1 class="lv-title">連線設定</h1>
 
@@ -81,7 +81,7 @@ export function Settings({ theme, onToggleTheme, onLogout }: { theme: Theme; onT
         </h2>
         {loading && <Loading />}
         {sessionError !== null && <ErrorState error={sessionError} />}
-        <dl class="lv-kv" data-testid="settings-session">
+        <dl class="lv-kv lv-kv--roomy" data-testid="settings-session">
           <dt>服務</dt>
           <dd class="lv-mono">{window.location.origin}</dd>
           <dt>帳號</dt>
@@ -121,22 +121,15 @@ export function Settings({ theme, onToggleTheme, onLogout }: { theme: Theme; onT
         )}
       </section>
 
-      <section class="lv-section" aria-labelledby="settings-prefs">
-        <h2 class="lv-section__title" id="settings-prefs">
-          介面偏好
+      <section class="lv-section" aria-labelledby="settings-author">
+        <h2 class="lv-section__title" id="settings-author">
+          署名
         </h2>
-        <dl class="lv-kv">
-          <dt>主題</dt>
-          <dd>
-            {theme === 'dark' ? '深色' : '淺色'}
-            <button type="button" class="btn-outline btn-outline--sm lv-kv__btn" onClick={onToggleTheme}>
-              改用{theme === 'dark' ? '淺色' : '深色'}
-            </button>
-          </dd>
+        <dl class="lv-kv lv-kv--roomy">
           <dt>寫入署名</dt>
           <dd data-testid="settings-author">
             <span class="lv-mono">{author}</span>
-            <span class="lv-muted lv-small"> · 登入帳號的顯示名稱，一律開啟（A22：共享後要分清誰做了什麼）</span>
+            <span class="lv-kv__note">登入帳號的顯示名稱，一律開啟（A22：共享後要分清誰做了什麼）</span>
           </dd>
         </dl>
       </section>

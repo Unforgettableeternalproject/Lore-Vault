@@ -17,8 +17,9 @@ from __future__ import annotations
 import json
 import logging
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TypeGuard
+from urllib.parse import unquote
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
@@ -299,15 +300,73 @@ def build_router() -> APIRouter:
     return router
 
 
+# 建置產物與常見靜態資源的副檔名：缺檔時照常 404，不回 index.html（否則缺的 .js 會變成
+# 「Unexpected token <」這類難追的錯誤）。其餘路徑一律視為前端路由——vault key 常含「.」
+# （github.com/org/u.e.p-s-core），不能用「最後一段有沒有點」判斷。
+STATIC_SUFFIXES = frozenset(
+    {
+        ".js",
+        ".mjs",
+        ".cjs",
+        ".map",
+        ".css",
+        ".json",
+        ".webmanifest",
+        ".txt",
+        ".xml",
+        ".html",
+        ".htm",
+        ".wasm",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".webp",
+        ".avif",
+        ".svg",
+        ".ico",
+        ".bmp",
+        ".woff",
+        ".woff2",
+        ".ttf",
+        ".otf",
+        ".eot",
+        ".mp3",
+        ".mp4",
+        ".webm",
+        ".ogg",
+        ".wav",
+        ".pdf",
+    }
+)
+# 這個目錄底下只有建置產物，缺檔一律 404
+ASSET_DIR = "assets"
+
+
+def is_spa_route(path: str) -> bool:
+    """`/ui` 底下（掛載點之後）的路徑是否該 fallback 到 index.html。
+
+    path 先解碼：`%2F` 編碼的 vault key 要拆成段落再看最後一段。
+    """
+    parts = [p for p in unquote(path).replace("\\", "/").split("/") if p]
+    if not parts:
+        return True
+    if parts[0] == ASSET_DIR:
+        return False
+    return PurePosixPath(parts[-1]).suffix.lower() not in STATIC_SUFFIXES
+
+
 class SpaStaticFiles(StaticFiles):
-    """找不到檔案時回 index.html（前端路由）；帶副檔名的路徑照常 404。"""
+    """找不到檔案時回 index.html（前端路由）。
+
+    靜態資源（assets/ 與常見資源副檔名）缺檔照常 404。
+    """
 
     async def get_response(self, path: str, scope: Scope) -> Response:
         try:
             return await super().get_response(path, scope)
         except StarletteHTTPException as exc:
-            last = path.rsplit("/", 1)[-1]
-            if exc.status_code != 404 or "." in last:
+            if exc.status_code != 404 or not is_spa_route(path):
                 raise
             return await super().get_response("index.html", scope)
 
