@@ -7,6 +7,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { Banner } from '../components/ui';
 import { ALL, useApp } from '../lib/context';
 import { describeDegradedReason, describeError, describeUnresolvedLink, formatTime } from '../lib/format';
+import { Markdown } from '../lib/markdown';
 import { routePath } from '../lib/router';
 import type { GetResult, NoteFull, WriteResult } from '../lib/types';
 import { AuthorLine, parseTopics } from './NoteDetail';
@@ -220,8 +221,9 @@ export function NoteNew({ supersedes }: { supersedes: string | null }) {
           </form>
         </div>
 
+        <div class="lv-new__side">
         {result && (
-          <aside class="lv-new__side" aria-label="寫入前查重結果" data-testid="dedup-preview" ref={panel} tabIndex={-1}>
+          <aside class="lv-new__dedup" aria-label="寫入前查重結果" data-testid="dedup-preview" ref={panel} tabIndex={-1}>
             <div class="lv-dupes" role="status">
               <div class="lv-dupes__head">
                 <div class="lv-dupes__label">
@@ -289,6 +291,26 @@ export function NoteNew({ supersedes }: { supersedes: string | null }) {
             </div>
           </aside>
         )}
+          <section class="lv-new__preview" aria-labelledby="lv-new-preview-title" data-testid="note-preview">
+            <div class="lv-side-block__label" id="lv-new-preview-title">
+              預覽
+            </div>
+            {title.trim() || body.trim() ? (
+              <>
+                {title.trim() && <div class="lv-new__preview-title">{title}</div>}
+                {body.trim() ? (
+                  <div class="lv-prose lv-md lv-new__preview-body">
+                    <Markdown source={body} />
+                  </div>
+                ) : (
+                  <p class="lv-muted">正文還是空的。</p>
+                )}
+              </>
+            ) : (
+              <p class="lv-muted">輸入標題與 Markdown 正文後，這裡會即時顯示排版結果。</p>
+            )}
+          </section>
+        </div>
       </div>
     </section>
   );
