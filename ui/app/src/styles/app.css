@@ -776,7 +776,10 @@ button.lv-wikilink { background: none; border: none; border-bottom: 1px dashed v
 }
 .lv-vcard:hover, .lv-vcard:focus-visible { border-color: var(--zone-stroke, var(--uep-gold)); background: var(--zone-tint); color: var(--ink); --ink-mute: var(--ink-soft); }
 .lv-vcard__head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
-.lv-vcard__name { font-family: var(--font-serif-tc); font-weight: 600; font-size: 16px; color: var(--ink-title); overflow-wrap: anywhere; min-width: 0; }
+.lv-vcard__name { font-family: var(--font-serif-tc); font-weight: 600; font-size: 16px; color: var(--ink-title); overflow-wrap: anywhere; min-width: 0; flex: 1 1 auto; }
+/* 來源標籤不換行、不縮；名稱讓位 */
+.lv-vcard__origin { flex: none; }
+.lv-vcard__origin .lv-badge { white-space: nowrap; }
 .lv-vcard__key { color: var(--ink-mute); line-height: 1.5; }
 .lv-vcard__stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .lv-vcard__stat { display: flex; flex-direction: column; gap: 2px; padding: 8px 0; }

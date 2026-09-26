@@ -15,7 +15,7 @@ import type {
   TwoPhaseResponse,
   VaultSummary,
 } from '../lib/types';
-import { originLabel } from './Vaults';
+import { ORIGIN_TITLE, originLabel } from './Vaults';
 
 export function Maint({ vaultKey }: { vaultKey: string | null }) {
   const { space, vaults, navigate } = useApp();
@@ -113,9 +113,11 @@ function VaultCard({ vault, onOpen }: { vault: VaultSummary; onOpen: () => void 
     >
       <span class="lv-vcard__head">
         <span class="lv-vcard__name">{vault.display}</span>
-        <Badge tone="tag" label="來源">
-          {originLabel(vault.origin)}
-        </Badge>
+        <span class="lv-vcard__origin">
+          <Badge tone="tag" label="來源" title={ORIGIN_TITLE[vault.origin ?? ''] ?? '來源未知'}>
+            {originLabel(vault.origin)}
+          </Badge>
+        </span>
       </span>
       <span class="lv-vcard__key lv-mono">{vault.key}</span>
       <span class="lv-vcard__stats">

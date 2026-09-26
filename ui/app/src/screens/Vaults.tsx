@@ -9,14 +9,21 @@ import { describeError, formatTime } from '../lib/format';
 import { routePath } from '../lib/router';
 import type { VaultSummary } from '../lib/types';
 
+// 來源標籤要短（卡片右上角、表格窄欄）；完整說明放 title
 export const ORIGIN_LABEL: Record<string, string> = {
+  manual: '手動',
+  episode: '收料',
+  pipeline: '管線',
+};
+
+export const ORIGIN_TITLE: Record<string, string> = {
   manual: '手動建立',
-  episode: '收料自動建立',
+  episode: '收料時自動建立',
   pipeline: '管線建立',
 };
 
 export function originLabel(origin: string | undefined): string {
-  if (!origin) return '來源未知';
+  if (!origin) return '未知';
   return ORIGIN_LABEL[origin] ?? origin;
 }
 
@@ -136,7 +143,9 @@ export function Vaults() {
               <span role="cell" class="is-right lv-mono">{v.note_count}</span>
               <span role="cell" class="is-right lv-mono">{v.document_count ?? '—'}</span>
               <span role="cell" class="lv-small">{v.last_updated ? formatTime(v.last_updated) : '尚無內容'}</span>
-              <span role="cell" class="lv-small">{originLabel(v.origin)}</span>
+              <span role="cell" class="lv-small" title={ORIGIN_TITLE[v.origin ?? ''] ?? '來源未知'}>
+                {originLabel(v.origin)}
+              </span>
               <span role="cell" class="lv-row-actions">
                 {editing !== v.key && (
                   <button type="button" class="btn-outline btn-outline--sm" aria-label={`編輯 ${v.display} 的顯示名稱`} onClick={() => setEditing(v.key)}>

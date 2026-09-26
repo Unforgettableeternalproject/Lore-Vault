@@ -251,7 +251,7 @@ describe('Vault 列表', () => {
       '/v1/vault_update': (body) => json(vault({ display: body.display as string })),
     });
     const { refreshVaults, toast } = renderWithApp(<Vaults />, api, { vaults: [vault()], space: 'lore' });
-    expect(screen.getByText('手動建立')).toBeTruthy();
+    expect(screen.getByText('手動')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: '+ 建立 vault' }));
     const form = screen.getByRole('form', { name: '建立 vault' });
     const [key, display] = within(form).getAllByRole('textbox') as HTMLInputElement[];
