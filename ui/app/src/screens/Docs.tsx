@@ -19,8 +19,6 @@ import {
 import { routePath } from '../lib/router';
 import type { DocumentMeta, DocumentRetryResult, ListResult, UploadResult } from '../lib/types';
 
-/** 服務預設單檔上限（documents.max_file_bytes）；服務沒有對外公開實際設定值，超過時仍以 413 為準 */
-export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 export const POLL_MS = 2000;
 const PAGE = 50;
 const ACCEPT = '.md,.markdown,.txt,.pdf,.docx,.pptx,.json,.yaml,.yml,.toml';
@@ -43,7 +41,9 @@ export function describeUpload(r: UploadResult): string {
 }
 
 export function Docs() {
-  const { api, space, vault, vaults, navigate, toast, refreshVaults } = useApp();
+  const { api, space, vault, vaults, navigate, toast, refreshVaults, limits } = useApp();
+  // 單檔上限取服務設定（session limits.max_file_bytes）；前端先擋，服務端仍以 413 為準
+  const maxBytes = limits.max_file_bytes;
   const [target, setTarget] = useState(vault !== ALL ? vault : '');
   const [page, setPage] = useState<ListResult<DocumentMeta> | null>(null);
   const [cursors, setCursors] = useState<(string | null)[]>([null]);
@@ -106,7 +106,7 @@ export function Docs() {
       return;
     }
     const entries: { entry: UploadEntry; file: File }[] = files.map((file) => {
-      const tooBig = file.size > MAX_UPLOAD_BYTES;
+      const tooBig = file.size > maxBytes;
       return {
         file,
         entry: {
@@ -115,7 +115,7 @@ export function Docs() {
           size: file.size,
           state: tooBig ? 'rejected' : 'queued',
           progress: 0,
-          message: tooBig ? `超過 ${formatBytes(MAX_UPLOAD_BYTES)} 上限，未上傳` : '等待上傳',
+          message: tooBig ? `超過 ${formatBytes(maxBytes)} 上限，未上傳` : '等待上傳',
         },
       };
     });
@@ -219,7 +219,7 @@ export function Docs() {
         <div class="lv-drop__text">
           <div class="lv-drop__title">把檔案拖到這裡</div>
           <div class="lv-drop__hint">
-            md · txt · pdf · docx · pptx · json · yaml · toml · 單檔上限 {formatBytes(MAX_UPLOAD_BYTES)} · 同名檔案會成為新版本
+            md · txt · pdf · docx · pptx · json · yaml · toml · 單檔上限 {formatBytes(maxBytes)} · 同名檔案會成為新版本
           </div>
           <label class="lv-drop__target">
             <span>上傳到</span>

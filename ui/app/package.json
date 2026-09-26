@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
     "lint": "eslint . && npm run typecheck",
     "test": "vitest run",
-    "e2e": "playwright test"
+    "e2e": "playwright test",
+    "check": "npm run lint && npm test && npm run build && npm run e2e"
   },
   "dependencies": {
     "@fontsource/cormorant-garamond": "^5.3.0",
@@ -21,6 +22,7 @@
     "preact": "^10.29.8"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
     "@eslint/js": "^10.0.0",
     "@playwright/test": "^1.63.0",
     "@preact/preset-vite": "^2.10.6",

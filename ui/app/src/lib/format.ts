@@ -111,6 +111,8 @@ export function summarySource(source: SummarySource | string | undefined): Sourc
       return { label: '摘錄', tone: 'neutral', note: '文件段落的原文摘錄' };
     case 'none':
       return { label: '無摘要', tone: 'mute', note: '沒有摘要，正文也沒有可頂替的首段' };
+    case 'omitted':
+      return { label: '摘要省略', tone: 'mute', note: '本頁摘要字數預算已用完，這則的摘要沒有列出' };
     default:
       return { label: `來源 ${String(source)}`, tone: 'mute', note: `未知的摘要來源：${String(source)}` };
   }
@@ -231,6 +233,15 @@ export function formatTime(iso: string | null | undefined): string {
 /** n 天前的 UTC ISO 字串（筆記列表 since 篩選）。 */
 export function daysAgoIso(days: number, now: Date = new Date()): string {
   return new Date(now.getTime() - days * 86400_000).toISOString();
+}
+
+/** write／update 回應的未解析連結轉成一行說明（歧義附候選數）。 */
+export function describeUnresolvedLink(link: { target: string; status: string; candidates?: string[] }): string {
+  if (link.status === 'ambiguous') {
+    return `[[${link.target}]]：同一 vault 有 ${link.candidates?.length ?? 0} 則同名筆記，無法判定要連哪一則`;
+  }
+  if (link.status === 'unresolved') return `[[${link.target}]]：同一 vault 找不到這個標題`;
+  return `[[${link.target}]]：${link.status}`;
 }
 
 export function authorLabel(author: string | null | undefined): string {

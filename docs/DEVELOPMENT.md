@@ -588,7 +588,8 @@ KEY=VALUE、只用標準庫解析；行程環境變數中同名鍵優先。
 | 建置到 `ui/app/dist/` | `npm run build`（先跑 typecheck） |
 | lint + typecheck | `npm run lint` |
 | 單元測試（vitest） | `npm test` |
-| E2E（Playwright） | `npm run build && npm run e2e`（首次需 `npx playwright install --only-shell chromium`） |
+| E2E（Playwright，含 axe 與手機 profile） | `npm run build && npm run e2e`（首次需 `npx playwright install --only-shell chromium`） |
+| **一鍵全檢**（repo 沒有 CI，提交前跑這個） | `npm run check`＝`lint` → `test` → `build` → `e2e`，任一步失敗即停 |
 
 ### 本機開發
 
@@ -679,7 +680,23 @@ E2E 以 `ui/app/e2e/seed_account.py` 在臨時資料庫預先建立測試帳號�
 | `LORE_VAULT_EMBEDDING_BASE_URL` | `http://127.0.0.1:9` | 語意模型指向不存在的位址：不論本機有沒有跑 Ollama，recall／查重都穩定走降級（lexical） |
 | `LORE_VAULT_EMBEDDING_QUERY_TIMEOUT`／`LORE_VAULT_EMBEDDING_TIMEOUT` | `0.5`／`1`（秒） | 降級快速發生，不拖慢測試 |
 
-登入 smoke 測試同時斷言頁面沒有任何 CSP 違規與 console 錯誤。
+登入 smoke 測試同時斷言頁面沒有任何 CSP 違規與 console 錯誤（其他規格用 `helpers.watchPage` 做同樣檢查）。
+
+規格與 project（`playwright.config.ts`）：
+
+| 規格 | project | 內容 |
+|---|---|---|
+| `login.spec.ts` | chromium | 登入（故意錯一次密碼）、App Shell、深淺色、space 切換、登出 |
+| `notes-docs.spec.ts` | chromium | 寫筆記（寫入前查重 → 照樣新增）→ 檢索（降級）→ 詳情；拖放上傳 → 抽取 → 跳到段落 |
+| `vault-maint.spec.ts` | chromium | 建 vault、別名、換 space、刪除、墓碑 |
+| `a11y.spec.ts` | chromium | 深淺兩主題逐畫面跑 axe（`@axe-core/playwright`，WCAG 2.1 A／AA 規則，含對話框、space 選單、三個 space 配色），斷言零違規；快捷鍵 |
+| `mobile.spec.ts` | mobile（`Pixel 7` 行動 profile，Chromium） | 抽屜導覽、觸控目標 ≥ 44px、抽屜開著時跑 axe；375／414／768／1280 寬度逐畫面沒有橫向捲動 |
+
+- **登入失敗計數是全域的**（A23，3 次即鎖定、成功不歸零）：同一個臨時服務上 `login.spec` 只能跑一次，
+  所以手機規格只放在 mobile project（`testMatch`），其餘規格只在 chromium project 跑；新規格不可以登入失敗
+- axe 掃描前以 `emulateMedia({ reducedMotion: 'reduce' })` 讓淡入動畫立即結束，否則會量到半透明的顏色
+- 暫存目錄 `lore-vault-e2e-*`（系統暫存）：只在 Playwright 主程序建立（經 `LORE_VAULT_E2E_SCRATCH` 交給 worker），
+  主程序結束時刪除；刪不掉的（Windows 上服務尚未放開 `lore.db`）在下次執行時清掉超過 10 分鐘的殘留
 
 ### docker
 

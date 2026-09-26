@@ -1,7 +1,30 @@
 // /v1 回應形狀（對照 docs/ARCHITECTURE.md 與服務端 to_dict）。只宣告畫面用得到的欄位；
 // 未知欄位保留在物件上不刪；A22 作者欄位（author／updated_by）宣告為可選（舊資料可能為 null）。
 
-export type SummarySource = 'summary' | 'lead' | 'excerpt' | 'none';
+/** `omitted`：list 的摘要預算用完，這則的摘要被省略（summary 為 null） */
+export type SummarySource = 'summary' | 'lead' | 'excerpt' | 'none' | 'omitted';
+
+/** `/ui/api/session` 的 `limits`：與服務端實際檢查同一來源，取代前端寫死的上限。 */
+export interface SessionLimits {
+  max_file_bytes: number;
+  max_chars: number;
+  author_max_chars: number;
+  get_max_ids: number;
+  get_default_budget: number;
+  list_max_limit: number;
+  list_default_limit: number;
+  list_default_budget: number;
+  recall_max_limit: number;
+  recall_default_limit: number;
+  recall_default_budget: number;
+}
+
+/** write／update 回應裡解析不到（unresolved）或同 vault 多則同名（ambiguous，附候選 id）的 `[[ ]]`。 */
+export interface UnresolvedLink {
+  target: string;
+  status: 'unresolved' | 'ambiguous' | string;
+  candidates: string[];
+}
 
 export interface Locator {
   kind: 'heading' | 'page' | 'slide' | 'offset' | 'header' | 'footer' | string;
@@ -67,6 +90,8 @@ export interface NoteFull {
   topics: string[];
   links: string[];
   supersedes: string | null;
+  /** 同 vault 內 supersedes 指向它的 note（多則取最新）；衍生欄位 */
+  superseded_by?: string | null;
   created: string;
   updated: string;
   /** A22：原作者（寫入者自報）；最後修改者另記 updated_by */
@@ -118,6 +143,8 @@ export interface ChunkFull {
   text: string;
   text_chars: number;
   truncated: boolean;
+  /** 開頭與前一段重疊的字數（段落起頭為 0）；串接顯示時略過 */
+  overlap?: number;
   superseded_by: string | null;
   updated: string;
 }
@@ -142,6 +169,8 @@ export interface NoteListItem {
   updated_by?: string | null;
   summary?: string | null;
   summary_source?: SummarySource;
+  supersedes?: string | null;
+  superseded_by?: string | null;
 }
 
 export type ListItem = NoteListItem | DocumentMeta;
@@ -151,6 +180,19 @@ export interface ListResult<T = ListItem> {
   next_cursor: string | null;
   has_more: boolean;
   unsupported_kinds: string[];
+  /** 本頁 note 摘要字數預算與用量；項目與分頁不受預算影響 */
+  budget?: number;
+  used_chars?: number;
+  truncated?: boolean;
+  /** 預算用完、摘要被省略（summary_source: omitted）的 note 數 */
+  summaries_omitted?: number;
+}
+
+/** `POST /v1/topics` */
+export interface TopicsResult {
+  space: string;
+  vault: string;
+  topics: { topic: string; count: number }[];
 }
 
 export interface DuplicateCandidate {
@@ -162,13 +204,19 @@ export interface DuplicateCandidate {
   vector: number | null;
 }
 
+/** `/v1/write`；`dry_run: true` 時沒有 id／updated／author／principal（沒有寫入）。 */
 export interface WriteResult {
-  id: string;
+  id?: string;
   vault: string;
-  updated: string;
+  updated?: string;
+  author?: string | null;
+  principal?: string;
+  links?: string[];
+  unresolved_links?: UnresolvedLink[];
   duplicates: DuplicateCandidate[];
   dedup_degraded: boolean;
   dedup_reason: string | null;
+  dry_run?: boolean;
 }
 
 export interface UpdateResult {
@@ -177,6 +225,8 @@ export interface UpdateResult {
   updated: string;
   summary_stale: boolean;
   embedding_stale: boolean;
+  links?: string[];
+  unresolved_links?: UnresolvedLink[];
 }
 
 /** 409 version_conflict 附的目前版本（不含 body）。 */

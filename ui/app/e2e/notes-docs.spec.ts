@@ -25,9 +25,14 @@ test('寫筆記 → 檢索命中 → 開啟詳情', async ({ page }) => {
   await page.getByLabel('正文（Markdown）').fill('zephyrquartz 首段說明：PreToolUse 預算改成 800 字。\n\n| HOOK | 上限 |\n|---|---|\n| PreToolUse | 800 字 |');
   await page.getByRole('button', { name: '寫入' }).click();
 
-  // 語意模型不可達：查重只做關鍵字，必須明講
-  await expect(page.getByRole('heading', { name: /已寫入/ })).toBeVisible();
+  // 寫入前先查重（dry_run）。語意模型不可達：查重只做關鍵字，必須明講，並讓使用者決定
+  const preview = page.getByTestId('dedup-preview');
+  await expect(preview).toBeVisible();
+  await expect(preview).toContainText('尚未寫入');
   await expect(page.getByTestId('dedup-degraded')).toBeVisible();
+  await preview.getByRole('button', { name: '照樣新增' }).click();
+  await expect(page.getByRole('heading', { name: 'zephyrquartz 注入預算調整' })).toBeVisible();
+  await expect(page).toHaveURL(/\/ui\/notes\/[0-9a-f]+$/);
 
   await page.getByRole('link', { name: '檢索' }).click();
   await page.getByLabel('檢索查詢').fill('zephyrquartz');

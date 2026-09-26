@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useState } from 'preact/hooks';
 
 import { createApiClient, type Notice } from './lib/api';
+import { resolveLimits } from './lib/limits';
 import { loadTheme, saveTheme, type Theme } from './lib/prefs';
 import { checkSession, logout, type SessionInfo } from './lib/session';
 import { Login } from './screens/Login';
@@ -89,6 +90,7 @@ export function App() {
       api={api}
       principal={session?.principal ?? ''}
       author={session?.display_name ?? session?.principal ?? ''}
+      limits={resolveLimits(session?.limits)}
       theme={theme}
       onToggleTheme={toggleTheme}
       degraded={degraded}

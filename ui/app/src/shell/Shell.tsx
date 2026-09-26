@@ -1,15 +1,19 @@
 // App Shell：頂列（品牌、space 切換、連線狀態、降級徽章、深淺色、登出）＋
 // 側欄（8 項導覽、目前 space 的 vault 列表篩選、目前寫入位置）＋ 主內容（依路由切換畫面）。
+// 窄螢幕（≤760px，T-86）側欄收合成抽屜：頂列的選單鈕開關，深淺色／快捷鍵／登出移進抽屜底部。
+// 全站快捷鍵（T-87）見 lib/shortcuts.ts；`?` 開說明面板。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
 
+import { Dialog } from '../components/ui';
 import type { ApiClient, Notice } from '../lib/api';
 import { ALL, AppContext, type AppEnv, type HealthBadge, type ToastKind, type VaultsState } from '../lib/context';
 import { describeError } from '../lib/format';
 import { healthBadge } from '../lib/health';
 import { loadSpace, saveSpace, type Theme } from '../lib/prefs';
 import { SCREENS, routePath, useRoute, type ScreenId } from '../lib/router';
+import { createShortcutHandler, SHORTCUTS } from '../lib/shortcuts';
 import { SPACES, type SpaceId } from '../lib/spaces';
-import type { StatusResult, VaultSummary } from '../lib/types';
+import type { SessionLimits, StatusResult, VaultSummary } from '../lib/types';
 import { DocDetail } from '../screens/DocDetail';
 import { Docs } from '../screens/Docs';
 import { Health } from '../screens/Health';
@@ -18,7 +22,7 @@ import { Memory } from '../screens/Memory';
 import { NoteDetail } from '../screens/NoteDetail';
 import { NoteNew } from '../screens/NoteNew';
 import { Notes } from '../screens/Notes';
-import { Search } from '../screens/Search';
+import { Search, SEARCH_INPUT_ID } from '../screens/Search';
 import { Settings } from '../screens/Settings';
 import { Vaults } from '../screens/Vaults';
 import { SpaceSwitcher } from './SpaceSwitcher';
@@ -28,6 +32,7 @@ interface Props {
   /** 登入帳號與顯示名稱（取自 /ui/api/session） */
   principal: string;
   author: string;
+  limits: SessionLimits;
   theme: Theme;
   onToggleTheme: () => void;
   degraded: Notice | null;
@@ -42,7 +47,7 @@ interface ToastItem {
 
 const TOAST_ICON: Record<ToastKind, string> = { success: '✓', error: '✕', warning: '!', info: 'i' };
 
-export function Shell({ api, principal, author, theme, onToggleTheme, degraded, onLogout }: Props) {
+export function Shell({ api, principal, author, limits, theme, onToggleTheme, degraded, onLogout }: Props) {
   const [route, navigate] = useRoute();
   const [spaceId, setSpaceId] = useState<SpaceId>(loadSpace);
   const [vault, setVault] = useState<string>(ALL);
@@ -53,6 +58,53 @@ export function Shell({ api, principal, author, theme, onToggleTheme, degraded, 
   const [health, setHealth] = useState<HealthBadge | null>(null);
   const space = SPACES[spaceId];
   const screen = route.screen;
+  // 窄螢幕的側欄抽屜與快捷鍵說明
+  const [navOpen, setNavOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const menuBtn = useRef<HTMLButtonElement>(null);
+  const sidebar = useRef<HTMLElement>(null);
+
+  // 換頁即收起抽屜
+  useEffect(() => setNavOpen(false), [route]);
+
+  // 抽屜開啟：焦點移入；Esc 關閉並把焦點還給選單鈕
+  useEffect(() => {
+    if (!navOpen) return;
+    sidebar.current?.querySelector<HTMLElement>('a, button')?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setNavOpen(false);
+        menuBtn.current?.focus();
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [navOpen]);
+
+  // 快捷鍵：處理器只建一次，動作透過 ref 取最新的導覽狀態
+  const shortcutActions = useRef({ focusSearch: () => {}, goto: (_s: ScreenId) => {}, openHelp: () => {} });
+  shortcutActions.current = {
+    focusSearch: () => {
+      const focus = () => document.getElementById(SEARCH_INPUT_ID)?.focus();
+      if (screen === 'search' && route.params.length === 0) focus();
+      else {
+        navigate(routePath('search'));
+        window.setTimeout(focus, 0);
+      }
+    },
+    goto: (target) => navigate(routePath(target)),
+    openHelp: () => setHelpOpen(true),
+  };
+  useEffect(() => {
+    const handle = createShortcutHandler({
+      focusSearch: () => shortcutActions.current.focusSearch(),
+      goto: (target) => shortcutActions.current.goto(target),
+      openHelp: () => shortcutActions.current.openHelp(),
+    });
+    const onKey = (e: KeyboardEvent) => void handle(e);
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, []);
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -104,6 +156,7 @@ export function Shell({ api, principal, author, theme, onToggleTheme, degraded, 
       api,
       principal,
       author,
+      limits,
       space,
       vaults,
       vault,
@@ -116,7 +169,7 @@ export function Shell({ api, principal, author, theme, onToggleTheme, degraded, 
       switchSpace,
     }),
     // navigate／switchSpace 每次 render 都是新函式，但行為不變；不列入以免畫面重掛
-    [api, principal, author, space, vaults, vault, toast, health],
+    [api, principal, author, limits, space, vaults, vault, toast, health],
   );
 
   const vaultLabel =
@@ -124,12 +177,23 @@ export function Shell({ api, principal, author, theme, onToggleTheme, degraded, 
 
   return (
     <AppContext.Provider value={env}>
-      <div class="lv-app" data-zone={space.zone}>
+      <div class={'lv-app' + (navOpen ? ' is-nav-open' : '')} data-zone={space.zone}>
         <a class="lv-skip" href="#lv-main">
           跳到主內容
         </a>
         <header class="lv-header">
           <div class="lv-header__zone-bar" aria-hidden="true" />
+          <button
+            ref={menuBtn}
+            type="button"
+            class="btn-outline btn-outline--sm lv-icon-btn lv-menu-btn"
+            aria-expanded={navOpen}
+            aria-controls="lv-sidebar"
+            aria-label={navOpen ? '關閉導覽選單' : '開啟導覽選單'}
+            onClick={() => setNavOpen((o) => !o)}
+          >
+            <span aria-hidden="true">{navOpen ? '✕' : '☰'}</span>
+          </button>
           <a
             class="uep-topbar__brand"
             href="/ui/search"
@@ -138,8 +202,10 @@ export function Shell({ api, principal, author, theme, onToggleTheme, degraded, 
               navigate(routePath('search'));
             }}
           >
-            <div class="uep-brand-mark lv-brand__mark">L</div>
-            <div>
+            <div class="uep-brand-mark lv-brand__mark" aria-hidden="true">
+              L
+            </div>
+            <div class="lv-brand__text">
               <div class="uep-brand-title">Lore Vault</div>
               <div class="uep-brand-subtitle">PM · 紀錄與記憶層</div>
             </div>
@@ -147,6 +213,7 @@ export function Shell({ api, principal, author, theme, onToggleTheme, degraded, 
           <SpaceSwitcher current={spaceId} onPick={(next) => switchSpace(next)} />
           <div class="lv-header__spacer" />
           <button type="button" class="lv-conn" onClick={() => navigate(routePath('settings'))} title="連線設定">
+            <span class="lv-visually-hidden">連線設定：</span>
             <span class="lv-conn__dot" aria-hidden="true" />
             {window.location.host}
           </button>
@@ -171,21 +238,42 @@ export function Shell({ api, principal, author, theme, onToggleTheme, degraded, 
               語意檢索離線
             </button>
           )}
-          <button
-            type="button"
-            class="btn-outline btn-outline--sm lv-icon-btn"
-            onClick={onToggleTheme}
-            aria-label={theme === 'dark' ? '切換為淺色' : '切換為深色'}
-          >
-            {theme === 'dark' ? '☀' : '☾'}
-          </button>
-          <button type="button" class="btn-outline btn-outline--sm" onClick={onLogout}>
-            登出
-          </button>
+          <div class="lv-header__tools">
+            <button
+              type="button"
+              class="btn-outline btn-outline--sm lv-icon-btn"
+              onClick={() => setHelpOpen(true)}
+              aria-label="快捷鍵說明"
+              title="快捷鍵說明（?）"
+            >
+              <span aria-hidden="true">?</span>
+            </button>
+            <button
+              type="button"
+              class="btn-outline btn-outline--sm lv-icon-btn"
+              onClick={onToggleTheme}
+              aria-label={theme === 'dark' ? '切換為淺色' : '切換為深色'}
+            >
+              <span aria-hidden="true">{theme === 'dark' ? '☀' : '☾'}</span>
+            </button>
+            <button type="button" class="btn-outline btn-outline--sm" onClick={onLogout}>
+              登出
+            </button>
+          </div>
         </header>
 
         <div class="lv-body">
-          <aside class="lv-sidebar">
+          {navOpen && (
+            <div
+              class="lv-scrim"
+              aria-hidden="true"
+              onClick={() => {
+                setNavOpen(false);
+                menuBtn.current?.focus();
+              }}
+            />
+          )}
+          <aside class="lv-sidebar" id="lv-sidebar" ref={sidebar} aria-label="導覽與 vault">
             <nav class="lv-nav" aria-label="主導覽">
               {SCREENS.map((s) => (
                 <a
@@ -265,6 +353,17 @@ export function Shell({ api, principal, author, theme, onToggleTheme, degraded, 
               </div>
               {vault === ALL && <div class="lv-write-target__hint">寫入與上傳前需選定單一 vault</div>}
             </div>
+            <div class="lv-sidebar__tools">
+              <button type="button" class="btn-outline btn-outline--sm" onClick={onToggleTheme}>
+                {theme === 'dark' ? '切換為淺色' : '切換為深色'}
+              </button>
+              <button type="button" class="btn-outline btn-outline--sm" onClick={() => setHelpOpen(true)}>
+                快捷鍵說明
+              </button>
+              <button type="button" class="btn-outline btn-outline--sm" onClick={onLogout}>
+                登出
+              </button>
+            </div>
           </aside>
 
           <main class="lv-main" id="lv-main" tabIndex={-1}>
@@ -279,6 +378,34 @@ export function Shell({ api, principal, author, theme, onToggleTheme, degraded, 
             />
           </main>
         </div>
+
+        {helpOpen && (
+          <Dialog
+            title="快捷鍵"
+            onClose={() => setHelpOpen(false)}
+            actions={
+              <button type="button" class="uep-dialog__btn uep-dialog__btn--confirm" onClick={() => setHelpOpen(false)}>
+                關閉
+              </button>
+            }
+          >
+            <p class="lv-muted">焦點在輸入框、正在用輸入法組字或有對話框開著時，快捷鍵不會觸發。</p>
+            <dl class="lv-kbd-list" data-testid="shortcut-help">
+              {SHORTCUTS.map((s) => (
+                <div key={s.keys} class="lv-kbd-list__row">
+                  <dt>
+                    {s.keys.split(' ').map((k, i) => (
+                      <kbd key={i} class="lv-kbd">
+                        {k}
+                      </kbd>
+                    ))}
+                  </dt>
+                  <dd>{s.label}</dd>
+                </div>
+              ))}
+            </dl>
+          </Dialog>
+        )}
 
         <div class="uep-toast-container lv-toasts" aria-live="polite">
           {toasts.map((t) => (

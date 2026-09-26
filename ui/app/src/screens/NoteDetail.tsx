@@ -7,14 +7,13 @@ import { Banner, Dialog, ErrorState, Loading, SourceTag, TwoPhaseDelete } from '
 import { ApiError } from '../lib/api';
 import { useApp } from '../lib/context';
 import { diffLines, hasConflictMarkers, mergeDraft } from '../lib/diff';
-import { authorLabel, describeError, formatTime, isAbort } from '../lib/format';
+import { authorLabel, describeError, describeUnresolvedLink, formatTime, isAbort } from '../lib/format';
 import { Markdown } from '../lib/markdown';
 import { routePath } from '../lib/router';
-import type { ConflictCurrent, GetResult, NoteFull, NoteUndeleteResult, UpdateResult } from '../lib/types';
+import type { ConflictCurrent, GetResult, NoteFull, NoteUndeleteResult, UnresolvedLink, UpdateResult } from '../lib/types';
 
 /** 詳情頁一次取全文的字數預算；超過仍會標 truncated 並提供「載入全文」 */
 export const DETAIL_BUDGET = 200_000;
-const MAX_LINK_IDS = 50;
 
 interface Draft {
   title: string;
@@ -52,7 +51,7 @@ function changes(draft: Draft, against: NoteFull): Record<string, unknown> {
 }
 
 export function NoteDetail({ id }: { id: string }) {
-  const { api, space, navigate, toast, refreshVaults, author } = useApp();
+  const { api, space, navigate, toast, refreshVaults, author, limits } = useApp();
   const [note, setNote] = useState<NoteFull | null>(null);
   const [lookup, setLookup] = useState<{ missing: string[]; unavailable: string[] }>({ missing: [], unavailable: [] });
   const [error, setError] = useState<unknown>(null);
@@ -73,6 +72,8 @@ export function NoteDetail({ id }: { id: string }) {
   const [deleted, setDeleted] = useState<{ title: string } | null>(null);
   const [undeleting, setUndeleting] = useState(false);
   const [undeleteResult, setUndeleteResult] = useState<{ tone: 'ok' | 'warn' | 'error'; text: string } | null>(null);
+  // 最近一次儲存時服務回報解析不到／歧義的 [[ ]]（下次儲存或離開前都顯示）
+  const [unresolved, setUnresolved] = useState<UnresolvedLink[]>([]);
 
   const fetchNote = async (signal?: AbortSignal, want = budget): Promise<GetResult<NoteFull>> => {
     const { data } = await api.post<GetResult<NoteFull>>(
@@ -101,17 +102,18 @@ export function NoteDetail({ id }: { id: string }) {
     return () => ctrl.abort();
   }, [api, space.id, id, budget, tick]);
 
-  // 互連與更正對象的標題（只要標題：budget 取最小，正文不顯示，其截斷與此無關）
+  // 互連與更正鏈兩端的標題：`fields: "meta"` 只取 metadata（不組全文、不佔預算、不會帶出假的截斷）
   useEffect(() => {
     if (!note) return;
-    const ids = [...new Set([...note.links, ...(note.supersedes ? [note.supersedes] : [])])].slice(0, MAX_LINK_IDS);
+    const chain = [note.supersedes, note.superseded_by].filter((x): x is string => Boolean(x));
+    const ids = [...new Set([...chain, ...note.links])].slice(0, limits.get_max_ids);
     if (ids.length === 0) {
       setLinks({ titles: {}, missing: [] });
       return;
     }
     const ctrl = new AbortController();
     api
-      .post<GetResult<NoteFull>>('/v1/get', { space: space.id, vault: '*', ids, budget: 1 }, ctrl.signal)
+      .post<GetResult<NoteFull>>('/v1/get', { space: space.id, vault: '*', ids, fields: 'meta' }, ctrl.signal)
       .then(({ data }) => {
         const titles: Record<string, string> = {};
         data.items.forEach((n) => (titles[n.id] = n.title));
@@ -124,7 +126,7 @@ export function NoteDetail({ id }: { id: string }) {
         toast(`互連標題載入失敗：${describeError(err)}`, 'warning');
       });
     return () => ctrl.abort();
-  }, [api, space.id, note?.id, note?.updated]);
+  }, [api, space.id, note?.id, note?.updated, note?.superseded_by, limits.get_max_ids]);
 
   const startEdit = () => {
     if (!note) return;
@@ -155,6 +157,7 @@ export function NoteDetail({ id }: { id: string }) {
   };
 
   const afterSaved = async (result: UpdateResult, message: string) => {
+    setUnresolved(result.unresolved_links ?? []);
     toast(
       result.summary_stale ? `${message}；摘要將在背景重新產生，產生前以首段頂替` : message,
       'success',
@@ -376,6 +379,20 @@ export function NoteDetail({ id }: { id: string }) {
           <span>NOTE</span>
         </nav>
         <h1 class="lv-note-title">{mode === 'read' ? note.title : draft.title || '（無標題）'}</h1>
+        {note.superseded_by && mode === 'read' && (
+          <Banner
+            tone="warn"
+            label="SUPERSEDED"
+            testId="note-superseded"
+            action={
+              <button type="button" class="btn-outline btn-outline--sm" onClick={() => navigate(routePath('notes', [note.superseded_by!]))}>
+                開啟更正版
+              </button>
+            }
+          >
+            這則已被更正取代{links.titles[note.superseded_by] ? `（「${links.titles[note.superseded_by]}」）` : ''}，內容可能已過時。
+          </Banner>
+        )}
         <div class="lv-meta-line">
           <span>
             寫入 <span data-testid="note-author">{authorLabel(note.author)}</span>
@@ -421,6 +438,17 @@ export function NoteDetail({ id }: { id: string }) {
                 }
               >
                 超過字數預算的部分沒有顯示；編輯前請先載入全文，避免把截斷後的內容存回去。
+              </Banner>
+            )}
+
+            {unresolved.length > 0 && (
+              <Banner tone="warn" label="LINKS" testId="unresolved-links" title={`${unresolved.length} 個 [[ ]] 沒有解析成互連`}>
+                <ul class="lv-plain-list">
+                  {unresolved.map((u) => (
+                    <li key={u.target}>{describeUnresolvedLink(u)}</li>
+                  ))}
+                </ul>
+                原文保留在正文裡；補上同名筆記或改寫標題後再儲存即可連上。
               </Banner>
             )}
 
@@ -508,7 +536,21 @@ export function NoteDetail({ id }: { id: string }) {
           <div class="lv-chain">
             <div>
               <div class="lv-chain__k">被取代</div>
-              <div class="lv-chain__v lv-muted">服務尚未提供此資訊</div>
+              <div class="lv-chain__v" data-testid="chain-superseded-by">
+                {note.superseded_by ? (
+                  <a
+                    href={routePath('notes', [note.superseded_by])}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      navigate(routePath('notes', [note.superseded_by!]));
+                    }}
+                  >
+                    {links.titles[note.superseded_by] ?? note.superseded_by}
+                  </a>
+                ) : (
+                  <span class="lv-muted">無（這是目前版本）</span>
+                )}
+              </div>
             </div>
             <div>
               <div class="lv-chain__k lv-chain__k--here">此筆記</div>

@@ -1,6 +1,7 @@
 // UI 本地登入（A21／A23）：帳號密碼換服務端 session，以 HttpOnly cookie 識別，前端碰不到任何憑證。
 // 全域失敗 3 次即鎖定、需在主機人工解鎖；鎖定與剩餘次數由服務端回報，前端只負責顯示。
 import { ApiError, type ApiClient } from './api';
+import type { SessionLimits } from './types';
 
 export interface SessionInfo {
   authenticated: true;
@@ -10,6 +11,8 @@ export interface SessionInfo {
   display_name?: string;
   expires_at: string;
   idle_expires_at: string;
+  /** 前端需要的限制值（與服務端檢查同一來源）；舊版服務可能沒有 */
+  limits?: Partial<SessionLimits>;
 }
 
 /** 登入頁在送出前需要的公開狀態（`GET /ui/api/login`）。 */

@@ -6,7 +6,7 @@ import { useContext } from 'preact/hooks';
 import type { ApiClient } from './api';
 import type { Navigate } from './router';
 import type { SpaceId, SpaceMeta } from './spaces';
-import type { VaultSummary } from './types';
+import type { SessionLimits, VaultSummary } from './types';
 
 export type ToastKind = 'success' | 'error' | 'warning' | 'info';
 
@@ -32,6 +32,8 @@ export interface AppEnv {
   principal: string;
   /** 登入者的顯示名稱（session display_name）：UI 寫入 note 一律以它署名（A22 author） */
   author: string;
+  /** 服務端限制值（session limits，缺漏時以服務預設補齊） */
+  limits: SessionLimits;
   space: SpaceMeta;
   vaults: VaultsState;
   /** 目前篩選的 vault key；`*` = 本 space 全部 */

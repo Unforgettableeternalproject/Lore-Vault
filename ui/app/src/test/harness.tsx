@@ -6,6 +6,7 @@ import { vi } from 'vitest';
 
 import { createApiClient, type ApiClient, type ApiResponse, type UploadOptions } from '../lib/api';
 import { AppContext, type AppEnv } from '../lib/context';
+import { FALLBACK_LIMITS } from '../lib/limits';
 import { SPACES, type SpaceId } from '../lib/spaces';
 import type { VaultSummary } from '../lib/types';
 
@@ -53,6 +54,9 @@ export function makeApi(handlers: Record<string, Handler>) {
   return { api, calls, callsTo: (path: string) => calls.filter((c) => c.path === path) };
 }
 
+/** 元件測試的 session limits（刻意與服務預設不同，確認畫面讀的是 limits 而不是寫死的常數） */
+export const TEST_LIMITS = { ...FALLBACK_LIMITS, max_file_bytes: 1024 * 1024, get_max_ids: 20 };
+
 export interface EnvOverrides {
   vault?: string;
   vaults?: VaultSummary[];
@@ -74,6 +78,7 @@ export function renderWithApp(ui: ComponentChildren, api: ApiClient, overrides: 
     api: client,
     principal: TEST_PRINCIPAL,
     author: TEST_AUTHOR,
+    limits: TEST_LIMITS,
     space: SPACES[overrides.space ?? 'dev'],
     vaults: { items: overrides.vaults ?? VAULTS, loading: false, error: null },
     vault: overrides.vault ?? '*',

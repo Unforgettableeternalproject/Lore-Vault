@@ -20,8 +20,17 @@ import { routePath } from '../lib/router';
 import type { ChunkFull, DocumentFull, DocumentRetryResult, GetResult } from '../lib/types';
 import { POLL_MS } from './Docs';
 
-const MAX_IDS = 50; // 服務端 get 一次最多 50 個 id
 const CHUNK_BUDGET = 400_000;
+
+/**
+ * 段落顯示文字：前一段也在畫面上時，略過開頭與前一段重疊的 `overlap` 字（同服務端 chunk_excerpt 的規則：
+ * 只在 0 < overlap < 長度時切）；段落起頭（overlap 0）或前一段沒載入時原樣顯示。
+ */
+export function chunkDisplayText(chunk: Pick<ChunkFull, 'text' | 'overlap'>, previousShown: boolean): string {
+  const overlap = chunk.overlap ?? 0;
+  if (!previousShown || !(overlap > 0 && overlap < chunk.text.length)) return chunk.text;
+  return chunk.text.slice(overlap);
+}
 
 export function chunkRef(documentId: string, idx: number): string {
   return `chunk:${documentId.replace(/^doc:/, '')}:${idx}`;
@@ -35,7 +44,7 @@ interface ChunkState {
 }
 
 export function DocDetail({ id, chunk, fromQuery }: { id: string; chunk: number | null; fromQuery: string | null }) {
-  const { api, space, navigate, toast } = useApp();
+  const { api, space, navigate, toast, limits } = useApp();
   const [doc, setDoc] = useState<DocumentFull | null>(null);
   const [lookup, setLookup] = useState<{ missing: string[]; unavailable: string[] }>({ missing: [], unavailable: [] });
   const [error, setError] = useState<unknown>(null);
@@ -47,12 +56,12 @@ export function DocDetail({ id, chunk, fromQuery }: { id: string; chunk: number 
   const [retrying, setRetrying] = useState(false);
   const scrolled = useRef(false);
 
-  // 文件 metadata：get(doc:…) 會附全文，這裡只要 metadata，budget 取最小（全文改由 chunk 呈現）
+  // 文件 metadata：`fields: "meta"` 只回 metadata、不組全文、不佔預算（全文改由 chunk 呈現）
   useEffect(() => {
     const ctrl = new AbortController();
     setError(null);
     api
-      .post<GetResult<DocumentFull>>('/v1/get', { space: space.id, vault: '*', ids: [id], budget: 1 }, ctrl.signal)
+      .post<GetResult<DocumentFull>>('/v1/get', { space: space.id, vault: '*', ids: [id], fields: 'meta' }, ctrl.signal)
       .then(({ data }) => {
         setDoc(data.items.find((d) => d.id === id && d.kind === 'document') ?? null);
         setLookup({ missing: data.missing, unavailable: data.unavailable });
@@ -84,7 +93,9 @@ export function DocDetail({ id, chunk, fromQuery }: { id: string; chunk: number 
     setChunkError(null);
     const refs = Array.from({ length: count }, (_, i) => chunkRef(doc.id, i));
     const batches: string[][] = [];
-    for (let i = 0; i < refs.length; i += MAX_IDS) batches.push(refs.slice(i, i + MAX_IDS));
+    // 服務端 get 一次的 id 上限取 session limits
+    const perBatch = limits.get_max_ids;
+    for (let i = 0; i < refs.length; i += perBatch) batches.push(refs.slice(i, i + perBatch));
     Promise.all(
       batches.map((ids) =>
         api.post<GetResult<ChunkFull>>('/v1/get', { space: space.id, vault: doc.vault, ids, budget: CHUNK_BUDGET }, ctrl.signal),
@@ -105,7 +116,7 @@ export function DocDetail({ id, chunk, fromQuery }: { id: string; chunk: number 
         setChunkError(err);
       });
     return () => ctrl.abort();
-  }, [api, space.id, doc?.id, doc?.updated, ready, count]);
+  }, [api, space.id, doc?.id, doc?.updated, ready, count, limits.get_max_ids]);
 
   // 從檢索跳進來：捲到該段（只做一次）
   useEffect(() => {
@@ -153,6 +164,7 @@ export function DocDetail({ id, chunk, fromQuery }: { id: string; chunk: number 
 
   const st = documentStatus(doc);
   const sorted = chunks ? [...chunks.items].sort((a, b) => chunkIdx(a.id) - chunkIdx(b.id)) : [];
+  const shown = new Set(sorted.map((c) => chunkIdx(c.id)));
 
   return (
     <section class="lv-doc" aria-labelledby="lv-doc-title">
@@ -285,7 +297,7 @@ export function DocDetail({ id, chunk, fromQuery }: { id: string; chunk: number 
                     <div class="lv-chunk__loc">
                       {locatorLabel(c.locator)} · 第 {idx + 1} 段
                     </div>
-                    <p class="lv-chunk__text">{c.text}</p>
+                    <p class="lv-chunk__text">{chunkDisplayText(c, shown.has(idx - 1))}</p>
                     {c.truncated && (
                       <div class="lv-chunk__trunc">
                         已截斷：顯示 {c.text.length.toLocaleString()} / {c.text_chars.toLocaleString()} 字

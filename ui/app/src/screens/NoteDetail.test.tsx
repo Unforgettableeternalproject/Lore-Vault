@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { MARK_START } from '../lib/diff';
 import type { NoteFull } from '../lib/types';
-import { apiError, json, makeApi, renderWithApp, TEST_AUTHOR, type Handler } from '../test/harness';
+import { apiError, json, makeApi, renderWithApp, TEST_AUTHOR, TEST_LIMITS, type Handler } from '../test/harness';
 import { NoteDetail } from './NoteDetail';
 import { NoteNew } from './NoteNew';
 
@@ -36,12 +36,13 @@ function note(overrides: Partial<NoteFull> = {}): NoteFull {
 
 const related = { ...note({ id: 'n2', title: '相關筆記', links: [] }) };
 
-/** /v1/get：詳情（ids=[n1]）回 `current()`；互連標題（budget=1）回 n2、gone 缺 */
-function getHandler(current: () => NoteFull): Handler {
+/** /v1/get：詳情（ids=[n1]）回 `current()`；互連／更正鏈標題（fields=meta）回 extra 裡有的，其餘列為 missing */
+function getHandler(current: () => NoteFull, extra: NoteFull[] = [related]): Handler {
   return (body) => {
     const ids = body.ids as string[];
-    if (body.budget === 1) {
-      return json({ items: ids.includes('n2') ? [related] : [], missing: ids.filter((i) => i !== 'n2'), unavailable: [], truncated: true, budget: 1, used_chars: 1 });
+    if (body.fields === 'meta') {
+      const found = extra.filter((n) => ids.includes(n.id)).map(({ body: _b, ...meta }) => meta);
+      return json({ items: found, missing: ids.filter((i) => !found.some((n) => n.id === i)), unavailable: [], truncated: false, budget: 12000, used_chars: 0 });
     }
     return json({ items: [current()], missing: [], unavailable: [], truncated: current().truncated, budget: 200000, used_chars: 10 });
   };
@@ -303,45 +304,152 @@ describe('兩段式刪除', () => {
   });
 });
 
-describe('新增筆記', () => {
-  it('寫入後回報疑似重複與查重降級，並附分數與原因', async () => {
+describe('更正鏈與未解析連結', () => {
+  it('被取代（superseded_by）：顯示橫幅與更正版連結，標題以 fields=meta 取得', async () => {
+    const newer = note({ id: 'n9', title: '注入預算（更正）', links: [], supersedes: 'n1' });
+    const { api, callsTo } = makeApi({ '/v1/get': getHandler(() => note({ links: [], superseded_by: 'n9' }), [newer]) });
+    const { navigate } = renderWithApp(<NoteDetail id="n1" />, api);
+    const banner = await screen.findByTestId('note-superseded');
+    await waitFor(() => expect(banner.textContent).toContain('注入預算（更正）'));
+    const chain = screen.getByTestId('chain-superseded-by');
+    expect(within(chain).getByRole('link', { name: '注入預算（更正）' }).getAttribute('href')).toBe('/ui/notes/n9');
+    fireEvent.click(within(banner).getByRole('button', { name: '開啟更正版' }));
+    expect(navigate).toHaveBeenCalledWith('/ui/notes/n9');
+    const meta = callsTo('/v1/get').find((c) => c.body.fields === 'meta')!;
+    expect(meta.body.ids).toEqual(['n9']);
+    expect(meta.body).not.toHaveProperty('budget');
+  });
+
+  it('互連標題查詢的 id 數受 session limits.get_max_ids 限制', async () => {
+    const many = Array.from({ length: 30 }, (_, i) => `x${i}`);
+    const { api, callsTo } = makeApi({ '/v1/get': getHandler(() => note({ links: many })) });
+    renderWithApp(<NoteDetail id="n1" />, api);
+    await waitFor(() => expect(callsTo('/v1/get').some((c) => c.body.fields === 'meta')).toBe(true));
+    const meta = callsTo('/v1/get').find((c) => c.body.fields === 'meta')!;
+    expect((meta.body.ids as string[]).length).toBe(TEST_LIMITS.get_max_ids);
+  });
+
+  it('儲存後服務回報未解析／歧義的 [[ ]]：閱讀模式列出', async () => {
+    let current = note({ links: [] });
+    const ctx = makeApi({
+      '/v1/get': getHandler(() => current),
+      '/v1/update': (body) => {
+        current = { ...current, body: body.body as string, updated: '2026-09-26T05:00:00.000Z' };
+        return json({
+          id: 'n1',
+          vault: VAULT,
+          updated: current.updated,
+          summary_stale: false,
+          embedding_stale: false,
+          links: [],
+          unresolved_links: [
+            { target: '不存在的標題', status: 'unresolved', candidates: [] },
+            { target: '同名', status: 'ambiguous', candidates: ['a', 'b'] },
+          ],
+        });
+      },
+    });
+    renderWithApp(<NoteDetail id="n1" />, ctx.api);
+    fireEvent.click(await screen.findByRole('button', { name: '編輯' }));
+    fireEvent.input(document.querySelector('textarea')!, { target: { value: '[[不存在的標題]] [[同名]]' } });
+    fireEvent.click(screen.getByRole('button', { name: '儲存' }));
+    const banner = await screen.findByTestId('unresolved-links');
+    expect(banner.textContent).toContain('2 個 [[ ]] 沒有解析成互連');
+    expect(banner.textContent).toContain('[[不存在的標題]]：同一 vault 找不到這個標題');
+    expect(banner.textContent).toContain('[[同名]]：同一 vault 有 2 則同名筆記');
+  });
+});
+
+describe('新增筆記（寫入前查重）', () => {
+  function fill(title = '注入預算 800 字') {
+    fireEvent.input(screen.getByLabelText('標題'), { target: { value: title } });
+    fireEvent.input(document.querySelector('textarea')!, { target: { value: '正文 [[沒有這則]]' } });
+  }
+
+  it('先 dry_run：列出疑似重複、查重降級與未解析連結，尚未寫入；改寫這則開啟既有筆記', async () => {
     const { api, callsTo } = makeApi({
       '/v1/write': () =>
-        json(
-          {
-            id: 'new1',
-            vault: VAULT,
-            updated: 'x',
-            duplicates: [{ id: 'n1', title: '注入預算', updated: '2026-09-26T01:00:00.000Z', reasons: ['title', 'lexical'], lexical: 0.91, vector: null }],
-            dedup_degraded: true,
-            dedup_reason: 'embedder_unavailable',
-          },
-          201,
-        ),
+        json({
+          vault: VAULT,
+          links: [],
+          unresolved_links: [{ target: '沒有這則', status: 'unresolved', candidates: [] }],
+          duplicates: [{ id: 'n1', title: '注入預算', updated: '2026-09-26T01:00:00.000Z', reasons: ['title', 'lexical'], lexical: 0.91, vector: null }],
+          dedup_degraded: true,
+          dedup_reason: 'embedder_unavailable',
+          dry_run: true,
+        }),
     });
     const { navigate } = renderWithApp(<NoteNew supersedes={null} />, api, { vault: VAULT });
-    fireEvent.input(screen.getByLabelText('標題'), { target: { value: '注入預算 800 字' } });
-    fireEvent.input(document.querySelector('textarea')!, { target: { value: '正文' } });
+    fill();
     fireEvent.click(screen.getByRole('button', { name: '寫入' }));
 
-    const dupes = await screen.findByTestId('duplicates');
-    expect(dupes.textContent).toContain('疑似重複 · 1');
+    const panel = await screen.findByTestId('dedup-preview');
+    expect(panel.textContent).toContain('疑似重複 · 1');
+    expect(panel.textContent).toContain('尚未寫入');
+    const dupes = screen.getByTestId('duplicates');
     expect(dupes.textContent).toContain('標題相同、字詞相近');
     expect(dupes.textContent).toContain('0.91');
     expect(screen.getByTestId('dedup-degraded').textContent).toContain('embedder_unavailable');
-    expect(callsTo('/v1/write')[0]!.body).toMatchObject({ space: 'dev', vault: VAULT, title: '注入預算 800 字', author: TEST_AUTHOR });
-    fireEvent.click(screen.getByRole('button', { name: '開啟這則改寫 →' }));
+    expect(screen.getByTestId('preview-unresolved').textContent).toContain('[[沒有這則]]');
+    expect(callsTo('/v1/write')).toHaveLength(1);
+    expect(callsTo('/v1/write')[0]!.body).toMatchObject({ space: 'dev', vault: VAULT, title: '注入預算 800 字', author: TEST_AUTHOR, dry_run: true });
+    // 有結果時「寫入」停用：必須在面板明確選擇
+    expect((screen.getByRole('button', { name: '寫入' }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: '改寫「注入預算」' }));
     expect(navigate).toHaveBeenCalledWith('/ui/notes/n1');
+    expect(callsTo('/v1/write')).toHaveLength(1);
   });
 
-  it('沒有重複且查重正常：直接開啟新筆記', async () => {
-    const { api } = makeApi({
-      '/v1/write': () => json({ id: 'new1', vault: VAULT, updated: 'x', duplicates: [], dedup_degraded: false, dedup_reason: null }, 201),
+  it('照樣新增：以相同內容正式寫入（不帶 dry_run），未解析連結以警示 toast 告知', async () => {
+    const { api, callsTo } = makeApi({
+      '/v1/write': (body) =>
+        body.dry_run
+          ? json({ vault: VAULT, links: [], unresolved_links: [], duplicates: [{ id: 'n1', title: '注入預算', updated: 'x', reasons: ['lexical'], lexical: 0.5, vector: 0.8 }], dedup_degraded: false, dedup_reason: null, dry_run: true })
+          : json({ id: 'new1', vault: VAULT, updated: 'x', author: TEST_AUTHOR, principal: 'UEPBernie', links: [], unresolved_links: [{ target: '沒有這則', status: 'unresolved', candidates: [] }], duplicates: [], dedup_degraded: false, dedup_reason: null, dry_run: false }, 201),
+    });
+    const { navigate, toast } = renderWithApp(<NoteNew supersedes={null} />, api, { vault: VAULT });
+    fill();
+    fireEvent.click(screen.getByRole('button', { name: '寫入' }));
+    await screen.findByTestId('duplicates');
+    fireEvent.click(screen.getByRole('button', { name: '照樣新增' }));
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith('/ui/notes/new1'));
+    const [dry, real] = callsTo('/v1/write');
+    expect(dry!.body.dry_run).toBe(true);
+    expect(real!.body).not.toHaveProperty('dry_run');
+    const dryPayload = { ...dry!.body };
+    delete dryPayload.dry_run;
+    expect(real!.body).toEqual(dryPayload);
+    expect(toast).toHaveBeenCalledWith(expect.stringContaining('沒有這則'), 'warning');
+  });
+
+  it('查重後改了內容：預覽失效，照樣新增停用，寫入重新查重', async () => {
+    const { api, callsTo } = makeApi({
+      '/v1/write': () => json({ vault: VAULT, links: [], unresolved_links: [], duplicates: [{ id: 'n1', title: '注入預算', updated: 'x', reasons: ['title'], lexical: 1, vector: null }], dedup_degraded: false, dedup_reason: null, dry_run: true }),
+    });
+    renderWithApp(<NoteNew supersedes={null} />, api, { vault: VAULT });
+    fill();
+    fireEvent.click(screen.getByRole('button', { name: '寫入' }));
+    await screen.findByTestId('duplicates');
+    fireEvent.input(screen.getByLabelText('標題'), { target: { value: '改過的標題' } });
+    expect(screen.getByTestId('preview-stale')).toBeTruthy();
+    expect((screen.getByRole('button', { name: '照樣新增' }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: '寫入' }));
+    await waitFor(() => expect(callsTo('/v1/write')).toHaveLength(2));
+    expect(callsTo('/v1/write')[1]!.body).toMatchObject({ title: '改過的標題', dry_run: true });
+  });
+
+  it('沒有重複、查重正常、連結都解析：dry_run 後直接寫入並開啟新筆記', async () => {
+    const { api, callsTo } = makeApi({
+      '/v1/write': (body) =>
+        body.dry_run
+          ? json({ vault: VAULT, links: [], unresolved_links: [], duplicates: [], dedup_degraded: false, dedup_reason: null, dry_run: true })
+          : json({ id: 'new1', vault: VAULT, updated: 'x', links: [], unresolved_links: [], duplicates: [], dedup_degraded: false, dedup_reason: null, dry_run: false }, 201),
     });
     const { navigate } = renderWithApp(<NoteNew supersedes={null} />, api, { vault: VAULT });
     fireEvent.input(screen.getByLabelText('標題'), { target: { value: 't' } });
     fireEvent.click(screen.getByRole('button', { name: '寫入' }));
     await waitFor(() => expect(navigate).toHaveBeenCalledWith('/ui/notes/new1'));
+    expect(callsTo('/v1/write').map((c) => c.body.dry_run ?? false)).toEqual([true, false]);
   });
 
   it('本 space 全部時必須先選 vault', () => {

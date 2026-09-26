@@ -8,11 +8,9 @@ import { authorLabel, describeDegradedReason, formatTime, isAbort, locatorLabel 
 import { routePath } from '../lib/router';
 import type { RecallItem, RecallResult } from '../lib/types';
 
-export const DEFAULT_LIMIT = 10;
-export const DEFAULT_BUDGET = 2000;
-// 服務端 recall limit 上限 100；budget 無硬上限，前端自訂上限避免一次拉太多
-const MAX_LIMIT = 100;
-const MAX_BUDGET = 64000;
+// limit 的預設與上限、budget 的預設取 session limits（recall_*）；
+// budget 服務端沒有硬上限，「載入其餘結果」最多放大到預設的 32 倍，避免一次拉太多
+const BUDGET_GROWTH_CAP = 32;
 
 interface Params {
   query: string;
@@ -21,10 +19,17 @@ interface Params {
   budget: number;
 }
 
+/** 快捷鍵 `/` 聚焦的查詢框 id */
+export const SEARCH_INPUT_ID = 'lv-search-input';
+
 const KIND_LABEL: Record<string, string> = { note: '筆記', chunk: '文件段落', concept: '記憶概念' };
 
 export function Search({ initialQuery }: { initialQuery: string }) {
-  const { api, space, vault, setVault, vaults, navigate } = useApp();
+  const { api, space, vault, setVault, vaults, navigate, limits } = useApp();
+  const DEFAULT_LIMIT = limits.recall_default_limit;
+  const DEFAULT_BUDGET = limits.recall_default_budget;
+  const MAX_LIMIT = limits.recall_max_limit;
+  const MAX_BUDGET = DEFAULT_BUDGET * BUDGET_GROWTH_CAP;
   const [input, setInput] = useState(initialQuery);
   const [params, setParams] = useState<Params | null>(
     initialQuery.trim() ? { query: initialQuery.trim(), vault, limit: DEFAULT_LIMIT, budget: DEFAULT_BUDGET } : null,
@@ -114,11 +119,12 @@ export function Search({ initialQuery }: { initialQuery: string }) {
         </span>
         <input
           ref={inputRef}
+          id={SEARCH_INPUT_ID}
           class="lv-search__input"
           type="search"
           name="q"
           aria-label="檢索查詢"
-          placeholder="關鍵詞、中英混合皆可，Enter 查詢"
+          placeholder="關鍵詞、中英混合皆可，Enter 查詢（快捷鍵 /）"
           value={input}
           onInput={(e) => setInput((e.target as HTMLInputElement).value)}
         />

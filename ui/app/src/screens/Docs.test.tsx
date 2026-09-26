@@ -5,9 +5,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ApiResponse } from '../lib/api';
 import { ApiError } from '../lib/api';
 import type { ChunkFull, DocumentMeta, UploadResult } from '../lib/types';
-import { apiError, json, makeApi, renderWithApp, type Handler } from '../test/harness';
-import { DocDetail } from './DocDetail';
-import { Docs, MAX_UPLOAD_BYTES } from './Docs';
+import { apiError, json, makeApi, renderWithApp, TEST_LIMITS, type Handler } from '../test/harness';
+import { chunkDisplayText, DocDetail } from './DocDetail';
+import { Docs } from './Docs';
 import { Notes } from './Notes';
 
 afterEach(cleanup);
@@ -109,6 +109,7 @@ describe('文件列表狀態', () => {
 describe('筆記列表作者', () => {
   it('作者未具名要標出；最後修改者不同時另外顯示', async () => {
     const { api } = makeApi({
+      '/v1/topics': () => json({ space: 'dev', vault: '*', topics: [] }),
       '/v1/list': () =>
         json({
           items: [
@@ -156,12 +157,12 @@ describe('上傳', () => {
     const { refreshVaults } = renderWithApp(<Docs />, api, { vault: VAULT, upload });
     const zone = await screen.findByTestId('dropzone');
     fireEvent.drop(zone, {
-      dataTransfer: { files: [file('huge.pdf', MAX_UPLOAD_BYTES + 1), file('new.md', 10), file('same.md', 10), file('again.md', 10), file('bad.exe', 10)] },
+      dataTransfer: { files: [file('huge.pdf', TEST_LIMITS.max_file_bytes + 1), file('new.md', 10), file('same.md', 10), file('again.md', 10), file('bad.exe', 10)] },
     });
     const results$ = await screen.findByTestId('upload-results');
     await waitFor(() => expect(uploaded).toEqual(['new.md', 'same.md', 'again.md', 'bad.exe']));
     await waitFor(() => expect(results$.textContent).toContain('不支援的檔案格式'));
-    expect(results$.textContent).toContain('超過 25.0 MB 上限，未上傳');
+    expect(results$.textContent).toContain('超過 1.0 MB 上限，未上傳'); // 依 session limits，不是寫死的 25MB
     expect(results$.textContent).toContain('新版本 v2');
     expect(results$.textContent).toContain('內容與既有文件相同');
     expect(results$.textContent).toContain('沿用先前失敗的同內容文件');
@@ -207,6 +208,39 @@ describe('文件檢視', () => {
     expect(screen.getByTestId('from-recall').textContent).toContain('hook 注入');
     expect(screen.getByText('第 3 頁 · 第 2 段')).toBeTruthy();
     expect(callsTo('/v1/get')[1]!.body.ids).toEqual(['chunk:u1:0', 'chunk:u1:1', 'chunk:u1:2']);
+  });
+
+  it('文件資訊用 fields=meta；段落 id 依 limits.get_max_ids 分批；前一段在畫面上時去掉開頭重疊', async () => {
+    const count = TEST_LIMITS.get_max_ids + 1;
+    const { api, callsTo } = makeApi({
+      '/v1/get': (body) => {
+        const ids = body.ids as string[];
+        if (ids[0] === 'doc:u1') {
+          return json({ items: [{ ...doc({ chunk_count: count }), text_chars: 99, truncated: false }], missing: [], unavailable: [], truncated: false, budget: 12000, used_chars: 0 });
+        }
+        const items = ids.map((cid) => {
+          const idx = Number(cid.split(':').pop());
+          if (idx === 0) return chunk(0, { kind: 'heading', value: '前言' }, '第一段結尾ABC');
+          if (idx === 1) return { ...chunk(1, { kind: 'heading', value: '前言', part: 2 }, 'ABC第二段'), overlap: 3 };
+          return { ...chunk(idx, { kind: 'offset', value: idx }, `段${idx}`), overlap: 0 };
+        });
+        return json({ items, missing: [], unavailable: [], truncated: false, budget: 400000, used_chars: 1 });
+      },
+    });
+    renderWithApp(<DocDetail id="doc:u1" chunk={null} fromQuery={null} />, api);
+    const second = await screen.findByRole('region', { name: /第 2 段/ });
+    expect(second.querySelector('.lv-chunk__text')!.textContent).toBe('第二段');
+    expect(screen.getByRole('region', { name: /第 1 段/ }).querySelector('.lv-chunk__text')!.textContent).toBe('第一段結尾ABC');
+    const [meta, ...batches] = callsTo('/v1/get');
+    expect(meta!.body).toMatchObject({ ids: ['doc:u1'], fields: 'meta' });
+    expect(meta!.body).not.toHaveProperty('budget');
+    expect(batches.map((b) => (b.body.ids as string[]).length)).toEqual([TEST_LIMITS.get_max_ids, 1]);
+  });
+
+  it('只載入某段（前一段不在畫面上）時不切重疊', () => {
+    expect(chunkDisplayText({ text: 'ABC第二段', overlap: 3 }, false)).toBe('ABC第二段');
+    expect(chunkDisplayText({ text: 'ABC', overlap: 3 }, true)).toBe('ABC');
+    expect(chunkDisplayText({ text: 'ABC第二段', overlap: 3 }, true)).toBe('第二段');
   });
 
   it('失敗文件：顯示原因與重試，不去取段落', async () => {
