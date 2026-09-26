@@ -2,7 +2,7 @@
 // 換頁（筆記 → 文件 → 記憶層 → 檢索）範圍不變，列表內容確實依篩選變化。
 import { expect, test, type Page } from '@playwright/test';
 
-import { createVault, login, watchPage, writeNote } from './helpers';
+import { axeViolations, createVault, login, watchPage, writeNote } from './helpers';
 
 const A = { key: 'folder/e2e-vpick-a', display: 'E2E 篩選甲' };
 const B = { key: 'folder/e2e-vpick-b', display: 'E2E 篩選乙' };
@@ -32,6 +32,8 @@ test('頁面 vault 篩選器與側欄同步', async ({ page }) => {
   // 頁面篩選器：輸入搜尋、Enter 選取 → 側欄同一項標為選取、列表只剩該 vault
   await picker(page).click();
   await expect(picker(page)).toHaveAttribute('aria-expanded', 'true');
+  // 下拉開著、游標在選項上（zone tint 底）時的對比
+  expect(await axeViolations(page, '筆記 · vault 篩選器展開')).toEqual([]);
   await picker(page).fill('篩選甲');
   await expect(page.getByRole('option')).toHaveCount(1);
   await picker(page).press('Enter');

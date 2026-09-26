@@ -501,7 +501,8 @@ button { font: inherit; }
   display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 8px 10px;
   border-left: 2px solid transparent; cursor: pointer; color: var(--ink-soft);
 }
-.lv-vpick__opt.is-active { background: var(--zone-tint); color: var(--ink); --ink-mute: var(--ink-soft); }
+/* 卡片底色＋zone tint 上 --ink-soft 仍不到 4.5:1（深色），次要文字直接用主文字色 */
+.lv-vpick__opt.is-active { background: var(--zone-tint); color: var(--ink); --ink-mute: var(--ink); }
 .lv-vpick__opt.is-current { border-left-color: var(--zone-soft); color: var(--ink-title); }
 .lv-vpick__opt-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .lv-vpick__opt-label { font-size: 13px; overflow-wrap: anywhere; }
