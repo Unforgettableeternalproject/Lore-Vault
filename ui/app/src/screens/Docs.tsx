@@ -197,7 +197,7 @@ export function Docs() {
       <h1 id="lv-docs-title" class="lv-title">
         文件
       </h1>
-      <div class="lv-filters lv-filters--top">
+      <div class="lv-filters">
         <VaultPicker />
       </div>
 

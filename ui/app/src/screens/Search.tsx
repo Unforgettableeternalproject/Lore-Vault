@@ -139,7 +139,7 @@ export function Search({ initialQuery }: { initialQuery: string }) {
         </button>
       </form>
 
-      <div class="lv-filters lv-filters--search">
+      <div class="lv-filters">
         <VaultPicker />
       </div>
 

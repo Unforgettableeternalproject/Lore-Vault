@@ -517,10 +517,9 @@ button { font: inherit; }
 .lv-vpick__opt-sub { font-family: var(--font-mono); font-size: var(--lv-fs-meta); color: var(--ink-mute); overflow-wrap: anywhere; }
 .lv-vpick__opt-count { flex: none; font-family: var(--font-mono); font-size: var(--lv-fs-meta); color: var(--ink-mute); white-space: nowrap; }
 .lv-vpick__empty { padding: 10px; font-size: var(--lv-fs-meta); color: var(--ink-mute); }
-.lv-filters--top { margin: -8px 0 20px; }
-.lv-filters--search { margin: 0; }
 
-.lv-filters { display: flex; flex-wrap: wrap; gap: 24px; margin: 28px 0 0; align-items: center; }
+/* 篩選列上下間距全站一致：與上方標題／查詢框、下方內容（上傳區、表格、橫幅）各留 24px（相鄰邊距會合併） */
+.lv-filters { display: flex; flex-wrap: wrap; gap: 16px 24px; margin: 24px 0; align-items: center; }
 .lv-filters__label { font-family: var(--font-mono); font-size: var(--lv-fs-meta); letter-spacing: .16em; color: var(--ink-mute); margin-right: 4px; }
 .lv-table { margin-top: 20px; }
 /* 欄寬定義在表格本身，表頭與每一列用 subgrid 共用同一組欄線：
@@ -865,7 +864,7 @@ details.lv-check > .lv-check__head { cursor: pointer; }
 .lv-memory-episodes .lv-machine, .lv-episode-group .lv-machine { grid-template-columns: minmax(0, 1fr) auto auto; color: var(--ink-soft); }
 
 .lv-memory-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 300px); gap: 32px; margin-top: 16px; }
-.lv-filters--tight { margin-top: 0; gap: 16px; }
+.lv-filters--tight { margin: 0 0 16px; gap: 16px; }
 .lv-filters__group { display: flex; align-items: center; gap: 8px; }
 .lv-concepts { list-style: none; margin: 12px 0 0; padding: 0; }
 .lv-concept { display: grid; grid-template-columns: minmax(0, 1fr) 110px; gap: 16px; padding: 14px 4px; border-bottom: 1px solid var(--line); }
