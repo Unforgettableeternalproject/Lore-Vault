@@ -169,9 +169,11 @@ spike 接入端點（階段 8，同樣需 bearer；每筆 body 項目 = schema d
 | `note_undelete` | `{space, id}` | `{undeleted: 墓碑, restored, reimportable, note}`。墓碑有內容快照（schema v12 起刪除的）→ 以原 id 與原內容（含作者欄位、created／updated）還原，`restored: true`、`note` 為 `{id, vault, title, author, updated}`；FTS 同交易重建，向量由背景補算。v12 前的舊墓碑 → 維持舊行為：只移除墓碑、`restored: false`、`note: null`，有匯入來源者（`reimportable`）重跑匯入才回來 | 404；409 `not_restorable`（`reason`：`vault_deleted` 所屬 vault 已刪除、墓碑保留，重建同 key 的 vault 後可還原／`exists`） |
 | `document_undelete` | `{space, id}` | `{document: Document, space, tombstone}`；同一 id 重建、`status: "pending"` 重新抽取，版本鏈比照上傳（同檔名現行版本為 `supersedes`） | 409 `not_restorable`（`reason`：`incomplete` v11 前墓碑／`blob_missing`／`duplicate` 同內容已存在／`vault_deleted`／`exists`）、500 `documents_not_configured` |
 | `document_retry` | `{space, vault, id}` | `{document, space, manual_retries, max_manual_retries}`；failed → pending（沿用上傳重試的 `reset_for_retry`） | 409 `not_failed`／`retry_limit`（每份 3 次） |
-| `concept_query` | `{space, vault, scope?, scope_state?: repo／global／missing, kind?, cursor?, limit? (≤200)}` | `{items, next_cursor}`；item＝`{id, vault, kind, scope, scope_state, statement, anchors, surprisal, usability_verdict, updated}`，依 updated 由新到舊。**不回** cue／probe／why／source_*／probe_result／usability 的 evidence | 400 `invalid_request`／`invalid_cursor` |
+| `concept_query` | `{space, vault, scope?, scope_state?: repo／global／missing, kind?, since?, until?, cursor?, offset?, with_total?, limit? (≤200)}`（`since`／`until` 為 updated 區間、含端點；`offset` 頁碼分頁、與 `cursor` 擇一） | `{items, next_cursor, total?}`（`with_total` 時帶 `total`）；item＝`{id, vault, kind, scope, scope_state, statement, anchors, surprisal, usability_verdict, updated}`，依 updated 由新到舊。**不回** cue／probe／why／source_*／probe_result／usability 的 evidence | 400 `invalid_request`／`invalid_cursor` |
 | `topics` | `{space, vault}` | `{space, vault, topics: [{topic, count}]}`：範圍內 note 的標籤與使用筆數，依筆數由多到少、同數依名稱；`vault="*"` 為目前 space 內全部 vault | 400 `vault_required`（缺 vault）、404 `unknown_vault` |
 | `episode_summary` | `{space, vault}` | `{space, vault, total, last_recorded, by_machine: [{machine, episodes, last_recorded, last_started}], by_vault: [{vault, …}]}`；不讀 data 欄、不含任何對話原文 | |
+
+`/v1/list` 另接受 `until`（updated 上界，含端點；與 `since` 一起做日期區間）、`offset`（頁碼分頁，與 `cursor` 擇一）與 `with_total`（回 `total`＝相同篩選下的總筆數，回應同時帶回 `offset`）；UI 的分頁元件使用，MCP 殼仍用 cursor。
 
 concept／episode 只屬 dev：在 lore／personal 查詢 `vault="*"` 回空、指定 dev 的 key 為 404。
 
