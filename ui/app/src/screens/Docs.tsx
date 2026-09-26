@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 
 import { Banner, EmptyState, ErrorState, Loading, TwoPhaseDelete } from '../components/ui';
+import { DateRange, DEFAULT_PAGE_SIZE, Pager, rangeParams, type DateRangeValue } from '../components/Pager';
 import { VaultPicker } from '../components/VaultPicker';
 import { ApiError } from '../lib/api';
 import { ALL, useApp, vaultName } from '../lib/context';
@@ -21,7 +22,6 @@ import { routePath } from '../lib/router';
 import type { DocumentMeta, DocumentRetryResult, ListResult, UploadResult } from '../lib/types';
 
 export const POLL_MS = 2000;
-const PAGE = 50;
 const ACCEPT = '.md,.markdown,.txt,.pdf,.docx,.pptx,.json,.yaml,.yml,.toml';
 
 export interface UploadEntry {
@@ -47,7 +47,9 @@ export function Docs() {
   const maxBytes = limits.max_file_bytes;
   const [target, setTarget] = useState(vault !== ALL ? vault : '');
   const [page, setPage] = useState<ListResult<DocumentMeta> | null>(null);
-  const [cursors, setCursors] = useState<(string | null)[]>([null]);
+  const [range, setRange] = useState<DateRangeValue>({ from: '', to: '' });
+  const [pageNo, setPageNo] = useState(1);
+  const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE);
   const [error, setError] = useState<unknown>(null);
   const [loading, setLoading] = useState(true);
   const [tick, setTick] = useState(0);
@@ -63,9 +65,8 @@ export function Docs() {
   useEffect(() => {
     if (vault !== ALL) setTarget(vault);
   }, [vault]);
-  useEffect(() => setCursors([null]), [vault]);
-
-  const cursor = cursors[cursors.length - 1] ?? null;
+  // 篩選或每頁筆數變了回第一頁
+  useEffect(() => setPageNo(1), [vault, range.from, range.to, pageSize]);
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -74,7 +75,15 @@ export function Docs() {
     api
       .post<ListResult<DocumentMeta>>(
         '/v1/list',
-        { space: space.id, vault, kinds: ['document'], limit: PAGE, ...(cursor ? { cursor } : {}) },
+        {
+          space: space.id,
+          vault,
+          kinds: ['document'],
+          limit: pageSize,
+          offset: (pageNo - 1) * pageSize,
+          with_total: true,
+          ...rangeParams(range),
+        },
         ctrl.signal,
       )
       .then(({ data }) => {
@@ -87,7 +96,7 @@ export function Docs() {
         setLoading(false);
       });
     return () => ctrl.abort();
-  }, [api, space.id, vault, cursor, tick]);
+  }, [api, space.id, vault, pageNo, pageSize, range.from, range.to, tick]);
 
   // 有處理中的文件就輪詢列表
   const processing = page?.items.some(isProcessing) ?? false;
@@ -197,9 +206,12 @@ export function Docs() {
       <h1 id="lv-docs-title" class="lv-title">
         文件
       </h1>
-      <div class="lv-filters">
-        <VaultPicker />
-      </div>
+      <section class="lv-filter-panel" aria-label="篩選條件" data-testid="filter-panel">
+        <div class="lv-filter-panel__row">
+          <VaultPicker />
+          <DateRange value={range} onChange={setRange} />
+        </div>
+      </section>
 
       <div
         class={'lv-drop' + (dragging ? ' is-dragging' : '')}
@@ -409,24 +421,23 @@ export function Docs() {
               把檔案拖到上方區塊，或按「選擇檔案」上傳。
             </EmptyState>
           )}
-          <div class="lv-pager">
-            <span>
-              第 {cursors.length} 頁 · 本頁 {items.length} 份{processing ? ' · 有文件處理中，自動更新' : ''}
-            </span>
-            <div class="lv-pager__btns">
-              <button type="button" class="btn-terminal" disabled={cursors.length <= 1} onClick={() => setCursors((c) => c.slice(0, -1))}>
-                ← 上頁
-              </button>
-              <button
-                type="button"
-                class="btn-terminal"
-                disabled={!page.next_cursor}
-                onClick={() => page.next_cursor && setCursors((c) => [...c, page.next_cursor])}
-              >
-                下頁 →
-              </button>
-            </div>
-          </div>
+          {processing && (
+            <p class="lv-hint lv-hint--inline" role="status">
+              有文件處理中，自動更新列表。
+            </p>
+          )}
+          {(page.total ?? items.length) > 0 && (
+            <Pager
+              page={pageNo}
+              pageSize={pageSize}
+              total={page.total ?? items.length}
+              loading={loading}
+              unit="份"
+              label="文件分頁"
+              onPage={setPageNo}
+              onPageSize={setPageSize}
+            />
+          )}
         </>
       )}
 

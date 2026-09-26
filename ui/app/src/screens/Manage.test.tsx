@@ -419,6 +419,7 @@ describe('記憶層', () => {
             },
           ],
           next_cursor: 'c2',
+          total: 75,
         }),
       '/v1/episode_summary': () => json({ space: 'dev', vault: '*', total: 5, last_recorded: null, by_machine: [], by_vault: [] }),
     });
@@ -431,8 +432,23 @@ describe('記憶層', () => {
     await waitFor(() => expect(callsTo('/v1/concept_query').at(-1)!.body).toMatchObject({ kind: 'user-stance' }));
     fireEvent.click(screen.getByRole('button', { name: '跨專案' }));
     await waitFor(() => expect(callsTo('/v1/concept_query').at(-1)!.body).toMatchObject({ scope_state: 'global', kind: 'user-stance' }));
-    fireEvent.click(screen.getByRole('button', { name: '下一頁 →' }));
-    await waitFor(() => expect(callsTo('/v1/concept_query').at(-1)!.body).toMatchObject({ cursor: 'c2' }));
+    // 分頁元件：每頁 30、共 75 則 → 3 頁；下一頁送 offset 30，改每頁筆數回第一頁
+    expect(callsTo('/v1/concept_query').at(-1)!.body).toMatchObject({ limit: 30, offset: 0, with_total: true });
+    fireEvent.click(screen.getByRole('button', { name: '下一頁' }));
+    await waitFor(() => expect(callsTo('/v1/concept_query').at(-1)!.body).toMatchObject({ offset: 30 }));
+    fireEvent.click(screen.getByRole('button', { name: '第 3 頁' }));
+    await waitFor(() => expect(callsTo('/v1/concept_query').at(-1)!.body).toMatchObject({ offset: 60 }));
+    fireEvent.change(screen.getByRole('combobox', { name: '每頁筆數' }), { target: { value: '10' } });
+    await waitFor(() => expect(callsTo('/v1/concept_query').at(-1)!.body).toMatchObject({ limit: 10, offset: 0 }));
+    // 日期區間：起日本地 00:00、訖日本地 23:59:59.999（含端點）
+    fireEvent.input(screen.getByLabelText('起日'), { target: { value: '2026-09-01' } });
+    fireEvent.input(screen.getByLabelText('訖日'), { target: { value: '2026-09-02' } });
+    await waitFor(() =>
+      expect(callsTo('/v1/concept_query').at(-1)!.body).toMatchObject({
+        since: new Date(2026, 8, 1, 0, 0, 0, 0).toISOString(),
+        until: new Date(2026, 8, 2, 23, 59, 59, 999).toISOString(),
+      }),
+    );
     expect(await screen.findByTestId('episode-total')).toBeTruthy();
   });
 });

@@ -181,6 +181,9 @@ export interface ListResult<T = ListItem> {
   items: T[];
   next_cursor: string | null;
   has_more: boolean;
+  /** with_total 時：相同篩選下的總筆數與本頁起點 */
+  total?: number;
+  offset?: number;
   unsupported_kinds: string[];
   /** 本頁 note 摘要字數預算與用量；項目與分頁不受預算影響 */
   budget?: number;
@@ -344,6 +347,8 @@ export interface ConceptItem {
 export interface ConceptPage {
   items: ConceptItem[];
   next_cursor: string | null;
+  /** with_total 時的總筆數 */
+  total?: number;
 }
 
 export interface EpisodeGroup {

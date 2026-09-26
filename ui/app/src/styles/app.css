@@ -556,11 +556,35 @@ a.lv-table__title:hover { color: var(--lv-zone-text); }
 .lv-table__summary { display: flex; gap: 8px; align-items: baseline; font-size: var(--lv-fs-body); color: var(--ink-soft); min-width: 0; }
 .lv-table__sub { font-size: var(--lv-fs-meta); color: var(--ink-mute); }
 .is-right { text-align: right; }
-.lv-pager {
-  display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;
-  margin-top: 20px; font-family: var(--font-mono); font-size: var(--lv-fs-meta); color: var(--ink-mute);
+/* 篩選區塊：所有條件收在一張卡片內，每列可換行，不和列表擠在同一行 */
+.lv-filter-panel {
+  margin: 24px 0; padding: 16px 18px; display: flex; flex-direction: column; gap: 14px;
+  border: 1px solid var(--line-strong); border-radius: var(--lv-radius-control); background: var(--bg-soft);
 }
-.lv-pager__btns { display: flex; gap: 6px; }
+.lv-filter-panel__row { display: flex; flex-wrap: wrap; gap: 14px 24px; align-items: center; }
+.lv-filter-panel__scope { display: flex; gap: 8px; align-items: center; flex: 1 1 280px; min-width: 0; }
+.lv-filter-panel__scope .lv-input { flex: 1 1 200px; min-width: 0; }
+.lv-filter-panel__summary { margin: 0; }
+.lv-daterange { border: none; margin: 0; padding: 0; display: flex; align-items: center; gap: 8px; min-width: 0; }
+.lv-daterange legend { float: left; margin-right: 8px; padding: 0; }
+.lv-daterange__row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.lv-daterange__input { padding: 6px 8px; font-family: var(--font-sans); font-size: var(--lv-fs-body); color-scheme: inherit; }
+.lv-daterange__warn { margin: 6px 0 0; flex-basis: 100%; }
+
+/* 頁碼分頁（components/Pager） */
+.lv-pager2 {
+  display: flex; justify-content: space-between; align-items: center; gap: 12px 20px; flex-wrap: wrap;
+  margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--line);
+  font-family: var(--font-mono); font-size: var(--lv-fs-meta); color: var(--ink-soft);
+}
+.lv-pager2__left, .lv-pager2__right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.lv-pager2__select { width: auto; padding: 4px 8px; font-size: var(--lv-fs-meta); }
+.lv-pager2__pages { list-style: none; margin: 0; padding: 0; display: flex; gap: 4px; align-items: center; }
+.lv-pager2__btn { min-width: 34px; min-height: 32px; display: inline-flex; align-items: center; justify-content: center; padding: 4px 8px; }
+.lv-pager2__btn.is-current { background: var(--zone-tint); border-color: var(--zone-stroke); color: var(--ink-title); }
+.lv-pager2__gap { padding: 0 4px; color: var(--ink-mute); }
+.lv-pager2__jump { display: flex; align-items: center; gap: 6px; margin-left: 8px; }
+.lv-pager2__jump-input { width: 64px; padding: 4px 6px; font-size: var(--lv-fs-meta); }
 .btn-terminal:disabled { opacity: .35; cursor: not-allowed; }
 
 /* ── 筆記詳情 ─────────────────────────────────────────── */
@@ -894,7 +918,6 @@ details.lv-check > .lv-check__head { cursor: pointer; }
 .lv-memory-episodes .lv-machine, .lv-episode-group .lv-machine { grid-template-columns: minmax(0, 1fr) auto auto; color: var(--ink-soft); }
 
 .lv-memory-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 300px); gap: 32px; margin-top: 16px; }
-.lv-filters--tight { margin: 0 0 16px; gap: 16px; }
 .lv-filters__group { display: flex; align-items: center; gap: 8px; }
 .lv-concepts { list-style: none; margin: 12px 0 0; padding: 0; }
 .lv-concept { display: grid; grid-template-columns: minmax(0, 1fr) 110px; gap: 16px; padding: 14px 4px; border-bottom: 1px solid var(--line); }
@@ -1141,5 +1164,11 @@ details.lv-check > .lv-check__head { cursor: pointer; }
   .lv-vpick__box { width: auto; }
   .lv-vpick__input { min-height: 44px; font-size: 16px; }
   .lv-vpick__opt { min-height: 44px; }
+  .lv-pager2 { flex-direction: column; align-items: stretch; }
+  .lv-pager2__right { justify-content: center; }
+  .lv-pager2__btn { min-height: 44px; min-width: 44px; }
+  .lv-pager2__jump { margin-left: 0; }
+  .lv-daterange { flex-wrap: wrap; }
+  .lv-filter-panel { padding: 14px; }
   .lv-search__input { font-size: 16px; }
 }
