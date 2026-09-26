@@ -9,11 +9,13 @@ trigram 對 2 字詞靜默回 0 筆（D1 實測）。做法是在 Python 端把�
 - 其他字元交給 `unicode61 tokenchars '_'`：snake_case 保持完整、大小寫不敏感
 
 查詢語意（`build_match_query`）：
-- 以空白切成「詞」；每個詞用同一套展開規則切成 token，組成 FTS5 片語
-  （token 必須相鄰）。所以「記憶系統」要求四個字連續出現，
-  `storage/fts.py` 要求 storage、fts、py 連續出現
-- 詞與詞之間用 OR，交給 BM25 排序：命中越多詞、越集中在標題越前面。
-  實際查詢是平均約 7 詞的關鍵詞堆疊，用 AND 的話一個詞沒命中就 0 筆
+- 每個 token（CJK bigram／拉丁詞）各自成一個 OR 分支，**不要求相鄰**，交給 BM25
+  排序：命中越多 token、越集中在標題越前面。中文問句沒有空白，舊作法（以空白切詞、
+  詞內 token 組成片語）會把整句變成一個超長片語，lexical 路幾乎必然 0 筆
+  （recall-diag 30 題中 17 題），融合退化成向量單路
+- 使用者以雙引號括起的片段保留為片語（token 必須相鄰），例如 `"記憶系統"`；
+  沒配對的引號當一般字元忽略
+- 重複 token（不分大小寫）只留一個；總分支數上限 `MAX_MATCH_TERMS`
 - 每個 token 都加雙引號，查詢字串裡的 `* - : ( ) NEAR OR` 等語法一律當字面值
 """
 
@@ -71,22 +73,40 @@ def _quote(token: str) -> str:
     return '"' + token.replace('"', '""') + '"'
 
 
+# MATCH 的 OR 分支上限。一般查詢是 7 詞左右的關鍵詞堆疊或一句問句（30 字中文約
+# 30 個 bigram），64 足以涵蓋；更長的輸入（例如整段正文）後段 token 對 BM25 排序
+# 貢獻很小，卻讓 MATCH 字串與比對成本線性成長。與 notes 查重的
+# DEDUP_QUERY_TOKENS（64）一致，查重語意不受此上限影響。
+MAX_MATCH_TERMS = 64
+
+# 使用者輸入中成對的雙引號片段
+_USER_PHRASE_RE = re.compile(r'"([^"]*)"')
+
+
 def build_match_query(query: str) -> str | None:
     """把使用者查詢轉成 FTS5 MATCH 字串；沒有可搜尋的 token 時回 None。"""
-    phrases: list[str] = []
+    terms: list[str] = []
     seen: set[str] = set()
-    for chunk in query.split():
-        parts = tokens(chunk)
+
+    def add(term: str) -> None:
+        key = term.lower()
+        if key not in seen and len(terms) < MAX_MATCH_TERMS:
+            seen.add(key)
+            terms.append(term)
+
+    # re.split 帶捕獲群組：奇數位置是引號內的片語，偶數位置是其餘文字
+    for i, part in enumerate(_USER_PHRASE_RE.split(query)):
+        parts = tokens(part)
         if not parts:
             continue
-        phrase = _quote(" ".join(parts))
-        key = phrase.lower()
-        if key not in seen:
-            seen.add(key)
-            phrases.append(phrase)
-    if not phrases:
+        if i % 2:
+            add(_quote(" ".join(parts)))
+        else:
+            for tok in parts:
+                add(_quote(tok))
+    if not terms:
         return None
-    return " OR ".join(phrases)
+    return " OR ".join(terms)
 
 
 # ── 與 notes 同步（呼叫端負責交易）───────────────────────────────────
