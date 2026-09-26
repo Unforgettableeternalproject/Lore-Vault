@@ -587,7 +587,10 @@ def push_concept_changes(settings, concepts: list[dict[str, Any]],  # noqa: ANN0
                          batch_size: int = CONCEPT_BATCH_SIZE,
                          timeout: float = SERVICE_TIMEOUT) -> list[dict[str, Any]]:
     """`POST /v1/concepts`（mode=upsert）。每批在服務端是整批成功或整批不寫；
-    超過 `batch_size` 會拆批，拆開的批次之間不保證原子。回傳各批回應。"""
+    超過 `batch_size` 會拆批，拆開的批次之間不保證原子。回傳各批回應。
+
+    每筆照 concepts.json 原樣送、不帶 vault；新 concept 的歸屬由服務端依 A17 決定。
+    整批被拒時拋 `ServiceRejected`，`body` 帶逐筆結果（見 `format_rejected_results`）。"""
     from lore_vault.hooks.service import request_json
 
     responses: list[dict[str, Any]] = []
@@ -620,14 +623,61 @@ def pull_episodes_command(out: Path, since: str | None) -> int:
     return 0
 
 
+REJECT_DETAIL_LIMIT = 300
+
+
+def format_rejected_results(body: Any, concepts: list[dict[str, Any]]) -> list[str] | None:
+    """整批被拒時的逐筆原因（一筆一行）；body 不是 batch_rejected 形狀回 None。
+
+    只印 index／id／status／code／候選 vault／錯誤訊息，不印 statement：
+    服務端的 schema 錯誤訊息可能帶欄位值，印出前把本地 statement 原文遮掉並截斷。
+    """
+    error = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(error, dict) or not isinstance(error.get("results"), list):
+        return None
+    statements = [c.get("statement") for c in concepts
+                  if isinstance(c, dict) and isinstance(c.get("statement"), str)
+                  and c.get("statement")]
+    lines = [f"服務端拒收整批（{error.get('code')}）：{error.get('message')}"]
+    failed = [r for r in [*error["results"], *(error.get("delete_results") or [])]
+              if isinstance(r, dict) and r.get("status") in ("invalid", "conflict")]
+    for r in failed:
+        message = str(r.get("error") or "")
+        for statement in statements:
+            message = message.replace(statement, "<statement>")
+        if len(message) > REJECT_DETAIL_LIMIT:
+            message = message[:REJECT_DETAIL_LIMIT] + "…"
+        parts = [f"  [{r.get('index', '-')}] id={r.get('id')!r}", f"status={r.get('status')}"]
+        if r.get("code"):
+            parts.append(f"code={r['code']}")
+        if r.get("candidates"):
+            parts.append(f"candidates={','.join(map(str, r['candidates']))}")
+        lines.append(" ".join(parts) + f"：{message}")
+    return lines
+
+
 def push_concepts_command(*, dry_run: bool, concept_path: Path = CONCEPT_PATH) -> int:
+    """送 `vault="*"`、每筆不帶 vault：repo-scope 新 concept 的歸屬由服務端依 A17 決定
+    （source_turns → scope 比對）。無法決定或歧義時整批被拒，逐筆原因印到 stderr、回 1。"""
+    from lore_vault.hooks.service import ServiceRejected
+
     concepts = json.loads(concept_path.read_text(encoding="utf-8"))
     state = load_state()
     delete = diff_concept_ids(list(state.get(PUSHED_IDS_KEY) or []), concepts)
     print(f"[pipeline] 推送 concept：upsert {len(concepts)}、刪除 {len(delete)}", file=sys.stderr)
     if dry_run:
         return 0
-    responses = push_concept_changes(service_settings(), concepts, delete)
+    try:
+        responses = push_concept_changes(service_settings(), concepts, delete)
+    except ServiceRejected as exc:
+        lines = format_rejected_results(exc.body, concepts)
+        if lines is None:
+            raise
+        for line in lines:
+            print(f"[pipeline] {line}", file=sys.stderr)
+        print("[pipeline] 推送中止；拆批時先前批次可能已套用，修正後重跑即可（upsert 冪等）",
+              file=sys.stderr)
+        return 1
     state[PUSHED_IDS_KEY] = sorted(c["id"] for c in concepts if c.get("id"))
     save_state(state)
     applied = sum(1 for r in responses if isinstance(r, dict) and r.get("applied"))

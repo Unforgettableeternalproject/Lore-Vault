@@ -4,7 +4,8 @@
   （只限這條路徑，notes write 仍不自動建）
 - `GET /v1/episodes`：主機管線分頁讀取（vault 必填，跨 vault 明示 `"*"`）
 - `GET /v1/concepts/export`：與 spike `concepts.json` 同格式（PreToolUse scorer 的快照）
-- `POST /v1/concepts`：主機管線批次 upsert／刪除（整批成功或整批不寫）
+- `POST /v1/concepts`：主機管線批次 upsert／刪除（整批成功或整批不寫）；未帶 vault 的
+  repo-scope 新 concept 依 A17 決定歸屬（source_turns → scope 比對 → 拒收）
 - `POST /v1/injections`：注入 side-car 批次記錄，冪等
 
 每一批在單一交易內處理；逐筆結果的端點以 SAVEPOINT 隔離單筆失敗，
@@ -53,6 +54,7 @@ from lore_vault.storage.vaults import (
     ORIGIN_PIPELINE,
     ensure_vault,
     get_vault,
+    list_vaults,
     resolve_write,
 )
 
@@ -287,7 +289,8 @@ def export_concepts(
 class ConceptBatch(_Req):
     vault: str | None = Field(
         None,
-        description="單一 vault（操作限於此 vault）或 '*'（依每筆 vault／既有歸屬）",
+        description="單一 vault（操作限於此 vault）"
+        "或 '*'（依每筆 vault／既有歸屬／A17 自動決定）",
     )
     mode: str = Field(
         "upsert", description="upsert／create（已存在即衝突）／update（不存在即失敗）"
@@ -297,9 +300,151 @@ class ConceptBatch(_Req):
 
 
 class _Reject(Exception):
-    def __init__(self, status: str, message: str) -> None:
+    def __init__(
+        self,
+        status: str,
+        message: str,
+        *,
+        code: str | None = None,
+        candidates: list[str] | None = None,
+    ) -> None:
         super().__init__(message)
         self.status = status
+        self.code = code
+        self.candidates = candidates
+
+
+# 逐筆結果的 `resolved_by`：這筆 concept 的 vault 是怎麼決定的（A17，稽核用）
+RESOLVED_EXPLICIT = "explicit"
+RESOLVED_SOURCE_TURNS = "source_turns"
+RESOLVED_SCOPE_MATCH = "scope_match"
+RESOLVED_GLOBAL = "global"
+RESOLVED_EXISTING = "existing"
+
+# 逐筆錯誤碼：未帶 vault 的 repo-scope 新 concept 無法決定歸屬
+CODE_VAULT_UNRESOLVED = "vault_unresolved"
+CODE_VAULT_AMBIGUOUS = "vault_ambiguous"
+
+_PREFETCH_CHUNK = 500
+
+
+def _raw_source_turns(item: Any) -> list[tuple[str, int]]:
+    """從還沒驗證的 raw item 取出 source_turns。
+
+    形狀不對的略過，交給 schema 驗證報錯。
+    """
+    turns = item.get("source_turns") if isinstance(item, dict) else None
+    if not isinstance(turns, list):
+        return []
+    return [
+        (t[0], t[1])
+        for t in turns
+        if isinstance(t, (list, tuple))
+        and len(t) == 2
+        and isinstance(t[0], str)
+        and isinstance(t[1], int)
+        and not isinstance(t[1], bool)
+    ]
+
+
+def _prefetch_turn_vaults(
+    conn: sqlite3.Connection, items: list[Any]
+) -> dict[tuple[str, int], set[str]]:
+    """整批一次查出「未帶 vault、scope 為字串」各筆 source_turns 所屬的 episode vault。
+
+    episodes 沒有 (prompt_id, turn_index) 索引，逐筆查會每筆掃一次全表；
+    這裡整批收集後以 `prompt_id IN (...)` 分塊查。同一 (prompt_id, turn_index)
+    理論上只屬一個 session，保險起見仍以集合收 vault。
+    """
+    wanted: set[tuple[str, int]] = set()
+    for item in items:
+        if not isinstance(item, dict) or "vault" in item:
+            continue
+        if not isinstance(item.get("scope"), str):
+            continue
+        wanted.update(_raw_source_turns(item))
+    found: dict[tuple[str, int], set[str]] = {}
+    prompt_ids = sorted({pid for pid, _ in wanted})
+    for start in range(0, len(prompt_ids), _PREFETCH_CHUNK):
+        chunk = prompt_ids[start : start + _PREFETCH_CHUNK]
+        rows = conn.execute(
+            "SELECT prompt_id, turn_index, vault FROM episodes "
+            f"WHERE prompt_id IN ({','.join('?' * len(chunk))})",
+            chunk,
+        ).fetchall()
+        for row in rows:
+            key = (row["prompt_id"], int(row["turn_index"]))
+            if key in wanted:
+                found.setdefault(key, set()).add(row["vault"])
+    return found
+
+
+def _vault_names(vault: Vault) -> set[str]:
+    """B 段比對用的名稱。
+
+    display（小寫）、key 與別名的整串／repo 段（最後一段）／org/repo 段（最後兩段）。
+    """
+    names = {vault.display.strip().lower()}
+    for value in (vault.key, *vault.aliases):
+        parts = [p for p in value.split("/") if p]
+        names.add(value)
+        if parts:
+            names.add(parts[-1])
+        if len(parts) >= 2:
+            names.add("/".join(parts[-2:]))
+    names.discard("")
+    return names
+
+
+class _VaultResolver:
+    """A17：repo-scope 的新 concept 未帶 vault 時決定歸屬（A → B → 拒收，不猜不建）。"""
+
+    def __init__(
+        self, conn: sqlite3.Connection, turn_vaults: dict[tuple[str, int], set[str]]
+    ) -> None:
+        self._conn = conn
+        self._turn_vaults = turn_vaults
+        self._names: list[tuple[str, set[str]]] | None = None
+
+    def by_source_turns(self, concept: Concept) -> str | None:
+        """(A) 來源輪次所屬的 episode vault；查不到回 None，指向多個 vault 為歧義。"""
+        vaults: set[str] = set()
+        for turn in concept.source_turns:
+            vaults |= self._turn_vaults.get((turn.prompt_id, turn.turn_index), set())
+        if len(vaults) > 1:
+            raise _Reject(
+                "invalid",
+                f"concept {concept.id!r} 的 source_turns 指向多個 vault；"
+                "請每筆明確帶 vault",
+                code=CODE_VAULT_AMBIGUOUS,
+                candidates=sorted(vaults),
+            )
+        return next(iter(vaults), None)
+
+    def by_scope(self, concept: Concept) -> str | None:
+        """(B) scope 比對 vault 的 display／別名／key 的 repo 段；唯一命中才採用。
+
+        scope 寫成 `org/repo` 時只會命中 key／別名的最後兩段，用來區分同名 repo。
+        vault 清單整批只讀一次（批次中途只會新建 global，不參與比對）。
+        """
+        if self._names is None:
+            self._names = [
+                (v.key, _vault_names(v))
+                for v in list_vaults(self._conn)
+                if v.kind != "global"
+            ]
+        wanted = str(concept.scope).strip().lower()
+        hits = sorted(key for key, names in self._names if wanted in names)
+        if len(hits) > 1:
+            raise _Reject(
+                "invalid",
+                f"concept {concept.id!r} 的 scope {concept.scope!r} "
+                "同時符合多個 vault；"
+                "可把 scope 寫成 'org/repo' 以組織名區分，或每筆明確帶 vault",
+                code=CODE_VAULT_AMBIGUOUS,
+                candidates=hits,
+            )
+        return hits[0] if hits else None
 
 
 def _ensure_global(conn: sqlite3.Connection, created: list[str]) -> str:
@@ -325,12 +470,15 @@ def _concept_target(
     concept: Concept,
     item_vault: Any,
     created: list[str],
-) -> str:
-    """決定 concept 寫進哪個 vault。
+    resolver: _VaultResolver,
+) -> tuple[str, str]:
+    """決定 concept 寫進哪個 vault，回傳 (vault key, resolved_by)。
 
     - 既有 id：沿用原歸屬（歸屬凍結，不因 scope 改變而搬家）；有帶 vault 必須一致
     - 新 id、scope=None：`global`（不存在時自動建 kind=global）；帶別的 vault 為 invalid
-    - 新 id、scope 為 repo 名：用每筆的 vault，或批次指定的單一 vault
+    - 新 id、scope 為 repo 名：每筆 vault 或批次單一 vault（explicit）；
+      都沒有時依 A17：(A) source_turns 的 episode vault → (B) scope 比對 vault 名稱
+      → 都失敗或歧義即拒收（不猜、不自動建 vault）
     """
     requested = None
     if item_vault is not MISSING:
@@ -342,17 +490,29 @@ def _concept_target(
     if owner is not None:
         if requested is not None and requested != owner:
             raise _Reject("conflict", f"concept {concept.id!r} 已屬於 vault {owner!r}")
-        return owner
+        return owner, RESOLVED_EXISTING
     if concept.scope is None:
         if requested is not None and requested != canonical_key(GLOBAL_VAULT_KEY):
             raise _Reject(
                 "invalid",
                 f"scope=None 的通用 concept 只能寫進 vault {GLOBAL_VAULT_KEY!r}",
             )
-        return _ensure_global(conn, created)
-    if requested is None:
-        raise VaultRequired("新 concept 必須帶 vault（或批次指定單一 vault）")
-    return requested
+        return _ensure_global(conn, created), RESOLVED_GLOBAL
+    if requested is not None:
+        return requested, RESOLVED_EXPLICIT
+    found = resolver.by_source_turns(concept)
+    if found is not None:
+        return found, RESOLVED_SOURCE_TURNS
+    found = resolver.by_scope(concept)
+    if found is not None:
+        return found, RESOLVED_SCOPE_MATCH
+    raise _Reject(
+        "invalid",
+        f"新 concept {concept.id!r}（scope {concept.scope!r}）無法決定 vault："
+        "source_turns 查無對應 episode，scope 也不符合任何 vault 的名稱或別名；"
+        "請每筆明確帶 vault，或先建立 vault／別名",
+        code=CODE_VAULT_UNRESOLVED,
+    )
 
 
 @router.post("/concepts")
@@ -381,6 +541,12 @@ def post_concepts(request: Request, req: ConceptBatch) -> Response:
             batch_vault = (
                 None if req.vault == ALL_VAULTS else resolve_write(conn, req.vault)
             )
+            resolver = _VaultResolver(
+                conn,
+                {}
+                if batch_vault is not None
+                else _prefetch_turn_vaults(conn, req.concepts),
+            )
             for index, item in enumerate(req.concepts):
                 result: dict[str, Any] = {
                     "index": index,
@@ -397,15 +563,24 @@ def post_concepts(request: Request, req: ConceptBatch) -> Response:
                         raise _Reject("invalid", f"同一批重複的 id {concept.id!r}")
                     seen.add(concept.id)
                     with _savepoint(conn):
-                        target = _concept_target(
-                            conn, batch_vault, concept, item_vault, created_vaults
+                        target, resolved_by = _concept_target(
+                            conn,
+                            batch_vault,
+                            concept,
+                            item_vault,
+                            created_vaults,
+                            resolver,
                         )
                         outcome = records.upsert_concept(
                             conn, target, concept, mode=req.mode
                         )
-                    result.update(vault=target, status=outcome)
+                    result.update(vault=target, resolved_by=resolved_by, status=outcome)
                 except _Reject as exc:
                     result.update(status=exc.status, error=str(exc))
+                    if exc.code is not None:
+                        result["code"] = exc.code
+                    if exc.candidates is not None:
+                        result["candidates"] = exc.candidates
                 except (DuplicateRecord, VaultConflict) as exc:
                     result.update(status="conflict", error=str(exc))
                 except NotFound as exc:

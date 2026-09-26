@@ -20,15 +20,38 @@ from .client_env import ClientSettings
 
 UNREACHABLE_STATUSES = frozenset({502, 503, 504, 521, 522, 523, 524, 530})
 _MAX_DETAIL = 200
+# 4xx 回應 body 的讀取上限（逐筆結果用；超過就不解析，只留狀態碼）
+_MAX_ERROR_BODY = 4 * 1024 * 1024
 
 
 class ServiceError(Exception):
-    """推送／拉取失敗的共同基底。`detail` 不含密鑰。"""
+    """推送／拉取失敗的共同基底。`detail` 不含密鑰。
 
-    def __init__(self, detail: str, status: int | None = None) -> None:
+    `body`：服務回的 JSON 錯誤內容（例如 `POST /v1/concepts` 整批拒收時的逐筆結果）；
+    讀不到、不是 JSON 或太大時為 None。
+    """
+
+    def __init__(
+        self, detail: str, status: int | None = None, body: Any = None
+    ) -> None:
         super().__init__(detail)
         self.detail = detail[:_MAX_DETAIL]
         self.status = status
+        self.body = body
+
+
+def _error_payload(exc: urllib.error.HTTPError) -> Any:
+    """盡力讀出 4xx 的 JSON body；任何失敗都回 None（錯誤路徑不再拋第二個例外）。"""
+    try:
+        raw = exc.read(_MAX_ERROR_BODY + 1)
+    except (OSError, ValueError, AttributeError):
+        return None
+    if not raw or len(raw) > _MAX_ERROR_BODY:
+        return None
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
 
 
 class ServiceUnavailable(ServiceError):
@@ -98,10 +121,11 @@ def request_json(
             status = resp.status
     except urllib.error.HTTPError as exc:
         status = exc.code
+        payload = _error_payload(exc) if 400 <= status < 500 else None
         exc.close()
         if status in UNREACHABLE_STATUSES:
             raise ServiceUnavailable(f"HTTP {status}", status) from None
-        raise ServiceRejected(_rejected_detail(status), status) from None
+        raise ServiceRejected(_rejected_detail(status), status, payload) from None
     except (
         urllib.error.URLError,
         TimeoutError,

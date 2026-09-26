@@ -394,6 +394,62 @@ def test_push_concept_changes_batches_and_deletes():
     assert sent == [(3, 0), (2, 1), (0, 1)]
 
 
+def _rejected_handler(method, path, headers, body):
+    """模擬服務端 A17 拒收：第二筆 vault_ambiguous、第三筆 vault_unresolved。"""
+    assert body["vault"] == "*"
+    assert all("vault" not in c for c in body["concepts"])  # 每筆不帶 vault
+    results = [
+        {"index": 0, "id": "c0", "vault": "github.com/o/a", "resolved_by": "scope_match",
+         "status": "created"},
+        {"index": 1, "id": "c1", "status": "invalid", "code": "vault_ambiguous",
+         "candidates": ["github.com/org-a/tool", "github.com/org-b/tool"],
+         "error": "scope 'Tool' 同時符合多個 vault；可把 scope 寫成 'org/repo'"},
+        {"index": 2, "id": "c2", "status": "invalid", "code": "vault_unresolved",
+         "error": "欄位值 機密陳述 c2 不合法"},  # 模擬錯誤訊息夾帶 statement
+    ]
+    return 400, {"error": {"code": "batch_rejected", "message": "2 筆 invalid",
+                           "results": results, "delete_results": []}}, {}
+
+
+def test_push_concepts_prints_per_item_reasons_and_fails(tmp_path, monkeypatch, capsys):
+    from lore_vault.hooks.service import ServiceRejected
+
+    concepts = [{"id": f"c{i}", "statement": f"機密陳述 c{i}", "scope": "Tool"}
+                for i in range(3)]
+    path = tmp_path / "concepts.json"
+    path.write_text(json.dumps(concepts, ensure_ascii=False), encoding="utf-8")
+    saved = []
+    monkeypatch.setattr(pipeline, "load_state", lambda: {})
+    monkeypatch.setattr(pipeline, "save_state", saved.append)
+    with FakeService(_rejected_handler) as svc:
+        with pytest.raises(ServiceRejected) as info:
+            pipeline.push_concept_changes(_svc_settings(svc.url), concepts, [])
+        assert info.value.status == 400
+        assert info.value.body["error"]["results"][1]["code"] == "vault_ambiguous"
+
+        monkeypatch.setattr(pipeline, "service_settings", lambda: _svc_settings(svc.url))
+        assert pipeline.push_concepts_command(dry_run=False, concept_path=path) == 1
+    err = capsys.readouterr().err
+    assert "vault_ambiguous" in err and "vault_unresolved" in err
+    assert "github.com/org-a/tool" in err and "id='c1'" in err
+    assert "id='c0'" not in err  # 成功的那筆不列
+    assert "機密陳述" not in err  # 不印 statement 原文
+    assert saved == []  # 被拒就不更新已推送 id
+
+
+def test_push_concepts_other_rejections_still_raise(tmp_path, monkeypatch):
+    from lore_vault.hooks.service import ServiceRejected
+
+    path = tmp_path / "concepts.json"
+    path.write_text("[]", encoding="utf-8")
+    monkeypatch.setattr(pipeline, "load_state", lambda: {"service_pushed_concept_ids": ["x"]})
+    monkeypatch.setattr(pipeline, "save_state", lambda state: None)
+    with FakeService(lambda *a: (401, {"error": {"code": "unauthorized"}}, {})) as svc:
+        monkeypatch.setattr(pipeline, "service_settings", lambda: _svc_settings(svc.url))
+        with pytest.raises(ServiceRejected):
+            pipeline.push_concepts_command(dry_run=False, concept_path=path)
+
+
 def test_pipeline_stages_are_untouched():
     """轉接層預設關閉：三個判卷階段與順序不變。"""
     assert [name for name, _, _ in pipeline.STAGES] == [

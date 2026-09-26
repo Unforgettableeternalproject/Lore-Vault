@@ -444,7 +444,8 @@ def test_concepts_batch_is_all_or_nothing(client):
         ({k: v for k, v in spike_concept("c-x").items() if k != "scope"}, "scope"),
         ({**spike_concept("c-x"), "extra": 1}, "未知欄位"),
         (spike_concept("c-x", scope="global"), "null"),
-        (spike_concept("c-x"), "vault"),  # 新 concept 未帶 vault、批次為 "*"
+        # 新 concept 未帶 vault、批次為 "*"，且 A17 的 source_turns／scope 都對不上
+        (spike_concept("c-x", scope="Nowhere"), "vault"),
         (
             {**spike_concept("c-x", scope=None), "vault": "github.com/owner/repo-x"},
             "global",
@@ -518,6 +519,7 @@ def test_existing_concept_keeps_vault_when_rescoped_global(client):
         "index": 0,
         "id": "c-1",
         "vault": x,
+        "resolved_by": "existing",
         "status": "updated",
     }
     assert json.loads(client.get("/v1/concepts/export").content)[0]["scope"] is None
