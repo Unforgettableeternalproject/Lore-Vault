@@ -22,6 +22,7 @@
 | A16 | U.E.P 接口（D6）不在本次範圍；使用者 UI 在目前部分完成後接著做，設計系統由艾斯維爾提供 | 艾斯維爾 2026-09-26 |
 | A17 | 管線寫回 concept 時，repo-scope 的 vault 歸屬：先依 `source_turns` 查來源 episode 的 vault（A），查不到再以 scope 比對 vault 的顯示名／別名（B），都失敗或有歧義則明確拒收不猜。同名 repo 以組織名區分（scope 寫成 `org/repo`）。repo 改名由之後的 UI 提供別名／重新導向管理 | 艾斯維爾 2026-09-26 |
 | A18 | 內容分群：space 先分 `dev`／`lore`／`personal`，現有 vault 全歸 `dev`。agent 預設讀 `dev`，**不以 token 限制**；以 MCP 工具切換「目前 space」，其餘工具只回傳目前 space 的內容。檔案存儲與檢索納入範圍（D10 提案方向），Podcast 不做 | 艾斯維爾 2026-09-26 |
+| A19 | 文件支援：md、txt、json、yaml、toml、pdf、docx、pptx 一次支援，其他純文字檔（含程式碼）一律當 txt；pdf 中文抽取先以 `E:\Documents` 的樣本做前置實測；文件 LLM 摘要第一版不做；單檔上限 25MB／200 萬字元；`upload_roots` 預設為殼 cwd、可設定額外白名單。space 的三個小項（程式白名單 + doctor、非 dev 不自動建 global、換 space 只走管理指令）照設計 | 艾斯維爾 2026-09-26，設計見 `docs/design/SPACES_AND_DOCUMENTS.md` |
 
 ## 待裁決
 
@@ -155,4 +156,4 @@ Ollama 另裝了 `nomic-embed-text`，PM 未使用。
 - 抽文字：md、txt、json、yaml、toml、pdf、docx、pptx（圖片 OCR 暫不做）
 - 切段後與 notes 共用 FTS + 向量檢索與 vault／space 範圍；recall 可回文件段落並標來源與位置，get 可取整份或指定段落
 
-待定：格式優先序、大小上限、切段策略、與 D9 一起排程。
+**已定案（A19）**，任務卡見設計文件第 8 節（T-52～T-69）。
