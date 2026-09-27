@@ -201,7 +201,7 @@ def test_get_episodes_paginates_with_vault_and_filters(client):
     batch = [
         episode(turn_index=i, started_at=f"2026-09-01T0{i}:00:00.000Z", ended_at=None)
         for i in range(5)
-    ] + [episode(session_id="s-b", vault="folder/b", repo=None)]
+    ] + [episode(session_id="s-b", vault="github.com/owner/b", repo=None)]
     client.post("/v1/episodes", json={"episodes": batch})
     seen: list[tuple[str, int]] = []
     cursor = None
@@ -215,7 +215,7 @@ def test_get_episodes_paginates_with_vault_and_filters(client):
         if cursor is None:
             break
     assert len(seen) == 6
-    assert ("folder/b", 0) in seen
+    assert ("github.com/owner/b", 0) in seen
     only_a = client.get(
         "/v1/episodes", params={"vault": "github.com/owner/repo-x"}
     ).json()
@@ -226,8 +226,8 @@ def test_get_episodes_paginates_with_vault_and_filters(client):
     ).json()
     assert [i["turn_index"] for i in since["items"]] == [3, 4]
     # repo 為 None 時 display 退回 key
-    status = client.post("/v1/vault_resolve", json={"key": "folder/b"}).json()
-    assert status["display"] == "folder/b"
+    status = client.post("/v1/vault_resolve", json={"key": "github.com/owner/b"}).json()
+    assert status["display"] == "github.com/owner/b"
 
 
 def test_get_episodes_after_seq_is_insert_ordered_not_started_ordered(client):
@@ -315,14 +315,21 @@ def test_get_episodes_after_seq_rejects_mixed_modes(client):
 def test_get_episodes_after_seq_does_not_leak_across_vaults(client, monkeypatch):
     client.post(
         "/v1/episodes",
-        json={"episodes": [episode(), episode(session_id="s-b", vault="folder/b")]},
+        json={
+            "episodes": [
+                episode(),
+                episode(session_id="s-b", vault="github.com/owner/b"),
+            ]
+        },
     )
 
     def leaked() -> tuple[set[str], int]:
         page = client.get(
-            "/v1/episodes", params={"vault": "folder/b", "after_seq": 0}
+            "/v1/episodes", params={"vault": "github.com/owner/b", "after_seq": 0}
         ).json()
-        return {i["vault"] for i in page["items"]} - {"folder/b"}, page["total"]
+        return {i["vault"] for i in page["items"]} - {"github.com/owner/b"}, page[
+            "total"
+        ]
 
     assert leaked() == (set(), 1)
     monkeypatch.setattr(records, "vault_clause", lambda scope, column: ("1 = 1", ()))
@@ -338,12 +345,17 @@ def test_get_episodes_bad_cursor(client):
 def test_get_episodes_does_not_leak_across_vaults(client, monkeypatch):
     client.post(
         "/v1/episodes",
-        json={"episodes": [episode(), episode(session_id="s-b", vault="folder/b")]},
+        json={
+            "episodes": [
+                episode(),
+                episode(session_id="s-b", vault="github.com/owner/b"),
+            ]
+        },
     )
 
     def leaked() -> set[str]:
-        page = client.get("/v1/episodes", params={"vault": "folder/b"}).json()
-        return {i["vault"] for i in page["items"]} - {"folder/b"}
+        page = client.get("/v1/episodes", params={"vault": "github.com/owner/b"}).json()
+        return {i["vault"] for i in page["items"]} - {"github.com/owner/b"}
 
     assert leaked() == set()
     # 拿掉 vault 過濾時要看得到洩漏（證明上面的斷言有在檢查）

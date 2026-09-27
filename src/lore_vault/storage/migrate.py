@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Callable
 
@@ -636,6 +637,188 @@ def _v15(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+# 雜項 vault（v16，D14；路由見 `api.spike.post_episodes`）：
+# - vaults.kind 加 'misc'。vaults 被多張表以外鍵參照，照 12 步重建要在交易外關外鍵、
+#   改動遷移框架；這裡只「放寬」CHECK（不改磁碟格式、既有資料必然仍合法），採 SQLite
+#   ALTER TABLE 文件第 7 節的 writable_schema 程序，在同一個遷移交易內完成，
+#   失敗整段 rollback。原字串必須恰好出現一次，否則大聲失敗、不靜默略過
+# - episodes.origin_key：被改路由到雜項 vault 的 episode，記下收料時客戶端送來的
+#   原始 binding key（canonical，`folder/<名稱>`）；其餘 episode 為 NULL。
+#   不動 data 與其他凍結欄位。不加 CHECK，由 doctor `vaults.misc_routing` 對帳
+# - 既有資料：episode 收料自動建立的 `folder/*` vault（origin='episode'）是新規則下
+#   本該進雜項的位置。note／文件／墓碑任一非零 → 整個不動（遷移不能互動停下，
+#   交給 doctor 以 warn 呈現）；否則 episode 改歸雜項並記 origin_key，vault 若已無
+#   任何內容（concept／injection／別名皆無）就刪除，搬移紀錄寫進雜項 vault 的
+#   origin_detail（JSON，供人工審視）
+_V16_KIND_CHECK_OLD = "CHECK (kind IN ('repo', 'global'))"
+_V16_KIND_CHECK_NEW = "CHECK (kind IN ('repo', 'global', 'misc'))"
+_V16_MISC_KEY = "misc"
+_V16_MISC_DISPLAY = "雜項"
+
+
+def _v16_relax_vault_kind(conn: sqlite3.Connection) -> None:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'vaults'"
+    ).fetchone()
+    sql = row[0] if row is not None else ""
+    if sql.count(_V16_KIND_CHECK_OLD) != 1:
+        raise SchemaVersionError(
+            "v16：vaults 的 kind CHECK 與預期不符，拒絕改寫 schema"
+        )
+    version = int(conn.execute("PRAGMA schema_version").fetchone()[0])
+    conn.execute("PRAGMA writable_schema = ON")
+    try:
+        conn.execute(
+            "UPDATE sqlite_schema SET sql = ? WHERE type = 'table' AND name = 'vaults'",
+            (sql.replace(_V16_KIND_CHECK_OLD, _V16_KIND_CHECK_NEW),),
+        )
+        conn.execute(f"PRAGMA schema_version = {version + 1}")
+    finally:
+        conn.execute("PRAGMA writable_schema = OFF")
+
+
+def _v16_count(conn: sqlite3.Connection, table: str, column: str, key: str) -> int:
+    return int(
+        conn.execute(
+            f"SELECT count(*) FROM {table} WHERE {column} = ?", (key,)
+        ).fetchone()[0]
+    )
+
+
+def absorb_folder_vaults(conn: sqlite3.Connection) -> list[dict[str, object]]:
+    """把 episode 收料自動建立的 `folder/*` vault 併入雜項 vault（v16 的資料部分）。
+
+    冪等：併完的 vault 不再符合條件（已刪除，或 episode 已搬走）。回傳每個候選的
+    處理紀錄 `{key, episodes, action, …}`；action：
+    - `skipped_has_content`：有 note／文件／墓碑，完全不動
+    - `skipped_misc_conflict`：key `misc` 已被非雜項 vault 佔用，完全不動
+    - `skipped_nothing_to_move`：沒有 episode 可搬、vault 仍有 concept 等內容（重跑時）
+    - `moved`：episode 已搬，vault 仍有 concept／injection／別名而保留
+    - `moved_and_removed`：episode 已搬且 vault 已刪除
+    呼叫端須已在交易內。
+    """
+    candidates = [
+        r[0]
+        for r in conn.execute(
+            """
+            SELECT key FROM vaults
+            WHERE space = 'dev' AND origin = 'episode' AND key LIKE 'folder/%'
+              AND kind = 'repo'
+            ORDER BY key
+            """
+        )
+    ]
+    records: list[dict[str, object]] = []
+    for key in candidates:
+        episodes = _v16_count(conn, "episodes", "vault", key)
+        blocking = {
+            "notes": _v16_count(conn, "notes", "vault", key),
+            "documents": _v16_count(conn, "documents", "vault", key),
+            "note_tombstones": _v16_count(conn, "note_tombstones", "vault", key),
+            "document_tombstones": _v16_count(
+                conn, "document_tombstones", "vault", key
+            ),
+        }
+        if any(blocking.values()):
+            records.append(
+                {
+                    "key": key,
+                    "episodes": episodes,
+                    "action": "skipped_has_content",
+                    **blocking,
+                }
+            )
+            continue
+        remaining = {
+            "concepts": _v16_count(conn, "concepts", "vault", key),
+            "injections": _v16_count(conn, "injections", "vault", key),
+            "aliases": _v16_count(conn, "vault_aliases", "vault", key),
+        }
+        if episodes == 0 and any(remaining.values()):
+            # 沒有 episode 可搬（例如已併過一次）：不動、不寫紀錄，重跑才冪等
+            records.append(
+                {
+                    "key": key,
+                    "episodes": 0,
+                    "action": "skipped_nothing_to_move",
+                    **remaining,
+                }
+            )
+            continue
+        misc = conn.execute(
+            "SELECT kind FROM vaults WHERE key = ?", (_V16_MISC_KEY,)
+        ).fetchone()
+        if misc is not None and misc[0] != "misc":
+            records.append(
+                {"key": key, "episodes": episodes, "action": "skipped_misc_conflict"}
+            )
+            continue
+        if misc is None:
+            conn.execute(
+                """
+                INSERT INTO vaults (key, display, kind, created, origin, origin_detail,
+                                    space)
+                VALUES (?, ?, 'misc', ?, 'episode', ?, 'dev')
+                """,
+                (
+                    _V16_MISC_KEY,
+                    _V16_MISC_DISPLAY,
+                    utc_now(),
+                    json.dumps(
+                        {
+                            "reason": "schema v16 併入 folder/* vault",
+                            "created_at": utc_now(),
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                ),
+            )
+        conn.execute(
+            "UPDATE episodes SET vault = ?, origin_key = ? WHERE vault = ?",
+            (_V16_MISC_KEY, key, key),
+        )
+        record: dict[str, object] = {"key": key, "episodes": episodes}
+        if any(remaining.values()):
+            record.update(action="moved", **remaining)
+        else:
+            conn.execute("DELETE FROM vaults WHERE key = ?", (key,))
+            record["action"] = "moved_and_removed"
+        records.append(record)
+    moved = [r for r in records if str(r["action"]).startswith("moved")]
+    if moved:
+        row = conn.execute(
+            "SELECT origin_detail FROM vaults WHERE key = ?", (_V16_MISC_KEY,)
+        ).fetchone()
+        try:
+            detail = json.loads(row[0]) if row and row[0] else {}
+        except ValueError:
+            detail = {"previous_origin_detail": row[0]}
+        if not isinstance(detail, dict):
+            detail = {"previous_origin_detail": detail}
+        history = detail.get("migrated_from")
+        if not isinstance(history, list):
+            history = []
+        at = utc_now()
+        history.extend({**r, "at": at} for r in moved)
+        detail["migrated_from"] = history
+        conn.execute(
+            "UPDATE vaults SET origin_detail = ? WHERE key = ?",
+            (json.dumps(detail, ensure_ascii=False, sort_keys=True), _V16_MISC_KEY),
+        )
+    return records
+
+
+def _v16(conn: sqlite3.Connection) -> None:
+    _v16_relax_vault_kind(conn)
+    conn.execute("ALTER TABLE episodes ADD COLUMN origin_key TEXT")
+    conn.execute(
+        "CREATE INDEX episodes_origin_key ON episodes(origin_key)"
+        " WHERE origin_key IS NOT NULL"
+    )
+    absorb_folder_vaults(conn)
+
+
 # 有序遷移：索引 i 的函式把版本從 i 升到 i+1。只能往後加，不可改動已發佈的項目。
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _v1,
@@ -653,6 +836,7 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _v13,
     _v14,
     _v15,
+    _v16,
 )
 
 SCHEMA_VERSION = len(MIGRATIONS)

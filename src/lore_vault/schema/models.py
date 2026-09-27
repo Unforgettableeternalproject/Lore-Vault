@@ -32,7 +32,9 @@ from ._base import (
     utc_timestamp,
 )
 
-VAULT_KINDS = frozenset({"repo", "global"})
+# misc：雜項 vault（D14，schema v16）。收容從尚未建立 vault 的位置（`folder/<名稱>`）
+# 擷取的 episode；固定 key 見 `storage.vaults.MISC_VAULT_KEY`，只由收料路徑自動建立
+VAULT_KINDS = frozenset({"repo", "global", "misc"})
 
 # 內容分群（A18）：space 是 vault 的屬性，與 vault 為 AND 疊加的硬範圍。
 # 資料庫不加 CHECK（ALTER TABLE ADD COLUMN 的限制），由這裡的白名單與

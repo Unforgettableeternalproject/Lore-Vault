@@ -19,6 +19,9 @@ summary 為該段摘錄（`summary_source: "excerpt"`），同樣受字數預算
   快照不含文件）：它們列進 `unsupported_kinds`，不會安靜回空；只要求不可用的 kind 時
   回空結果（不拋例外）
 
+雜項 vault（D14）：`vault="*"` 時來自雜項 vault 的結果分數乘 `MISC_SCORE_WEIGHT`
+再排序（在切 limit 之前）；殼的快照降級走同一個函式，一併生效。
+
 服務不可達時讀本地快照屬 MCP 殼（D8），不在本層。
 """
 
@@ -34,10 +37,10 @@ from lore_vault.storage import chunk_vectors, fts, vectors
 from lore_vault.storage.document_index import chunk_id, chunks_by_key, parse_chunk_id
 from lore_vault.storage.documents import get_documents
 from lore_vault.storage.notes import get_notes
-from lore_vault.storage.vaults import resolve_read
+from lore_vault.storage.vaults import misc_vault_keys, resolve_read
 
 from .embedder import REASON_UNAVAILABLE, Embedder, QueryVector, embed_text
-from .rrf import RRF_K, rrf_fuse
+from .rrf import RRF_K, Fused, rrf_fuse
 
 KIND_NOTE = "note"
 KIND_CHUNK = "chunk"
@@ -72,6 +75,11 @@ DEFAULT_BUDGET = 2000
 # 讓只在其中一路排前面的 note 也有機會進入最終前 limit 名
 MIN_CANDIDATES = 50
 CANDIDATE_FACTOR = 5
+# 雜項 vault（D14）的降權：跨 vault（`"*"`）查詢時，來自雜項 vault 的 note／段落
+# RRF 分數乘上此係數再重新排序（在切 limit 之前）。0.5 約等於把單路第 1 名壓到
+# 與一般 vault 單路第 21 名同分（k=20）：強命中仍可出現，但排在一般結果之後。
+# 指定單一 vault 查詢時不降權（使用者明示要看雜項）
+MISC_SCORE_WEIGHT = 0.5
 
 
 class UnsupportedKind(ValueError):
@@ -251,7 +259,7 @@ def recall(
         raise ValueError(f"mode 必須是 {list(MODES)}，得到 {mode!r}")
     active, unsupported = _check_kinds(kinds, unavailable_kinds)
     # 先驗證 vault 與 space，範圍錯誤不應該先去打 embedder
-    resolve_read(conn, vault, space=space)
+    scope = resolve_read(conn, vault, space=space)
     if not active:
         return RecallResult(
             items=[], mode=mode, budget=budget, unsupported_kinds=unsupported
@@ -305,7 +313,10 @@ def recall(
                 chunk_id(h.document_id, h.idx) for h in fts_hits
             ]
 
-    fused = rrf_fuse(rankings, k=rrf_k)[:limit]
+    fused = rrf_fuse(rankings, k=rrf_k)
+    if scope.is_all:
+        fused = _demote_misc(conn, space, fused)
+    fused = fused[:limit]
     items = _materialize(conn, vault, space, fused)
     kept, truncated, omitted, used = _apply_budget(items, budget)
     return RecallResult(
@@ -323,6 +334,62 @@ def recall(
         legs=tuple(legs),
         kinds=active,
         missing_chunk_embeddings=missing_chunk_embeddings,
+    )
+
+
+def _misc_ids(
+    conn: sqlite3.Connection, misc: frozenset[str], fused: list[Fused]
+) -> set[str]:
+    """融合結果中屬於雜項 vault 的 id（note 與 chunk）。"""
+    vaults = sorted(misc)
+    marks = ",".join("?" * len(vaults))
+    found: set[str] = set()
+    note_ids = [f.id for f in fused if parse_chunk_id(f.id) is None]
+    chunk_docs: dict[str, list[str]] = {}
+    for f in fused:
+        key = parse_chunk_id(f.id)
+        if key is not None:
+            chunk_docs.setdefault(key[0], []).append(f.id)
+    for start in range(0, len(note_ids), _ID_CHUNK):
+        part = note_ids[start : start + _ID_CHUNK]
+        rows = conn.execute(
+            f"SELECT id FROM notes WHERE vault IN ({marks}) "
+            f"AND id IN ({','.join('?' * len(part))})",
+            (*vaults, *part),
+        )
+        found.update(r[0] for r in rows)
+    doc_ids = sorted(chunk_docs)
+    for start in range(0, len(doc_ids), _ID_CHUNK):
+        part = doc_ids[start : start + _ID_CHUNK]
+        rows = conn.execute(
+            f"SELECT id FROM documents WHERE vault IN ({marks}) "
+            f"AND id IN ({','.join('?' * len(part))})",
+            (*vaults, *part),
+        )
+        for r in rows:
+            found.update(chunk_docs[r[0]])
+    return found
+
+
+_ID_CHUNK = 500
+
+
+def _demote_misc(
+    conn: sqlite3.Connection, space: str, fused: list[Fused]
+) -> list[Fused]:
+    """跨 vault 查詢時雜項 vault 的結果降權（`MISC_SCORE_WEIGHT`），排序規則同 RRF。"""
+    misc = misc_vault_keys(conn, space=space)
+    if not misc or not fused:
+        return fused
+    demoted = _misc_ids(conn, misc, fused)
+    if not demoted:
+        return fused
+    return sorted(
+        (
+            replace(f, score=f.score * MISC_SCORE_WEIGHT) if f.id in demoted else f
+            for f in fused
+        ),
+        key=lambda f: (-f.score, min(f.ranks.values()), f.id),
     )
 
 

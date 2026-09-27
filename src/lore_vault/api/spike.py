@@ -1,7 +1,8 @@
 """spike 接入端點（階段 8）：episode 收料、主機管線讀寫 concept、注入 side-car。
 
 - `POST /v1/episodes`：客戶端 spool 推送；逐筆結果，冪等；vault 不存在時自動建立
-  （只限這條路徑，notes write 仍不自動建）。由 `episodes.ingest` 控制，預設關閉（D13）
+  （只限這條路徑，notes write 仍不自動建）；未註冊的 `folder/*` 位置改進雜項 vault
+  （D14）。由 `episodes.ingest` 控制，預設關閉（D13）
 - `GET /v1/episodes`：主機管線分頁讀取（vault 必填，跨 vault 明示 `"*"`）；
   `after_seq` 為增量模式（episode 快取水位）
 - `GET /v1/concepts/export`：與 spike `concepts.json` 同格式（PreToolUse scorer 的快照）
@@ -53,12 +54,13 @@ from lore_vault.storage.errors import (
 from lore_vault.storage.timeutil import utc_now
 from lore_vault.storage.vaults import (
     ALL_VAULTS,
-    ORIGIN_EPISODE,
+    KIND_MISC,
     ORIGIN_PIPELINE,
     ensure_vault,
     get_vault,
     list_vaults,
     resolve_write,
+    route_episode_vault,
 )
 
 from .errors import EpisodeIngestDisabled, error_body
@@ -160,7 +162,11 @@ def post_episodes(request: Request, req: EpisodeBatch) -> dict[str, Any]:
     送來已清理的同一輪會得到 duplicate。
 
     收料開關（`episodes.ingest`，D13，預設關閉）：關閉時整批 403
-    `episode_ingest_disabled`、不寫任何東西。讀取（GET、episode_summary）不受影響。"""
+    `episode_ingest_disabled`、不寫任何東西。讀取（GET、episode_summary）不受影響。
+
+    vault 決定（D14，`route_episode_vault`）：既有 key／別名照舊；不存在的 git remote
+    key 自動建立；不存在的 `folder/<名稱>`（未註冊的位置）改進雜項 vault `misc`，
+    該筆結果另帶 `origin_key`（原 key）。客戶端直接送 `misc` 為 invalid。"""
     if not _state(request).runtime.current().episodes.ingest:
         raise EpisodeIngestDisabled(
             "服務未開啟 episode 收料（設定 episodes.ingest）；"
@@ -181,17 +187,21 @@ def post_episodes(request: Request, req: EpisodeBatch) -> dict[str, Any]:
                 if replaced:
                     result.update(sanitized=True, sanitized_chars=replaced)
                 with _savepoint(conn):
-                    key, created = ensure_vault(
+                    route = route_episode_vault(
                         conn,
-                        Vault(key=vault, display=episode.repo or vault, kind="repo"),
-                        origin=ORIGIN_EPISODE,
+                        vault,
+                        display=episode.repo or vault,
                         origin_detail=_auto_vault_detail(episode),
                     )
-                    inserted = records.insert_episode(conn, key, episode)
-                result["vault"] = key
+                    inserted = records.insert_episode(
+                        conn, route.key, episode, origin_key=route.origin_key
+                    )
+                result["vault"] = route.key
+                if route.origin_key is not None:
+                    result["origin_key"] = route.origin_key
                 result["status"] = "accepted" if inserted else "duplicate"
-                if created:
-                    created_vaults.append(key)
+                if route.created:
+                    created_vaults.append(route.key)
             except DuplicateRecord as exc:
                 result.update(status="conflict", error=str(exc))
             except (SchemaError, VaultRequired, VaultConflict, ValueError) as exc:
@@ -479,7 +489,8 @@ class _VaultResolver:
             self._names = [
                 (v.key, _vault_names(v))
                 for v in list_vaults(self._conn, space=SPACE_DEV)
-                if v.kind != "global"
+                # global 與雜項 vault 都不是 repo，不參與 scope 比對
+                if v.kind not in ("global", KIND_MISC)
             ]
         wanted = str(concept.scope).strip().lower()
         hits = sorted(key for key, names in self._names if wanted in names)
