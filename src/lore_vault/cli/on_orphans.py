@@ -13,7 +13,7 @@ ON 1.14.0 有 note 沒掛在任何 notebook 上；全量 `GET /api/notes` 因某
 - `export_orphans`：依孤兒 mapping 逐筆 `GET /api/notes/{id}` 取內容，寫進匯出目錄的
   `orphans.jsonl`（另有 `orphans-manifest.json` 記雜湊）。REST 取不到的（例如含
   NUL 的那則會 500）列為 unavailable，可用 `--supplement` 補上從 SurrealDB 唯讀副本
-  手動匯出的紀錄（程序見 docs/DEVELOPMENT.md）。
+  手動匯出的紀錄。
 """
 
 from __future__ import annotations

@@ -1,7 +1,7 @@
 """內建檢查項清單：`default_registry()` 每次回傳新的 Registry。
 
 新增檢查項：在對應模組寫 `(ctx) -> CheckResult` 函式，再到 `default_registry()`
-加一行 `registry.add(Check(...))`。見 docs/DEVELOPMENT.md「新增 doctor 檢查項」。
+加一行 `registry.add(Check(...))`。
 """
 
 from __future__ import annotations

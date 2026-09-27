@@ -1,6 +1,6 @@
 # 架構
 
-> 設計草案。標 **〔待定〕** 的項目見 [DECISIONS.md](DECISIONS.md)，未裁決前不要當成定案實作。
+> 設計草案。標 **〔待定〕** 的項目尚未裁決，不要當成定案實作。
 
 ## 設計原則
 
@@ -104,7 +104,7 @@ side-car 紀錄：`{session_id, prompt_id, injected: [concept_id]}`，不含原�
 
 ### Document（上傳的文件，A19）
 
-設計見 `docs/design/SPACES_AND_DOCUMENTS.md` 第 3～6 節；實作細節見 docs/DEVELOPMENT.md「文件存儲與檢索」。
+設定見 `config.example.toml` 的 `[documents]` 區段。
 
 | 欄位 | 說明 |
 |---|---|
@@ -131,7 +131,7 @@ HTTP 契約為 `POST /v1/<工具名>` + JSON body，另有 `POST /v1/vaults` 建
 - `POST /v1/vaults`：非 dev 的 key／別名不以 `<space>/` 開頭回 400 `space_key_prefix_required`；key 已屬於其他 space 回 409（key 全域唯一）
 - vault 相關回應（`vault_resolve`、`vaults`、`status.vault`）帶 `space` 欄位
 
-**UI 認證（A21／A23）**：使用者 UI 由服務在 `/ui` 提供（Vite 建置的靜態檔，SPA fallback 到 `index.html`；`/ui`、`/ui/*` 本身免認證，資料一律走需認證的 `/v1`）。登入用 DB 內的 UI 帳號密碼（`ui_accounts`，scrypt 雜湊、參數存在列中），全域失敗 3 次即鎖定、需人工 `cli.admin ui-unlock --yes`（規則見 `storage.ui_login` 與 DEVELOPMENT.md）。本地登入端點（不列入 OpenAPI，皆要求 `X-Lore-Vault-UI: 1`）：
+**UI 認證（A21／A23）**：使用者 UI 由服務在 `/ui` 提供（Vite 建置的靜態檔，SPA fallback 到 `index.html`；`/ui`、`/ui/*` 本身免認證，資料一律走需認證的 `/v1`）。登入用 DB 內的 UI 帳號密碼（`ui_accounts`，scrypt 雜湊、參數存在列中），全域失敗 3 次即鎖定、需人工 `cli.admin ui-unlock --yes`（規則見 `storage.ui_login`）。本地登入端點（不列入 OpenAPI，皆要求 `X-Lore-Vault-UI: 1`）：
 
 | 端點 | 契約 |
 |---|---|

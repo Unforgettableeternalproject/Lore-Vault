@@ -520,7 +520,8 @@ async def upload_document(request: Request) -> JSONResponse:
     docs = state.settings.config.documents
     if not docs.blob_dir:
         raise DocumentsNotConfigured(
-            "服務未設定 documents.blob_dir，不能收文件（見 docs/DEVELOPMENT.md）"
+            "服務未設定 documents.blob_dir，不能收文件"
+            "（見 config.example.toml 的 [documents]）"
         )
     max_body = docs.max_file_bytes + MULTIPART_OVERHEAD
     length = request.headers.get("content-length")

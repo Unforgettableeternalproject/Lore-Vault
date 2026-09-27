@@ -277,7 +277,7 @@ _V8_ERROR_CODE_LIST = ", ".join(f"'{code}'" for code in _V8_ERROR_CODES)
 # 目前 schema 接受的錯誤碼；與 `documents.extract.ERROR_CODES` 同步（測試比對）
 DOCUMENT_ERROR_CODES = _V8_ERROR_CODES
 
-# 文件存儲（A19，T-58；設計 SPACES_AND_DOCUMENTS.md 3.1／3.2／4.4）：
+# 文件存儲（A19，T-58）：
 # - documents：每個 vault 各自一列 metadata；space 由 vault 決定，查詢一律經
 #   `vaults.vault_clause`。原始檔以 sha256 內容定址存在 blob 目錄（跨 vault 共用）。
 #   (vault, sha256) 刻意不設 UNIQUE：同 vault 去重由上傳端處理（T-67），
