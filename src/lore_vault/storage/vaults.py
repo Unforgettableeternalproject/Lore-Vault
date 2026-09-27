@@ -24,6 +24,7 @@ from lore_vault.schema import SPACE_DEV, SPACES, Vault, canonical_key
 from .db import transaction
 from .errors import (
     InvalidSpace,
+    ReservedVault,
     SpaceKeyPrefixRequired,
     SpaceRequired,
     UnknownVault,
@@ -148,6 +149,30 @@ ORIGIN_PIPELINE = "pipeline"
 VAULT_ORIGINS = frozenset({ORIGIN_MANUAL, ORIGIN_EPISODE, ORIGIN_PIPELINE})
 AUTO_ORIGINS = frozenset({ORIGIN_EPISODE, ORIGIN_PIPELINE})
 
+# 雜項 vault（D14）：收容從尚未建立 vault 的位置（binding key `folder/<名稱>`）擷取的
+# episode，與跨專案知識的 `global` 不同。key 不含 `/`，不會與 binding 算出的 key
+# （`host/owner/repo`、`folder/<名稱>`）或非 dev 的 `<space>/` 前綴相撞。
+# 規則（`check_reserved`）：key `misc` ⇔ kind `misc`、不可有別名、也不可被當成別名——
+# 否則 `vault_resolve` 可能把一般專案解析到雜項。只由 episode 收料路徑自動建立。
+KIND_MISC = "misc"
+MISC_VAULT_KEY = "misc"
+MISC_VAULT_DISPLAY = "雜項"
+# 會被改路由到雜項 vault 的 binding key 前綴（沒有 git remote 的位置）
+FOLDER_KEY_PREFIX = "folder/"
+
+
+def check_reserved(vault: Vault) -> None:
+    """雜項 vault 的保留規則；違反拋 `ReservedVault`。"""
+    if (vault.key == MISC_VAULT_KEY) != (vault.kind == KIND_MISC):
+        raise ReservedVault(
+            f"key {MISC_VAULT_KEY!r} 保留給雜項 vault（kind={KIND_MISC!r}），"
+            "兩者必須同時成立；雜項 vault 只由 episode 收料自動建立"
+        )
+    if vault.kind == KIND_MISC and vault.aliases:
+        raise ReservedVault("雜項 vault 不可有別名")
+    if MISC_VAULT_KEY in vault.aliases:
+        raise ReservedVault(f"{MISC_VAULT_KEY!r} 保留給雜項 vault，不可當別名")
+
 
 def upsert_vault(
     conn: sqlite3.Connection,
@@ -166,6 +191,7 @@ def upsert_vault(
     """
     if origin not in VAULT_ORIGINS:
         raise ValueError(f"origin 必須是 {sorted(VAULT_ORIGINS)}，得到 {origin!r}")
+    check_reserved(vault)
     for name in (vault.key, *vault.aliases):
         check_key_prefix(vault.space, name)
     with transaction(conn):
@@ -237,6 +263,111 @@ def ensure_vault(
             pass
         upsert_vault(conn, vault, origin=origin, origin_detail=origin_detail)
         return vault.key, True
+
+
+@dataclass(frozen=True)
+class EpisodeRoute:
+    """episode 收料的 vault 決定結果。`origin_key` 只在改路由到雜項時有值。"""
+
+    key: str
+    origin_key: str | None
+    created: bool
+
+
+def route_episode_vault(
+    conn: sqlite3.Connection,
+    requested: str,
+    *,
+    display: str,
+    origin_detail: str | None = None,
+) -> EpisodeRoute:
+    """episode 收料決定 vault（D14）。只在 dev。
+
+    - key 或別名命中 dev 內既有 vault → 照舊（含已用 `/pm init` 正式註冊的 folder key）
+    - 不存在且為 `folder/<名稱>`（沒有 git remote 的位置）→ 雜項 vault
+      （首次自動建立），`origin_key` 記原 key
+    - 不存在的其他 key（git remote 正規化）→ 照舊自動建立 kind=repo
+    - 直接指定雜項 key → `ReservedVault`（客戶端不該送，會破壞 origin_key 對帳）
+    """
+    key = canonical_key(_validate_raw(requested))
+    if key == ALL_VAULTS:
+        raise VaultRequired("寫入必須指定單一 vault，不可用 '*'")
+    if key == MISC_VAULT_KEY:
+        raise ReservedVault(
+            f"{MISC_VAULT_KEY!r} 保留給雜項 vault，收料時由服務端決定，客戶端不可指定"
+        )
+    with transaction(conn):
+        try:
+            return EpisodeRoute(resolve_write(conn, key, space=SPACE_DEV), None, False)
+        except UnknownVault:
+            pass
+        if key.startswith(FOLDER_KEY_PREFIX):
+            misc, created = ensure_vault(
+                conn,
+                Vault(key=MISC_VAULT_KEY, display=MISC_VAULT_DISPLAY, kind=KIND_MISC),
+                origin=ORIGIN_EPISODE,
+                origin_detail=origin_detail,
+            )
+            kind = conn.execute(
+                "SELECT kind FROM vaults WHERE key = ?", (misc,)
+            ).fetchone()[0]
+            if kind != KIND_MISC:
+                raise VaultConflict(
+                    f"vault {misc!r} 不是雜項 vault（kind={kind!r}），拒收"
+                )
+            return EpisodeRoute(misc, key, created)
+        created_key, created = ensure_vault(
+            conn,
+            Vault(key=key, display=display or key, kind="repo"),
+            origin=ORIGIN_EPISODE,
+            origin_detail=origin_detail,
+        )
+        return EpisodeRoute(created_key, None, created)
+
+
+def route_injection_vault(conn: sqlite3.Connection, requested: str) -> EpisodeRoute:
+    """注入 side-car 決定 vault（D14，與 episode 同規則，但不自動建立任何 vault）。
+
+    - key 或別名命中 dev 內既有 vault → 照舊
+    - 不存在的 `folder/<名稱>` → 雜項 vault，`origin_key` 記原 key；雜項 vault 還不存在
+      時拋 `UnknownVault`（沿用 side-car「不自動建、客戶端稍後重送」的契約：同一輪的
+      episode 收料會先建出雜項）
+    - 其他不存在的 key → `UnknownVault`（照舊）
+    - 直接指定雜項 key → `ReservedVault`
+    """
+    key = canonical_key(_validate_raw(requested))
+    if key == ALL_VAULTS:
+        raise VaultRequired("寫入必須指定單一 vault，不可用 '*'")
+    if key == MISC_VAULT_KEY:
+        raise ReservedVault(
+            f"{MISC_VAULT_KEY!r} 保留給雜項 vault，由服務端決定，客戶端不可指定"
+        )
+    try:
+        return EpisodeRoute(resolve_write(conn, key, space=SPACE_DEV), None, False)
+    except UnknownVault:
+        if not key.startswith(FOLDER_KEY_PREFIX):
+            raise
+    row = conn.execute(
+        "SELECT kind FROM vaults WHERE key = ? AND space = ?",
+        (MISC_VAULT_KEY, SPACE_DEV),
+    ).fetchone()
+    if row is None:
+        raise UnknownVault(
+            f"位置 {key!r} 未註冊，雜項 vault 尚未建立（等 episode 收料建立後重送）"
+        )
+    if row[0] != KIND_MISC:
+        raise VaultConflict(f"vault {MISC_VAULT_KEY!r} 不是雜項 vault，拒收")
+    return EpisodeRoute(MISC_VAULT_KEY, key, False)
+
+
+def misc_vault_keys(conn: sqlite3.Connection, *, space: str) -> frozenset[str]:
+    """`space` 內雜項 vault 的 key（正常最多一個；recall／匯出降權用）。"""
+    return frozenset(
+        r[0]
+        for r in conn.execute(
+            "SELECT key FROM vaults WHERE kind = ? AND space = ?", (KIND_MISC, space)
+        )
+    )
 
 
 def vault_origins(conn: sqlite3.Connection) -> list[tuple[str, str, str | None]]:

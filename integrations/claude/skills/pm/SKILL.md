@@ -18,6 +18,7 @@ argument-hint: "[init|explore|query|note|sync|status] [args...]"
 - 無 git remote 的專案 key 為 `folder/<資料夾名>`，不是跨機器穩定識別；之後新增 remote 時 key 會改變，要請服務管理者在 UI 補別名，不另建新 vault。
 - 回 `unknown_vault` 表示此專案沒有記憶。`query`／`status` 就回報無記憶，不為查詢建 vault；`init` 或確實要保存時才用 `vault_resolve(create=true, display=...)`。
 - **HTTP 連線**（`claude mcp get lore-vault` 顯示 type 為 http，服務端看不到本機檔案系統）：不能用 `cwd` 推算。先跑 `git remote get-url origin`，以 `vault_resolve(remote_url=<輸出>)` 解析；沒有 remote 的專案直接傳 `key="folder/<資料夾名>"`。`vault_resolve()` 回錯誤要求 `remote_url`／`key` 時也照此處理。
+- 雜項 vault `misc`：尚未建立 vault 的位置（沒有 git remote 且沒 init 的資料夾）擷取的 episode 由服務端收進這裡，優先度較低；它不是任何專案的 vault，不要把 note 寫進去。沒有 remote 的新專案要累積記憶，先跑 `init`。
 - 跨專案觀察在 vault `global`；只有跨專案知識才明確指定它。跨 vault 查詢必須明示 `vault="*"`，而且只涵蓋目前 space。
 - space：`dev`（開發記憶）、`lore`（世界觀）、`personal`（私人）。新 session 一律 `dev`；只有任務明確需要時才 `space(action="set", value=...)`，lore／personal 的 vault 必須帶 `key="<space>/名稱"`。
 

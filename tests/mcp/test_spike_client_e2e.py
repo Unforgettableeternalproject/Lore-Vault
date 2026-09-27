@@ -101,12 +101,13 @@ def test_spool_push_against_real_endpoint(app, tmp_path):
             "GET",
             "/v1/episodes",
             timeout=5,
-            query={"vault": "folder/demo-e2e"},
+            # 未註冊的位置（folder key）：服務端改路由到雜項 vault（D14），客戶端不用改
+            query={"vault": "misc"},
         )
     items = page["items"]
     assert [i["prompt_id"] for i in items] == ["p-1", "p-2"]
     frozen = {(i["machine"], i["vault"]) for i in items}
-    assert frozen == {("desk-a", "folder/demo-e2e")}
+    assert frozen == {("desk-a", "misc")}
 
 
 @pytest.mark.anyio
@@ -231,6 +232,7 @@ def test_real_stop_hook_output_is_accepted_by_service(app, tmp_path, monkeypatch
     assert spool.spool_stats(spool_dir).pending == 0
     items = page["items"]
     assert len(items) == written
-    assert {i["vault"] for i in items} == {"folder/demo"}
+    # hook 送 folder/demo（沒有 remote、未註冊）→ 雜項 vault（D14）
+    assert {i["vault"] for i in items} == {"misc"}
     assert {i["machine"] for i in items} == {hook_stop.current_machine()}
     assert "hook_stop" in sys.modules

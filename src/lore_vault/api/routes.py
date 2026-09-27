@@ -59,12 +59,13 @@ from lore_vault.storage import enrichment as storage_enrichment
 from lore_vault.storage import snapshot as storage_snapshot
 from lore_vault.storage.blobs import BlobCorrupt, BlobNotFound
 from lore_vault.storage.db import transaction
-from lore_vault.storage.errors import UnknownVault, VaultRequired
+from lore_vault.storage.errors import ReservedVault, UnknownVault, VaultRequired
 from lore_vault.storage.migrate import SCHEMA_VERSION, current_version
 from lore_vault.storage.notes import count_notes, list_notes
 from lore_vault.storage.timeutil import format_utc
 from lore_vault.storage.vaults import (
     ALL_VAULTS,
+    KIND_MISC,
     check_key_prefix,
     get_vault,
     upsert_vault,
@@ -234,6 +235,9 @@ def create_vault(request: Request, req: CreateVaultRequest) -> dict[str, Any]:
     space = validate_space(req.space)
     if req.key.strip() == ALL_VAULTS or ALL_VAULTS in req.aliases:
         raise VaultRequired("'*' 保留給跨 vault 查詢，不可當 vault key 或別名")
+    if req.kind == KIND_MISC:
+        # 雜項 vault 只由 episode 收料自動建立（D14）；key `misc` 另由 upsert_vault 擋
+        raise ReservedVault("雜項 vault 只由 episode 收料自動建立，不可明確建立")
     for name in (req.key, *req.aliases):
         if name.strip():
             check_key_prefix(space, name.strip())
