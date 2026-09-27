@@ -36,7 +36,7 @@ from lore_vault.storage.document_index import (
 from lore_vault.storage.documents import Document
 from lore_vault.storage.vaults import resolve_write
 
-from .extract import TOO_LARGE, ExtractionError, detect_format
+from .extract import TOO_LARGE, ExtractionError, detect_format, mime_from_filename
 
 DEFAULT_MIME = "application/octet-stream"
 KIND_DOCUMENT = "document"
@@ -60,6 +60,15 @@ def clean_filename(raw: str) -> str:
         raise ValueError(f"filename 不合法：{raw!r}")
     check_fields({"filename": name})
     return name
+
+
+def upload_mime(filename: str, mime: str | None) -> str:
+    """文件要記的 MIME：客戶端給了具體 MIME 就照用；空白或 octet-stream（客戶端
+    不知道型別時的預設值）改依副檔名推定，推不出來才記 `DEFAULT_MIME`。"""
+    given = (mime or "").strip()
+    if given and given.split(";", 1)[0].strip().lower() != DEFAULT_MIME:
+        return given
+    return mime_from_filename(filename) or given or DEFAULT_MIME
 
 
 @dataclass(frozen=True)
@@ -99,7 +108,7 @@ def upload(
 ) -> UploadResult:
     """收一份文件：寫 blob、依上表決定回既有／重試／新版本／新文件。"""
     name = clean_filename(filename)
-    content_type = (mime or "").strip() or DEFAULT_MIME
+    content_type = upload_mime(name, mime)
     check_fields({"mime": content_type})
     if len(data) > max_bytes:
         raise UploadRejected(

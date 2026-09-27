@@ -14,6 +14,7 @@ import time
 import pytest
 
 from lore_vault.config import Config, DocumentsConfig, EmbeddingConfig, WorkerConfig
+from lore_vault.documents.service import upload_mime
 from lore_vault.documents.worker import DocumentWorker
 from lore_vault.storage.blobs import BlobStore
 from lore_vault.storage.db import connect
@@ -268,6 +269,63 @@ def test_failed_document_is_retried_in_place(docs, run_worker, db_path):
     assert retried["retried"] is True and retried["duplicate"] is False
     assert retried["document_id"] == first["document_id"]
     assert retried["status"] == "pending" and _rows(db_path) == 1
+
+
+def _document_mime(client, document_id: str) -> str:
+    listed = client.post("/v1/list", json={"vault": A, "kinds": ["document"]}).json()
+    [item] = [i for i in listed["items"] if i["id"] == document_id]
+    return item["mime"]
+
+
+OCTET = "application/octet-stream"
+DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
+@pytest.mark.parametrize(
+    ("data", "filename", "expected"),
+    [
+        ("純文字內容".encode(), "筆記.txt", "text/plain"),
+        ("# 標題".encode(), "說明.MD", "text/markdown"),
+        (b"print(1)\n", "tool.py", "text/plain"),
+        (docx_bytes([("概述", "段落一")]), "報告.docx", DOCX_MIME),
+    ],
+    ids=["txt", "md", "py", "docx"],
+)
+def test_octet_stream_mime_is_inferred_from_extension(docs, data, filename, expected):
+    # MCP 客戶端預設送 octet-stream：依副檔名推定，下載端才有正確 Content-Type
+    doc = uploaded(docs, data, filename, mime=OCTET)
+    assert _document_mime(docs, doc["document_id"]) == expected
+
+
+def test_explicit_mime_is_kept(docs):
+    doc = uploaded(docs, "內容".encode(), "筆記.txt", mime="text/x-custom")
+    assert _document_mime(docs, doc["document_id"]) == "text/x-custom"
+
+
+def test_retry_infers_mime_from_new_filename(docs, run_worker):
+    broken = b"PK\x03\x04 definitely not a docx"
+    first = uploaded(docs, broken, "壞.docx", mime="x/first")
+    run_worker()
+    retried = uploaded(docs, broken, "壞.docx", mime=OCTET)
+    assert retried["retried"] is True
+    assert retried["document_id"] == first["document_id"]
+    assert _document_mime(docs, first["document_id"]) == DOCX_MIME
+
+
+@pytest.mark.parametrize(
+    ("filename", "mime", "expected"),
+    [
+        ("a.txt", None, "text/plain"),
+        ("a.yml", "  ", "application/yaml"),
+        ("a.pdf", "Application/Octet-Stream", "application/pdf"),
+        ("Dockerfile", OCTET, "text/plain"),
+        ("a.txt", "text/plain; charset=utf-8", "text/plain; charset=utf-8"),
+        ("photo.png", OCTET, OCTET),
+        ("photo.png", None, OCTET),
+    ],
+)
+def test_upload_mime_rules(filename, mime, expected):
+    assert upload_mime(filename, mime) == expected
 
 
 def test_same_filename_new_content_is_new_version(docs, run_worker):

@@ -70,6 +70,7 @@ __all__ = [
     "ENCRYPTED",
     "ERROR_CODES",
     "FORMATS",
+    "FORMAT_MIMES",
     "LOCATOR_KINDS",
     "MIN_CHARS_FORMATS",
     "TEXT_EXTENSIONS",
@@ -86,6 +87,7 @@ __all__ = [
     "detect_format",
     "extract",
     "merge_cjk_spacing",
+    "mime_from_filename",
 ]
 
 FORMATS = ("md", "txt", "json", "yaml", "toml", "pdf", "docx", "pptx")
@@ -163,6 +165,33 @@ _MIMES = {
         "pptx"
     ),
 }
+
+
+# 各格式的標準 MIME（上傳時客戶端沒給具體 MIME 就依副檔名推定用；
+# 刻意不用 `mimetypes`，它會讀系統登錄／mime.types，不同機器結果不同）
+FORMAT_MIMES = {
+    "md": "text/markdown",
+    "txt": "text/plain",
+    "json": "application/json",
+    "yaml": "application/yaml",
+    "toml": "application/toml",
+    "pdf": "application/pdf",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "pptx": (
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    ),
+}
+
+
+def mime_from_filename(filename: str) -> str | None:
+    """只依檔名（副檔名／慣例檔名）推定標準 MIME；判定規則同 `detect_format`。
+
+    認不出來回 None（不看客戶端 MIME）。
+    """
+    try:
+        return FORMAT_MIMES[detect_format(filename)]
+    except ExtractionError:
+        return None
 
 
 def detect_format(filename: str, mime: str | None = None) -> str:
