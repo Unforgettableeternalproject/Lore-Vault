@@ -403,8 +403,12 @@ def insert_injection(
     injection: Injection,
     *,
     recorded: str | None = None,
+    origin_key: str | None = None,
 ) -> bool:
     """寫入一筆注入 side-car；回傳是否實際寫入。
+
+    `origin_key`：被改路由到雜項 vault 時的原始 binding key（D14，
+    `vaults.route_injection_vault`）；其餘為 None，不參與重送比對。
 
     冪等：同 vault 已有內容完全相同的紀錄（session_id、prompt_id、
     prompt_fingerprint、injected 全等）→ 視為重送，回傳 False、不寫入。
@@ -436,8 +440,8 @@ def insert_injection(
         conn.execute(
             """
             INSERT INTO injections (vault, session_id, prompt_id, prompt_fingerprint,
-                                    data, recorded)
-            VALUES (?, ?, ?, ?, ?, ?)
+                                    data, recorded, origin_key)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 key,
@@ -446,6 +450,7 @@ def insert_injection(
                 injection.prompt_fingerprint,
                 data,
                 rec,
+                origin_key,
             ),
         )
     return True

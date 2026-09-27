@@ -637,19 +637,21 @@ def _v15(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
-# 雜項 vault（v16，D14；路由見 `api.spike.post_episodes`）：
+# 雜項 vault（v16，D14；路由見 `storage.vaults.route_episode_vault`／
+# `route_injection_vault`）：
 # - vaults.kind 加 'misc'。vaults 被多張表以外鍵參照，照 12 步重建要在交易外關外鍵、
 #   改動遷移框架；這裡只「放寬」CHECK（不改磁碟格式、既有資料必然仍合法），採 SQLite
 #   ALTER TABLE 文件第 7 節的 writable_schema 程序，在同一個遷移交易內完成，
 #   失敗整段 rollback。原字串必須恰好出現一次，否則大聲失敗、不靜默略過
-# - episodes.origin_key：被改路由到雜項 vault 的 episode，記下收料時客戶端送來的
-#   原始 binding key（canonical，`folder/<名稱>`）；其餘 episode 為 NULL。
+# - episodes.origin_key／injections.origin_key：被改路由到雜項 vault 的列，記下收料時
+#   客戶端送來的原始 binding key（canonical，`folder/<名稱>`）；其餘為 NULL。
 #   不動 data 與其他凍結欄位。不加 CHECK，由 doctor `vaults.misc_routing` 對帳
 # - 既有資料：episode 收料自動建立的 `folder/*` vault（origin='episode'）是新規則下
-#   本該進雜項的位置。note／文件／墓碑任一非零 → 整個不動（遷移不能互動停下，
-#   交給 doctor 以 warn 呈現）；否則 episode 改歸雜項並記 origin_key，vault 若已無
-#   任何內容（concept／injection／別名皆無）就刪除，搬移紀錄寫進雜項 vault 的
-#   origin_detail（JSON，供人工審視）
+#   本該進雜項的位置（D14「未註冊位置一律歸雜項」）。note／文件／墓碑／別名任一
+#   非零 → 整個不動（遷移不能互動停下，交給 doctor 以 warn 呈現）；否則 episode、
+#   injection（記 origin_key）與由它們衍生的 concept 一併改歸雜項，vault 清空後刪除，
+#   搬移紀錄寫進雜項 vault 的 origin_detail（JSON，供人工審視）。concept 沒有
+#   origin_key：來源位置可由 source_turns 對回 episode 的 origin_key 追溯
 _V16_KIND_CHECK_OLD = "CHECK (kind IN ('repo', 'global'))"
 _V16_KIND_CHECK_NEW = "CHECK (kind IN ('repo', 'global', 'misc'))"
 _V16_MISC_KEY = "misc"
@@ -688,13 +690,11 @@ def _v16_count(conn: sqlite3.Connection, table: str, column: str, key: str) -> i
 def absorb_folder_vaults(conn: sqlite3.Connection) -> list[dict[str, object]]:
     """把 episode 收料自動建立的 `folder/*` vault 併入雜項 vault（v16 的資料部分）。
 
-    冪等：併完的 vault 不再符合條件（已刪除，或 episode 已搬走）。回傳每個候選的
-    處理紀錄 `{key, episodes, action, …}`；action：
-    - `skipped_has_content`：有 note／文件／墓碑，完全不動
+    冪等：併完的 vault 已刪除，不再是候選；被跳過的每次都同樣跳過、不寫紀錄。
+    回傳每個候選的處理紀錄 `{key, action, 各表筆數}`；action：
+    - `skipped_has_content`：有 note／文件／墓碑／別名，完全不動
     - `skipped_misc_conflict`：key `misc` 已被非雜項 vault 佔用，完全不動
-    - `skipped_nothing_to_move`：沒有 episode 可搬、vault 仍有 concept 等內容（重跑時）
-    - `moved`：episode 已搬，vault 仍有 concept／injection／別名而保留
-    - `moved_and_removed`：episode 已搬且 vault 已刪除
+    - `moved_and_removed`：episode／injection／concept 已搬進雜項、vault 已刪除
     呼叫端須已在交易內。
     """
     candidates = [
@@ -710,7 +710,11 @@ def absorb_folder_vaults(conn: sqlite3.Connection) -> list[dict[str, object]]:
     ]
     records: list[dict[str, object]] = []
     for key in candidates:
-        episodes = _v16_count(conn, "episodes", "vault", key)
+        moving = {
+            "episodes": _v16_count(conn, "episodes", "vault", key),
+            "injections": _v16_count(conn, "injections", "vault", key),
+            "concepts": _v16_count(conn, "concepts", "vault", key),
+        }
         blocking = {
             "notes": _v16_count(conn, "notes", "vault", key),
             "documents": _v16_count(conn, "documents", "vault", key),
@@ -718,40 +722,19 @@ def absorb_folder_vaults(conn: sqlite3.Connection) -> list[dict[str, object]]:
             "document_tombstones": _v16_count(
                 conn, "document_tombstones", "vault", key
             ),
+            # 雜項 vault 依保留規則不能收別名，有別名的 vault 交人工處理
+            "aliases": _v16_count(conn, "vault_aliases", "vault", key),
         }
         if any(blocking.values()):
             records.append(
-                {
-                    "key": key,
-                    "episodes": episodes,
-                    "action": "skipped_has_content",
-                    **blocking,
-                }
-            )
-            continue
-        remaining = {
-            "concepts": _v16_count(conn, "concepts", "vault", key),
-            "injections": _v16_count(conn, "injections", "vault", key),
-            "aliases": _v16_count(conn, "vault_aliases", "vault", key),
-        }
-        if episodes == 0 and any(remaining.values()):
-            # 沒有 episode 可搬（例如已併過一次）：不動、不寫紀錄，重跑才冪等
-            records.append(
-                {
-                    "key": key,
-                    "episodes": 0,
-                    "action": "skipped_nothing_to_move",
-                    **remaining,
-                }
+                {"key": key, "action": "skipped_has_content", **moving, **blocking}
             )
             continue
         misc = conn.execute(
             "SELECT kind FROM vaults WHERE key = ?", (_V16_MISC_KEY,)
         ).fetchone()
         if misc is not None and misc[0] != "misc":
-            records.append(
-                {"key": key, "episodes": episodes, "action": "skipped_misc_conflict"}
-            )
+            records.append({"key": key, "action": "skipped_misc_conflict", **moving})
             continue
         if misc is None:
             conn.execute(
@@ -774,18 +757,19 @@ def absorb_folder_vaults(conn: sqlite3.Connection) -> list[dict[str, object]]:
                     ),
                 ),
             )
+        for table in ("episodes", "injections"):
+            conn.execute(
+                f"UPDATE {table} SET vault = ?, origin_key = ? WHERE vault = ?",
+                (_V16_MISC_KEY, key, key),
+            )
+        # concept 是那批 episode 的管線衍生物（A17 依 source_turns 歸屬）：今天同樣的
+        # episode 會落在雜項，concept 跟著搬才一致；ord（匯出順序）不動
         conn.execute(
-            "UPDATE episodes SET vault = ?, origin_key = ? WHERE vault = ?",
-            (_V16_MISC_KEY, key, key),
+            "UPDATE concepts SET vault = ? WHERE vault = ?", (_V16_MISC_KEY, key)
         )
-        record: dict[str, object] = {"key": key, "episodes": episodes}
-        if any(remaining.values()):
-            record.update(action="moved", **remaining)
-        else:
-            conn.execute("DELETE FROM vaults WHERE key = ?", (key,))
-            record["action"] = "moved_and_removed"
-        records.append(record)
-    moved = [r for r in records if str(r["action"]).startswith("moved")]
+        conn.execute("DELETE FROM vaults WHERE key = ?", (key,))
+        records.append({"key": key, "action": "moved_and_removed", **moving})
+    moved = [r for r in records if r["action"] == "moved_and_removed"]
     if moved:
         row = conn.execute(
             "SELECT origin_detail FROM vaults WHERE key = ?", (_V16_MISC_KEY,)
@@ -811,11 +795,12 @@ def absorb_folder_vaults(conn: sqlite3.Connection) -> list[dict[str, object]]:
 
 def _v16(conn: sqlite3.Connection) -> None:
     _v16_relax_vault_kind(conn)
-    conn.execute("ALTER TABLE episodes ADD COLUMN origin_key TEXT")
-    conn.execute(
-        "CREATE INDEX episodes_origin_key ON episodes(origin_key)"
-        " WHERE origin_key IS NOT NULL"
-    )
+    for table in ("episodes", "injections"):
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN origin_key TEXT")
+        conn.execute(
+            f"CREATE INDEX {table}_origin_key ON {table}(origin_key)"
+            " WHERE origin_key IS NOT NULL"
+        )
     absorb_folder_vaults(conn)
 
 

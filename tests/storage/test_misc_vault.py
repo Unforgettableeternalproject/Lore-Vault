@@ -8,9 +8,9 @@ import sqlite3
 import pytest
 
 from lore_vault.recall import service as recall_service
-from lore_vault.schema import Concept, Vault
+from lore_vault.schema import Concept, Injection, Vault
 from lore_vault.storage import ingest_checks, manage, records
-from lore_vault.storage.errors import ReservedVault, VaultConflict
+from lore_vault.storage.errors import ReservedVault, UnknownVault, VaultConflict
 from lore_vault.storage.migrate import (
     MIGRATIONS,
     SCHEMA_VERSION,
@@ -25,6 +25,7 @@ from lore_vault.storage.vaults import (
     ensure_vault,
     misc_vault_keys,
     route_episode_vault,
+    route_injection_vault,
     upsert_vault,
 )
 
@@ -181,11 +182,38 @@ def _raw_episodes(conn, key: str, n: int) -> None:
         )
 
 
-def test_v16_absorbs_folder_desktop_and_is_idempotent(tmp_path):
+def _raw_concept(conn, cid: str, key: str) -> None:
+    conn.execute(
+        "INSERT INTO concepts (id, vault, kind, scope_state, scope, data, updated)"
+        " VALUES (?, ?, NULL, 'repo', 'Desktop', ?, ?)",
+        (
+            cid,
+            key,
+            json.dumps({"id": cid, "kind": None, "scope": "Desktop", "statement": "s"}),
+            TS,
+        ),
+    )
+
+
+def _raw_injection(conn, key: str) -> None:
+    conn.execute(
+        "INSERT INTO injections (vault, session_id, prompt_id, data, recorded)"
+        " VALUES (?, 's', 'p', '{}', ?)",
+        (key, TS),
+    )
+
+
+def test_v16_absorbs_folder_desktop_with_derived_content(tmp_path):
+    """folder/desktop：48 筆 episode，03:30 管線跑過後長出 concept／injection。"""
     conn = _v15_db(tmp_path)
     try:
+        _raw_vault(conn, REPO, origin="manual")
         _raw_vault(conn, "folder/desktop")
-        _raw_episodes(conn, "folder/desktop", 20)
+        _raw_episodes(conn, "folder/desktop", 48)
+        _raw_concept(conn, "c-desk-1", "folder/desktop")
+        _raw_concept(conn, "c-repo", REPO)
+        _raw_concept(conn, "c-desk-2", "folder/desktop")
+        _raw_injection(conn, "folder/desktop")
         # 有 note 的 folder vault：完全不動
         _raw_vault(conn, "folder/withnote")
         _raw_episodes(conn, "folder/withnote", 2)
@@ -194,76 +222,80 @@ def test_v16_absorbs_folder_desktop_and_is_idempotent(tmp_path):
             "VALUES ('n-1', 'folder/withnote', 't', 'b', ?, ?)",
             (TS, TS),
         )
-        # 有 concept 的 folder vault：episode 搬、vault 保留（A7 不搬 concept）
-        _raw_vault(conn, "folder/withconcept")
-        _raw_episodes(conn, "folder/withconcept", 1)
+        # 有別名的 folder vault：雜項不能收別名，完全不動
+        _raw_vault(conn, "folder/withalias")
+        _raw_episodes(conn, "folder/withalias", 1)
         conn.execute(
-            "INSERT INTO concepts (id, vault, kind, scope_state, scope, data, updated)"
-            " VALUES ('c-1', 'folder/withconcept', NULL, 'repo', 'X', '{}', ?)",
-            (TS,),
+            "INSERT INTO vault_aliases (alias, vault) "
+            "VALUES ('folder/old', 'folder/withalias')"
         )
         # 明確建立的 folder vault（/pm init）：不是候選
         _raw_vault(conn, "folder/manual", origin="manual")
         _raw_episodes(conn, "folder/manual", 1)
         before = [tuple(r) for r in conn.execute("SELECT seq, data FROM episodes")]
+        concept_data = dict(conn.execute("SELECT id, data FROM concepts"))
 
         migrate(conn)
         assert current_version(conn) == SCHEMA_VERSION == 16
 
-        by_vault = dict(
-            conn.execute("SELECT vault, count(*) FROM episodes GROUP BY vault")
-        )
-        assert by_vault == {
-            "misc": 21,
-            "folder/withnote": 2,
-            "folder/manual": 1,
+        def grouped(table: str) -> dict:
+            return {
+                (r[0], r[1]): r[2]
+                for r in conn.execute(
+                    f"SELECT vault, origin_key, count(*) FROM {table} "
+                    "GROUP BY vault, origin_key"
+                )
+            }
+
+        assert grouped("episodes") == {
+            ("misc", "folder/desktop"): 48,
+            ("folder/withnote", None): 2,
+            ("folder/withalias", None): 1,
+            ("folder/manual", None): 1,
         }
-        origin = dict(
-            conn.execute(
-                "SELECT origin_key, count(*) FROM episodes WHERE vault = 'misc' "
-                "GROUP BY origin_key"
-            )
-        )
-        assert origin == {"folder/desktop": 20, "folder/withconcept": 1}
-        assert (
-            conn.execute(
-                "SELECT count(*) FROM episodes WHERE vault != 'misc' "
-                "AND origin_key IS NOT NULL"
-            ).fetchone()[0]
-            == 0
-        )
-        # data 等凍結欄位不動
+        assert grouped("injections") == {("misc", "folder/desktop"): 1}
+        assert dict(conn.execute("SELECT id, vault FROM concepts")) == {
+            "c-desk-1": "misc",
+            "c-desk-2": "misc",
+            "c-repo": REPO,
+        }
+        # 凍結欄位不動
         after = [tuple(r) for r in conn.execute("SELECT seq, data FROM episodes")]
         assert after == before
+        assert dict(conn.execute("SELECT id, data FROM concepts")) == concept_data
         keys = {r[0] for r in conn.execute("SELECT key FROM vaults")}
         assert "folder/desktop" not in keys
-        assert {"folder/withnote", "folder/withconcept", "folder/manual"} <= keys
+        assert {"folder/withnote", "folder/withalias", "folder/manual"} <= keys
         detail = json.loads(
             conn.execute(
                 "SELECT origin_detail FROM vaults WHERE key = 'misc'"
             ).fetchone()[0]
         )
-        actions = {r["key"]: r["action"] for r in detail["migrated_from"]}
-        assert actions == {
-            "folder/desktop": "moved_and_removed",
-            "folder/withconcept": "moved",
-        }
+        (moved,) = detail["migrated_from"]
+        assert (moved["key"], moved["action"]) == (
+            "folder/desktop",
+            "moved_and_removed",
+        )
+        assert (moved["episodes"], moved["concepts"], moved["injections"]) == (48, 2, 1)
+        # 注入快照：搬進雜項的 concept 排到最後
+        exported, _ = records.export_concepts(conn, "*")
+        assert [c.id for c in exported] == ["c-repo", "c-desk-1", "c-desk-2"]
+        # vault 已刪除：之後從桌面來的 episode 與 injection 都進雜項
+        route = _route(conn, "folder/desktop")
+        assert (route.key, route.origin_key) == (MISC_VAULT_KEY, "folder/desktop")
+        injection_route = route_injection_vault(conn, "folder/desktop")
+        assert injection_route.key == MISC_VAULT_KEY
 
         # 冪等：再跑一次只剩被跳過的，資料與紀錄都不變
-        def state() -> tuple[list[tuple], list[tuple]]:
-            return (
-                [
-                    tuple(r)
-                    for r in conn.execute(
-                        "SELECT seq, vault, origin_key FROM episodes ORDER BY seq"
-                    )
-                ],
-                [
-                    tuple(r)
-                    for r in conn.execute(
-                        "SELECT key, kind, origin_detail FROM vaults ORDER BY key"
-                    )
-                ],
+        def state() -> tuple:
+            return tuple(
+                [tuple(r) for r in conn.execute(sql)]
+                for sql in (
+                    "SELECT seq, vault, origin_key FROM episodes ORDER BY seq",
+                    "SELECT seq, vault, origin_key FROM injections ORDER BY seq",
+                    "SELECT id, vault FROM concepts ORDER BY id",
+                    "SELECT key, kind, origin_detail FROM vaults ORDER BY key",
+                )
             )
 
         snapshot = state()
@@ -271,14 +303,14 @@ def test_v16_absorbs_folder_desktop_and_is_idempotent(tmp_path):
         again = absorb_folder_vaults(conn)
         conn.execute("COMMIT")
         assert [(r["key"], r["action"]) for r in again] == [
-            ("folder/withconcept", "skipped_nothing_to_move"),
+            ("folder/withalias", "skipped_has_content"),
             ("folder/withnote", "skipped_has_content"),
         ]
         assert state() == snapshot
-        # 留下的收料 folder vault（有 note／concept）由 doctor 以 warn 呈現
+        # 被跳過的收料 folder vault 由 doctor 以 warn 呈現
         result = _misc_check(conn)
         assert result.status == "warn"
-        assert result.counts["misc_episodes"] == 21
+        assert result.counts["misc_episodes"] == 48
     finally:
         conn.close()
 
@@ -399,3 +431,51 @@ def test_recall_all_vaults_demotes_misc(conn, add_vault, add_note, monkeypatch):
     # 拿掉降權即紅：雜項那則回到第一
     monkeypatch.setattr(recall_service, "MISC_SCORE_WEIGHT", 1.0)
     assert ids("*") == ["n-misc", "n-repo"]
+
+
+# ── injection 路由 ─────────────────────────────────────────────────
+
+
+def _injection(**overrides) -> Injection:
+    data = {"session_id": "s", "prompt_id": "p", "injected": ["c-1"]}
+    data.update(overrides)
+    return Injection.from_dict(data)
+
+
+def _insert_injection(conn, key: str, injection: Injection) -> bool:
+    route = route_injection_vault(conn, key)
+    return records.insert_injection(
+        conn, route.key, injection, origin_key=route.origin_key
+    )
+
+
+def test_injection_for_unregistered_folder_goes_to_misc(conn, make_episode):
+    # 雜項還不存在：照 side-car 契約 unknown_vault、不自動建
+    with pytest.raises(UnknownVault):
+        route_injection_vault(conn, "folder/a")
+    assert misc_vault_keys(conn, space="dev") == frozenset()
+    _insert(conn, "folder/a", make_episode)
+    assert _insert_injection(conn, "Folder/A", _injection()) is True
+    row = conn.execute("SELECT vault, origin_key FROM injections").fetchone()
+    assert tuple(row) == (MISC_VAULT_KEY, "folder/a")
+    # 重送（客戶端仍送 folder key）→ duplicate
+    assert _insert_injection(conn, "folder/a", _injection()) is False
+    assert _misc_check(conn).status == "pass"
+
+
+def test_injection_for_registered_or_unknown_remote_key(conn, add_vault):
+    add_vault("folder/proj")
+    route = route_injection_vault(conn, "folder/proj")
+    assert (route.key, route.origin_key) == ("folder/proj", None)
+    with pytest.raises(UnknownVault):
+        route_injection_vault(conn, "github.com/o/unknown")
+    with pytest.raises(ReservedVault):
+        route_injection_vault(conn, "misc")
+
+
+def test_misc_routing_fails_when_injection_origin_key_lost(conn, make_episode):
+    _insert(conn, "folder/a", make_episode)
+    _insert_injection(conn, "folder/a", _injection())
+    assert _misc_check(conn).status == "pass"
+    conn.execute("UPDATE injections SET origin_key = NULL")
+    assert _misc_check(conn).status == "fail"

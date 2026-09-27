@@ -61,6 +61,7 @@ from lore_vault.storage.vaults import (
     list_vaults,
     resolve_write,
     route_episode_vault,
+    route_injection_vault,
 )
 
 from .errors import EpisodeIngestDisabled, error_body
@@ -720,7 +721,10 @@ class InjectionBatch(_Req):
 @router.post("/injections")
 def post_injections(request: Request, req: InjectionBatch) -> dict[str, Any]:
     """逐筆結果：accepted／duplicate（內容相同的重送）／unknown_vault（vault 還不存在，
-    不自動建；客戶端保留稍後重送）／invalid。"""
+    不自動建；客戶端保留稍後重送）／invalid。
+
+    vault 決定同 episode（D14，`route_injection_vault`）：未註冊的 `folder/<名稱>`
+    改進雜項 vault、該筆結果帶 `origin_key`；雜項還不存在時 unknown_vault。"""
     _check_batch("injections", req.injections, INJECTION_BATCH_MAX)
     results: list[dict[str, Any]] = []
     tally = {"accepted": 0, "duplicate": 0, "unknown_vault": 0, "invalid": 0}
@@ -733,13 +737,20 @@ def post_injections(request: Request, req: InjectionBatch) -> dict[str, Any]:
                 recorded = data.pop("recorded", None)
                 injection = Injection.from_dict(data)
                 with _savepoint(conn):
+                    route = route_injection_vault(conn, vault)
                     inserted = records.insert_injection(
-                        conn, vault, injection, recorded=recorded
+                        conn,
+                        route.key,
+                        injection,
+                        recorded=recorded,
+                        origin_key=route.origin_key,
                     )
+                if route.origin_key is not None:
+                    result.update(vault=route.key, origin_key=route.origin_key)
                 result["status"] = "accepted" if inserted else "duplicate"
             except UnknownVault as exc:
                 result.update(status="unknown_vault", error=str(exc))
-            except (SchemaError, VaultRequired, ValueError) as exc:
+            except (SchemaError, VaultRequired, VaultConflict, ValueError) as exc:
                 result.update(status="invalid", error=str(exc))
             tally[result["status"]] += 1
             results.append(result)

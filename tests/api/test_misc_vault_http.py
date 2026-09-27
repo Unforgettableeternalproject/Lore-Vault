@@ -131,3 +131,33 @@ def test_injection_snapshot_lists_misc_concepts_last(client):
     assert [c["id"] for c in exported] == ["c-repo", "c-misc"]
     # 匯出格式不變（沒有多出 vault 等欄位）
     assert "vault" not in exported[0]
+
+
+def test_injection_for_unregistered_folder_goes_to_misc(client):
+    """注入 side-car 與 episode 同規則；雜項還不存在時 unknown_vault、不自動建。"""
+    item = {"session_id": "s", "prompt_id": "p", "injected": ["c-1"]}
+    early = client.post(
+        "/v1/injections", json={"injections": [{**item, "vault": "folder/desk"}]}
+    ).json()
+    assert early["results"][0]["status"] == "unknown_vault"
+    _push(client, episode(vault="folder/desk"))
+    resp = client.post(
+        "/v1/injections",
+        json={
+            "injections": [
+                {**item, "vault": "folder/Desk"},
+                {**item, "session_id": "s-2", "vault": "misc"},
+            ]
+        },
+    ).json()
+    ok, direct = resp["results"]
+    assert (ok["status"], ok["vault"], ok["origin_key"]) == (
+        "accepted",
+        "misc",
+        "folder/desk",
+    )
+    assert direct["status"] == "invalid"
+    again = client.post(
+        "/v1/injections", json={"injections": [{**item, "vault": "folder/desk"}]}
+    ).json()
+    assert again["duplicates"] == 1

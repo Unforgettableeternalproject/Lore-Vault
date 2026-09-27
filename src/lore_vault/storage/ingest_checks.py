@@ -110,11 +110,11 @@ def misc_routing(conn: sqlite3.Connection) -> Reconciliation:
     fail：
     - kind=misc 的 vault 超過一個，或其 key 不是 `misc`；key `misc` 的 kind 不是 misc
     - 雜項 vault 有別名，或任何 vault 以 `misc` 當別名（vault_resolve 會解析到雜項）
-    - episode 的 `origin_key` 與歸屬不一致：有 origin_key 卻不在雜項 vault、在雜項
-      vault 卻沒有 origin_key，或 origin_key 不是 `folder/` 開頭
+    - episode／injection 的 `origin_key` 與歸屬不一致：有 origin_key 卻不在雜項
+      vault、在雜項 vault 卻沒有 origin_key，或 origin_key 不是 `folder/` 開頭
     warn：
     - 仍有 episode 收料自動建立的 `folder/*` vault（新規則下不會再產生；通常是 v16
-      遷移因該 vault 有 note／文件而跳過的舊資料，需人工處理）
+      遷移因該 vault 有 note／文件／墓碑／別名而跳過的舊資料，需人工處理）
     資訊（counts）：雜項 episode 數、來源位置數、其中已正式註冊的位置數
     （`registered_origins`：收料當下路由正確、歸屬凍結，不自動搬移）。
     """
@@ -145,21 +145,24 @@ def misc_routing(conn: sqlite3.Connection) -> Reconciliation:
             f"別名 {r[0]!r} → {r[1]!r}：雜項 vault 不可有別名、misc 不可當別名"
         )
     misc_clause = "(SELECT key FROM vaults WHERE kind = ?)"
-    stray = conn.execute(
-        f"""
-        SELECT vault, origin_key, count(*) AS n FROM episodes
-        WHERE (origin_key IS NOT NULL AND vault NOT IN {misc_clause})
-           OR (vault IN {misc_clause}
-               AND (origin_key IS NULL OR substr(origin_key, 1, ?) != ?))
-        GROUP BY vault, origin_key ORDER BY vault, origin_key
-        """,
-        (KIND_MISC, KIND_MISC, len(FOLDER_KEY_PREFIX), FOLDER_KEY_PREFIX),
-    ).fetchall()
-    for r in stray:
-        problems.append(
-            f"episode 歸屬與 origin_key 不一致：vault={r['vault']!r}、"
-            f"origin_key={r['origin_key']!r}（{r['n']} 筆）"
-        )
+    stray: list[sqlite3.Row] = []
+    for table in ("episodes", "injections"):
+        rows = conn.execute(
+            f"""
+            SELECT vault, origin_key, count(*) AS n FROM {table}
+            WHERE (origin_key IS NOT NULL AND vault NOT IN {misc_clause})
+               OR (vault IN {misc_clause}
+                   AND (origin_key IS NULL OR substr(origin_key, 1, ?) != ?))
+            GROUP BY vault, origin_key ORDER BY vault, origin_key
+            """,
+            (KIND_MISC, KIND_MISC, len(FOLDER_KEY_PREFIX), FOLDER_KEY_PREFIX),
+        ).fetchall()
+        stray.extend(rows)
+        for r in rows:
+            problems.append(
+                f"{table} 歸屬與 origin_key 不一致：vault={r['vault']!r}、"
+                f"origin_key={r['origin_key']!r}（{r['n']} 筆）"
+            )
     leftovers = [
         r[0]
         for r in conn.execute(

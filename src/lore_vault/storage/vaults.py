@@ -325,6 +325,41 @@ def route_episode_vault(
         return EpisodeRoute(created_key, None, created)
 
 
+def route_injection_vault(conn: sqlite3.Connection, requested: str) -> EpisodeRoute:
+    """注入 side-car 決定 vault（D14，與 episode 同規則，但不自動建立任何 vault）。
+
+    - key 或別名命中 dev 內既有 vault → 照舊
+    - 不存在的 `folder/<名稱>` → 雜項 vault，`origin_key` 記原 key；雜項 vault 還不存在
+      時拋 `UnknownVault`（沿用 side-car「不自動建、客戶端稍後重送」的契約：同一輪的
+      episode 收料會先建出雜項）
+    - 其他不存在的 key → `UnknownVault`（照舊）
+    - 直接指定雜項 key → `ReservedVault`
+    """
+    key = canonical_key(_validate_raw(requested))
+    if key == ALL_VAULTS:
+        raise VaultRequired("寫入必須指定單一 vault，不可用 '*'")
+    if key == MISC_VAULT_KEY:
+        raise ReservedVault(
+            f"{MISC_VAULT_KEY!r} 保留給雜項 vault，由服務端決定，客戶端不可指定"
+        )
+    try:
+        return EpisodeRoute(resolve_write(conn, key, space=SPACE_DEV), None, False)
+    except UnknownVault:
+        if not key.startswith(FOLDER_KEY_PREFIX):
+            raise
+    row = conn.execute(
+        "SELECT kind FROM vaults WHERE key = ? AND space = ?",
+        (MISC_VAULT_KEY, SPACE_DEV),
+    ).fetchone()
+    if row is None:
+        raise UnknownVault(
+            f"位置 {key!r} 未註冊，雜項 vault 尚未建立（等 episode 收料建立後重送）"
+        )
+    if row[0] != KIND_MISC:
+        raise VaultConflict(f"vault {MISC_VAULT_KEY!r} 不是雜項 vault，拒收")
+    return EpisodeRoute(MISC_VAULT_KEY, key, False)
+
+
 def misc_vault_keys(conn: sqlite3.Connection, *, space: str) -> frozenset[str]:
     """`space` 內雜項 vault 的 key（正常最多一個；recall／匯出降權用）。"""
     return frozenset(
