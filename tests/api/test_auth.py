@@ -163,12 +163,23 @@ def _environ(tmp_path, **extra):
     return env
 
 
-def test_missing_token_refuses_to_start(tmp_path):
+def test_missing_token_uses_generated_secret_file(tmp_path):
+    """D12：未設（或空白）不再拒絕啟動，改用資料目錄 secrets/api-token（首次產生）；
+    詳細行為見 test_bootstrap.py。建 app 不碰資料庫（遷移在 lifespan）。"""
+    create_app(environ=_environ(tmp_path))
+    token_file = tmp_path / "secrets" / "api-token"
+    generated = token_file.read_text(encoding="utf-8").strip()
+    assert len(generated) >= 16
+    create_app(environ=_environ(tmp_path, LORE_VAULT_API_TOKEN="   "))
+    assert token_file.read_text(encoding="utf-8").strip() == generated
+    assert not (tmp_path / "lore.db").exists()
+
+
+def test_empty_token_file_refuses_to_start(tmp_path):
+    (tmp_path / "secrets").mkdir()
+    (tmp_path / "secrets" / "api-token").write_text("  ", encoding="utf-8")
     with pytest.raises(ConfigError, match="LORE_VAULT_API_TOKEN"):
         create_app(environ=_environ(tmp_path))
-    with pytest.raises(ConfigError, match="LORE_VAULT_API_TOKEN"):
-        create_app(environ=_environ(tmp_path, LORE_VAULT_API_TOKEN="   "))
-    assert not (tmp_path / "lore.db").exists()
 
 
 @pytest.mark.parametrize("bad", ["short", "has space 0123456789abc"])

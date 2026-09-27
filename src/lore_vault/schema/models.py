@@ -110,12 +110,13 @@ class Vault(Record):
 # - author：寫入者自報的身分名（agent 用角色名、UI 登入者為 `Xavier (Bernie)`）；
 #   未填為 None（對外顯示為未具名），服務端**不代填**
 # - principal：服務依憑證判定的主體，不可由請求指定。現階段唯一的憑證對應
-#   DEFAULT_PRINCIPAL；日後一 token 一 principal
+#   `LORE_VAULT_PRINCIPAL`（D12，未設時為 DEFAULT_PRINCIPAL）；日後一 token 一 principal
 # - updated_by／updated_by_principal：最後一次寫入（建立或修改）的自報名與 principal
 # - 舊 PM 匯入的 note 標 AUTHOR_LEGACY；API／MCP 寫入者不可自稱 legacy
 AUTHOR_LEGACY = "legacy"
-# 與 Eternity 帳號一致（A23；v13 遷移把舊的 xavier 改寫成這個）
-DEFAULT_PRINCIPAL = "UEPBernie"
+# 未設定 LORE_VAULT_PRINCIPAL 時的 principal（D12）。遷移 v12／v13 的歷史字面值
+# （xavier → UEPBernie）不受影響；既有部署以 LORE_VAULT_PRINCIPAL=UEPBernie 維持相容
+DEFAULT_PRINCIPAL = "owner"
 AUTHOR_MAX_CHARS = 64
 _AUTHOR_FORBIDDEN_WS = frozenset(chr(c) for c in (9, 10, 13))  # tab, LF, CR
 

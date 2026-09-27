@@ -201,6 +201,48 @@ def notes_attribution(ctx: DoctorContext) -> CheckResult:
     return _to_result(storage_manage.note_attribution(ctx.require("db")))
 
 
+def notes_principal_agreement(ctx: DoctorContext) -> CheckResult:
+    """D12：設定的 principal（`LORE_VAULT_PRINCIPAL`）出現在既有 note 的 principal
+    （含 updated_by_principal）之中。
+
+    principal 預設由 UEPBernie 改為 owner：既有部署漏設 env 時，新寫入會記成另一個
+    主體而完全看不出來。資料庫沒有 note 時通過；既有 note 的 principal 集合不含設定值
+    為 warn（附既有值與要補的 env）。設定鍵 `principal` 由服務填；未提供時 skipped。
+    """
+    principal = ctx.settings.get("principal")
+    if not principal:
+        raise CheckSkipped("未提供 principal（不在服務內執行時用 --principal）")
+    db = ctx.require("db")
+    rows = db.execute(
+        "SELECT principal AS p, count(*) AS n FROM notes "
+        "WHERE principal IS NOT NULL GROUP BY principal "
+        "UNION ALL "
+        "SELECT updated_by_principal, count(*) FROM notes "
+        "WHERE updated_by_principal IS NOT NULL GROUP BY updated_by_principal"
+    ).fetchall()
+    seen: dict[str, int] = {}
+    for name, count in rows:
+        seen[name] = seen.get(name, 0) + int(count)
+    counts = {"principals": len(seen)}
+    if not seen:
+        return CheckResult.ok(f"尚無 note；principal 設定為 {principal}", counts=counts)
+    if principal in seen:
+        others = sorted(set(seen) - {principal})
+        detail = f"（另有 {others}）" if others else ""
+        return CheckResult.ok(
+            f"principal {principal} 與既有 note 一致{detail}", counts=counts
+        )
+    existing = sorted(seen)
+    return CheckResult.warn(
+        f"設定的 principal {principal!r} 不在既有 note 的 principal {existing} 之中",
+        details=[
+            "新寫入會記成另一個主體；既有部署請在 .env 設 "
+            f"LORE_VAULT_PRINCIPAL={existing[0]}（或既有的正確值）後重啟服務",
+        ],
+        counts=counts,
+    )
+
+
 def tombstones_note_snapshots(ctx: DoctorContext) -> CheckResult:
     return _to_result(storage_manage.tombstone_snapshots(ctx.require("db")))
 
@@ -462,6 +504,15 @@ def default_registry() -> Registry:
             "notes",
             notes_attribution,
             "每則 note 都記錄了寫入者與最後修改者的帳號",
+        )
+    )
+    registry.add(
+        Check(
+            "notes.principal_agreement",
+            "notes",
+            notes_principal_agreement,
+            "設定的 principal（LORE_VAULT_PRINCIPAL）出現在既有 note 的 principal 中"
+            "（不一致為 warn）",
         )
     )
     for name, func, description in (

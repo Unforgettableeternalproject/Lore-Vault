@@ -140,6 +140,11 @@ def main(
     parser.add_argument(
         "--config", help="Lore Vault 設定檔（未給則依 LORE_VAULT_CONFIG）"
     )
+    parser.add_argument(
+        "--principal",
+        help="服務設定的 principal（LORE_VAULT_PRINCIPAL；"
+        "notes.principal_agreement 用，未給則該項 skipped）",
+    )
     args = parser.parse_args(argv)
 
     out = stdout if stdout is not None else sys.stdout
@@ -175,6 +180,7 @@ def main(
             "spike_home": args.spike_home,
             "config": args.config,
             "blob_dir": args.blob_dir,
+            "principal": args.principal,
             "tombstones_warn_age_days": args.tombstones_warn_age_days,
             "tombstones_warn_bytes": args.tombstones_warn_bytes,
         }

@@ -3,9 +3,15 @@
 啟動順序（lifespan）：遷移資料庫 → 背景 embedding 暖機（不等它完成）→
 啟動背景補算 worker 與文件 worker（各自可關閉；文件 worker 需 documents.blob_dir）；
 關閉時（uvicorn 收到 SIGTERM／SIGINT → lifespan 結束）停止 worker 並等它結束。
-token 缺少或不合格時 `create_app` 直接拋 `ConfigError`，服務不會啟動。
+token 不合格時 `create_app` 直接拋 `ConfigError`，服務不會啟動；正式啟動路徑
+（`load_settings`）在 `LORE_VAULT_API_TOKEN` 未設時沿用或產生資料目錄的
+`secrets/api-token`（D12）。
 
-啟動時另清除過期的 UI 登入紀錄（A23）。
+啟動時另清除過期的 UI 登入紀錄（A23）；正式啟動路徑在資料庫沒有任何 UI 帳號時
+建立管理員（D12，`api.bootstrap`）。
+
+MCP（D12）：`/mcp` 是 Streamable HTTP MCP 端點（`mcp.http`），與 stdio 殼共用工具
+定義，經 in-process ASGI 轉發到本 app 的 `/v1/*`；認證與 `/v1/*` 相同。
 
 UI（A21）：`/ui/api/*` 登入端點一律掛上；`ui.static_dir` 有設定時在 `/ui` 提供
 Vite 建置後的靜態檔（SPA fallback 到 index.html）。
@@ -22,9 +28,11 @@ from datetime import UTC, datetime
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
+from lore_vault.mcp.http import MCP_PATH, build_http_endpoint
 from lore_vault.storage import ui_login
 
 from .auth import BearerAuthMiddleware
+from .bootstrap import ensure_admin_account
 from .errors import install_error_handlers
 from .manage import router as manage_router
 from .principals import Principals
@@ -66,6 +74,21 @@ def _purge_login_log(state: AppState, ui_auth: UiAuth) -> None:
         logging.getLogger("lore_vault.api.ui").info("清除過期登入紀錄 %d 筆", removed)
 
 
+def _bootstrap_admin(state: AppState, ui_auth: UiAuth) -> None:
+    """D12：資料庫沒有任何 UI 帳號時建立管理員；已有帳號完全不動。"""
+    settings = state.settings
+    if not settings.bootstrap_admin:
+        return
+    with state.connection() as conn:
+        ensure_admin_account(
+            conn,
+            username=settings.resolved_admin_user,
+            password=settings.admin_password,
+            secrets_dir=settings.resolved_secrets_dir,
+            now=datetime.fromtimestamp(ui_auth.clock(), UTC),
+        )
+
+
 def create_app(
     settings: ApiSettings | None = None,
     *,
@@ -77,8 +100,8 @@ def create_app(
         _configure_logging()
         settings = load_settings(environ=environ)
     validate_token(settings.token)
-    # 憑證 → principal（A22）：目前唯一的 token 對應 UEPBernie
-    principals = Principals.single(settings.token)
+    # 憑證 → principal（A22）：目前唯一的 token 對應設定的 principal（D12）
+    principals = Principals.single(settings.token, settings.principal)
     ui_auth = UiAuth.from_config(settings.config.ui, settings.clock or time.time)
     ui_static = (
         static_app(settings.config.ui.static_dir)
@@ -90,6 +113,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         state.migrate()
+        _bootstrap_admin(state, ui_auth)
         _purge_login_log(state, ui_auth)
         state.warmup.start()
         if state.enricher is not None:
@@ -97,7 +121,8 @@ def create_app(
         if state.documents_worker is not None:
             state.documents_worker.start()
         try:
-            yield
+            async with mcp_endpoint.run():
+                yield
         finally:
             if state.enricher is not None:
                 state.enricher.stop()
@@ -116,6 +141,9 @@ def create_app(
     )
     app.state.lore = state
     app.state.ui_auth = ui_auth
+    # MCP 工具經 in-process ASGI 打回本 app（含認證中介層），所以傳 app 本身
+    mcp_endpoint = build_http_endpoint(app, settings)
+    app.router.add_route(MCP_PATH, mcp_endpoint, include_in_schema=False)
     install_error_handlers(app)
     app.include_router(router)
     app.include_router(spike_router)

@@ -414,6 +414,8 @@ def status_(
                     # ask.provider：問答模型是否可用（只看有沒有建立用戶端，不打網路）
                     "ask_configured": state.answerer is not None,
                     "ask_model": state.settings.config.ask.model,
+                    # notes.principal_agreement：設定值與既有 note 是否一致（D12）
+                    "principal": state.settings.principal,
                 },
                 resources={"db": conn},
             )

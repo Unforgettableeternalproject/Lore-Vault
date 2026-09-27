@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import re
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -28,10 +29,16 @@ OPENAI_KEY_ENV = "OPENAI_API_KEY"
 API_TOKEN_ENV = "LORE_VAULT_API_TOKEN"
 CF_ACCESS_ID_ENV = "CF_ACCESS_CLIENT_ID"
 CF_ACCESS_SECRET_ENV = "CF_ACCESS_CLIENT_SECRET"
+# D12：單一使用者的 principal 名稱與首次啟動的 UI 管理員
+PRINCIPAL_ENV = "LORE_VAULT_PRINCIPAL"
+ADMIN_USER_ENV = "LORE_VAULT_ADMIN_USER"
+ADMIN_PASSWORD_ENV = "LORE_VAULT_ADMIN_PASSWORD"
 
 # 設定檔中不可出現的鍵（名稱等於或以這些字樣結尾即拒絕）；密鑰只走環境變數。
 # 用結尾比對而非包含：`max_completion_tokens` 不是密鑰。
 _SECRET_KEY_SUFFIXES = ("key", "apikey", "secret", "token", "password", "passwd")
+# principal 名稱規則（同 `storage.ui_login.USERNAME_PATTERN`；本模組不 import 儲存層）
+_PRINCIPAL_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
 
 class ConfigError(ValueError):
@@ -468,6 +475,41 @@ def api_token(
     env = _merged_environ(os.environ if environ is None else environ, env_file)
     value = env.get(API_TOKEN_ENV, "").strip()
     return Secret(value) if value else None
+
+
+def configured_principal(
+    *,
+    env_file: str | PathLike[str] | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> str:
+    """服務憑證對應的 principal（D12）：`LORE_VAULT_PRINCIPAL`，未設或空白時為
+    `DEFAULT_PRINCIPAL`（`owner`）。名稱規則同 UI 帳號（1～64 個英數字或 . _ -，
+    開頭為英數字），因為 UI 管理員預設沿用這個名稱。"""
+    from lore_vault.schema import DEFAULT_PRINCIPAL
+
+    env = _merged_environ(os.environ if environ is None else environ, env_file)
+    value = env.get(PRINCIPAL_ENV, "").strip()
+    if not value:
+        return DEFAULT_PRINCIPAL
+    if not _PRINCIPAL_PATTERN.fullmatch(value):
+        raise ConfigError(
+            f"{PRINCIPAL_ENV} 必須是 1～64 個英數字或 . _ -（開頭為英數字）"
+        )
+    return value
+
+
+def admin_credentials(
+    *,
+    env_file: str | PathLike[str] | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> tuple[str | None, Secret | None]:
+    """首次啟動建立 UI 管理員用（D12）：(`LORE_VAULT_ADMIN_USER`,
+    `LORE_VAULT_ADMIN_PASSWORD`)；未設或空白為 None（帳號預設同 principal、
+    密碼由服務產生）。格式由 UI 帳號規則在建立時檢查。"""
+    env = _merged_environ(os.environ if environ is None else environ, env_file)
+    user = env.get(ADMIN_USER_ENV, "").strip() or None
+    password = env.get(ADMIN_PASSWORD_ENV, "")
+    return user, (Secret(password) if password.strip() else None)
 
 
 def cf_access_credentials(

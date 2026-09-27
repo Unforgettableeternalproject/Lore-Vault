@@ -33,7 +33,8 @@ uuid hex 相撞）：可追溯、重跑天然冪等，連結也能在寫入前�
 管理指令刪除過的 note 有墓碑（`note_tombstones`）：重跑匯入時跳過，不匯回，
 報告列在 `deleted_skipped`；來源 note 全部已刪除的 vault 也不重建。
 作者（A22）：新寫入與依來源更新的 note 一律 `author`／`updated_by` = `legacy`、
-principal = `UEPBernie`（`DEFAULT_PRINCIPAL`；本工具直接寫庫，沿用唯一的憑證主體）；
+principal = 服務設定的 principal（`LORE_VAULT_PRINCIPAL`，D12；
+未設為 `DEFAULT_PRINCIPAL`；本工具直接寫庫，沿用唯一的憑證主體）；
 重跑冪等（未變動的 note 不改寫）。既有 note 被「採用」（adopted）時不改其作者。
 """
 
@@ -56,6 +57,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from lore_vault.binding import folder_key, lookup_key, resolve_binding
+from lore_vault.config import configured_principal
 from lore_vault.notes import links as links_rules
 from lore_vault.schema import (
     AUTHOR_LEGACY,
@@ -847,6 +849,7 @@ def run_import(
     *,
     allow_unreviewed: bool = False,
     orphans: OrphanPlan | None = None,
+    principal: str = DEFAULT_PRINCIPAL,
 ) -> dict[str, Any]:
     """依 mapping 建 vault 與 note；回傳報告（含標題的明細只寫進報告檔）。
 
@@ -953,7 +956,7 @@ def run_import(
             if entry["status"] not in ("resolved", "self"):
                 report["links"]["entries"].append(entry)
         report["links"]["total"] += len(links.entries)
-        _import_one(conn, p, links.ids, prior.get(p.source_id), notes_report)
+        _import_one(conn, p, links.ids, prior.get(p.source_id), notes_report, principal)
     report["links"]["by_status"] = dict(sorted(link_stats.items()))
     return report
 
@@ -964,6 +967,7 @@ def _import_one(
     link_ids: tuple[str, ...],
     prior: imports.ManifestRow | None,
     out: dict[str, Any],
+    principal: str,
 ) -> None:
     row = conn.execute(
         "SELECT vault, title, body, updated FROM notes WHERE id = ?", (p.source_id,)
@@ -981,9 +985,9 @@ def _import_one(
                 updated=p.updated,
                 links=link_ids,
                 author=AUTHOR_LEGACY,
-                principal=DEFAULT_PRINCIPAL,
+                principal=principal,
                 updated_by=AUTHOR_LEGACY,
-                updated_by_principal=DEFAULT_PRINCIPAL,
+                updated_by_principal=principal,
             ),
             space=SPACE_DEV,
         )
@@ -1030,7 +1034,7 @@ def _import_one(
             {"title": p.title, "body": p.body, "links": link_ids, "summary": None},
             space=SPACE_DEV,
             now=p.updated,
-            editor=(AUTHOR_LEGACY, DEFAULT_PRINCIPAL),
+            editor=(AUTHOR_LEGACY, principal),
         )
         if stored is None:
             raise OnImportError(f"note {p.source_id} 更新時版本衝突")
@@ -1326,6 +1330,7 @@ def main(
                     mapping,
                     allow_unreviewed=args.allow_unreviewed,
                     orphans=orphans,
+                    principal=configured_principal(environ=env),
                 )
             finally:
                 conn.close()

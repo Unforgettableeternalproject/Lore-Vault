@@ -1,4 +1,15 @@
-"""本地 stdio MCP 殼（A15）：十個工具轉發到服務 HTTP，服務不可達時讀本地快照降級。
+"""MCP 工具（A15／D12）：本地 stdio 殼與服務內建的 HTTP 端點 `/mcp` 共用這一份。
+
+十個工具一律轉發到服務 `/v1/*`：stdio 殼經網路打服務（不可達時讀本地快照降級）；
+HTTP 端點（`mcp.http`）在服務行程內經 in-process ASGI 轉發到同一個 app，
+沿用呼叫端自己的認證 header（同一套 principal 判定）。
+
+兩種模式的工具名稱、參數、說明、回傳完全相同（`build_server` 只註冊一次）；
+差異只在 `Shell` 的模式檢查（D12）：
+- `vault_resolve`：HTTP 看不到客戶端檔案系統，不能用 `cwd`，改收 `remote_url`
+  （客戶端 `git remote get-url origin` 的輸出，正規化規則同 binding）或 `key`
+- `upload`：HTTP 只收 `filename` + `content_base64`，不收本機 `path`
+- HTTP 沒有快照降級；目前 space 依 MCP session（`mcp-session-id`）各自保存
 
 工具刻意只有 `space`、`vault_resolve`、`recall`、`ask`、`get`、`list`、`write`、
 `update`、`upload`、`status`；建 vault 併入 `vault_resolve(create=True)`，不另開工具。
@@ -30,24 +41,28 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import logging
 import os
 import sqlite3
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from collections import OrderedDict
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
 import anyio
 import httpx2
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 
 from lore_vault import notes as notes_service
-from lore_vault.binding import resolve_binding
+from lore_vault.binding import display_from_remote, normalize_remote, resolve_binding
 from lore_vault.doctor import DoctorContext, default_registry
 from lore_vault.hooks import concept_snapshot
 from lore_vault.notes import InvalidCursor, NoChanges
@@ -94,6 +109,30 @@ TOOL_NAMES = (
 SPACE_ACTIONS = ("get", "set")
 DEGRADED_REASON = "service_unreachable"
 
+SOURCE_REMOTE_URL = "remote_url"
+MODE_STDIO = "stdio"
+MODE_HTTP = "http"
+MODES = (MODE_STDIO, MODE_HTTP)
+# HTTP 模式：轉發到服務時沿用呼叫端的這些認證 header（不以服務 token 代打）
+FORWARD_HEADERS = ("authorization", "cookie", "x-lore-vault-ui")
+SESSION_HEADER = "mcp-session-id"
+# HTTP 模式各 MCP session 的目前 space 最多記幾個（超過淘汰最久沒用的）
+MAX_SESSION_SPACES = 1024
+# 上傳檔名上限（字元）
+MAX_UPLOAD_FILENAME = 255
+
+# 目前這次工具呼叫所屬的 MCP session 與要轉發的 header（`Shell.request_scope` 設定）
+_session_var: ContextVar[str | None] = ContextVar("lore_mcp_session", default=None)
+_forward_var: ContextVar[dict[str, str] | None] = ContextVar(
+    "lore_mcp_forward", default=None
+)
+
+
+def forwarded_headers() -> dict[str, str] | None:
+    """HTTP 模式：目前工具呼叫要轉發給服務的認證 header（`mcp.http` 用）。"""
+    return _forward_var.get()
+
+
 INSTRUCTIONS = (
     "Lore Vault：專案記憶。流程：先 vault_resolve 取得本專案的 vault key → recall 查"
     "（只回標題與摘要）→ 需要全文再 get → 新結論用 write、修正既有 note 用 update"
@@ -106,6 +145,23 @@ INSTRUCTIONS = (
     "含檔名與 locator 位置），全文用 get 取 doc:／chunk: id。"
     "ask 會把 recall 到的 note 交模型整理成逐點回答；那只是片段的整理、信心有限，"
     "可參考但不可當作唯一事實來源，關鍵事實要用 get 核對原 note。"
+)
+
+HTTP_INSTRUCTIONS = (
+    "Lore Vault：專案記憶（HTTP 端點）。流程：先 vault_resolve 取得本專案的 vault key"
+    " → recall 查（只回標題與摘要）→ 需要全文再 get → 新結論用 write、修正既有 note "
+    "用 update（不要另建更正篇）。服務看不到你的檔案系統：vault_resolve 請帶 "
+    "remote_url（在專案目錄執行 `git remote get-url origin` 的輸出原樣傳入，"
+    "服務會正規化成 key）；沒有 git remote 時直接給 key"
+    "（例如 'folder/<資料夾名小寫>'）；不要傳 cwd。"
+    "每次讀寫都要帶 vault；跨 vault 查詢必須明示 vault='*'（只涵蓋目前 space）。"
+    "內容分 space：dev（開發記憶，預設）、lore（世界觀）、personal（私人）；所有工具只"
+    "看得到目前 space，要看別的 space 先用 space(action='set') 切換（依 MCP session "
+    "保存，新 session 一律回到 dev）。文件用 upload 上傳：傳 filename 與 content_base64"
+    "（檔案內容 base64），不收本機路徑；上傳後在背景抽取，recall 會一併回文件段落"
+    "（kind=chunk），全文用 get 取 doc:／chunk: id。HTTP 端點沒有離線快照：服務連不上"
+    "時工具直接失敗。ask 會把 recall 到的 note 交模型整理成逐點回答；那只是片段的整理、"
+    "信心有限，關鍵事實要用 get 核對原 note。"
 )
 
 _HINTS = {
@@ -129,6 +185,21 @@ _HINTS = {
     "path_not_allowed": (
         "只能上傳殼工作目錄或設定 mcp.upload_roots 底下的檔案；"
         "請把檔案放進專案目錄，或請使用者加入白名單"
+    ),
+    "path_not_supported": (
+        "HTTP 端點讀不到你的檔案系統：改傳 filename 與 content_base64"
+        "（檔案內容 base64）"
+    ),
+    "cwd_not_supported": (
+        "HTTP 端點看不到你的工作目錄：在專案目錄執行 `git remote get-url origin`，"
+        "把輸出當 remote_url 傳入；沒有 remote 時直接給 key（'folder/<資料夾名小寫>'）"
+    ),
+    "remote_url_required": (
+        "HTTP 端點需要 remote_url（`git remote get-url origin` 的輸出）或 key"
+    ),
+    "session_required": (
+        "這個連線沒有 MCP session（stateless），無法保存目前 space；"
+        "請用支援 session 的 streamable HTTP 客戶端，或只在 dev 使用"
     ),
     "too_large": "單檔上限 25MB（設定 documents.max_file_bytes）",
     "ask_not_configured": "服務沒有問答模型（缺 OPENAI_API_KEY）；改用 recall + get",
@@ -222,6 +293,58 @@ def _describe(exc: BaseException) -> str:
     return text if len(text) <= 300 else text[:299] + "…"
 
 
+def _ctx_headers(ctx: Context | None) -> Mapping[str, str] | None:
+    """工具呼叫所在 HTTP 請求的 header；stdio、in-memory 或不在請求內時為 None。"""
+    if ctx is None:
+        return None
+    try:
+        return ctx.headers
+    except ValueError:  # 直接呼叫 server.call_tool()：沒有 request context
+        return None
+
+
+def _decode_upload(
+    filename: str, content_base64: str, max_bytes: int
+) -> tuple[str, bytes]:
+    """內容上傳（HTTP 模式唯一方式，stdio 也可用）：檢查檔名、先以長度擋大小再解碼。"""
+    name = filename.strip() if isinstance(filename, str) else ""
+    if not name:
+        raise _tool_error("invalid_request", "filename 不可為空")
+    if (
+        len(name) > MAX_UPLOAD_FILENAME
+        or name in (".", "..")
+        or "/" in name
+        or "\\" in name
+        or any(ord(ch) < 32 or ord(ch) == 127 for ch in name)
+    ):
+        raise _tool_error(
+            "invalid_request",
+            "filename 只能是單純檔名（不含路徑分隔與控制字元，最多 "
+            f"{MAX_UPLOAD_FILENAME} 字）：{name!r}",
+        )
+    text = "".join(content_base64.split()) if isinstance(content_base64, str) else ""
+    # base64 每 4 字元 3 位元組：先以長度擋，不為超大內容配置解碼緩衝
+    if len(text) > (max_bytes + 2) // 3 * 4:
+        raise _tool_error(
+            "too_large",
+            f"{name!r} 超過上傳上限 {max_bytes} 位元組",
+            hint=_HINTS["too_large"],
+        )
+    try:
+        data = base64.b64decode(text, validate=True)
+    except (binascii.Error, ValueError):
+        raise _tool_error(
+            "invalid_request", "content_base64 不是合法的 base64"
+        ) from None
+    if len(data) > max_bytes:
+        raise _tool_error(
+            "too_large",
+            f"{name!r} 超過上傳上限 {max_bytes} 位元組",
+            hint=_HINTS["too_large"],
+        )
+    return name, data
+
+
 def _vault_payload(conn: sqlite3.Connection, key: str, space: str) -> dict[str, Any]:
     """與 `/v1/vault_resolve` 相同形狀（降級時由快照產生，同樣限定在 space 內）。"""
     if key == ALL_VAULTS:
@@ -249,8 +372,12 @@ class Shell:
         transport: httpx2.AsyncBaseTransport | None = None,
         cwd: Callable[[], str] = os.getcwd,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        mode: str = MODE_STDIO,
     ) -> None:
+        if mode not in MODES:
+            raise ValueError(f"mode 必須是 {MODES} 之一，得到 {mode!r}")
         self.settings = settings
+        self.mode = mode
         self.client = ServiceClient(settings, transport=transport)
         self._cwd = cwd
         self._now = now
@@ -258,8 +385,48 @@ class Shell:
         self.last_pull_error: str | None = None
         self._concept_lock = anyio.Lock()
         self.last_concept_pull_error: str | None = None
-        # 目前 space：只在記憶體，不持久化（新殼行程一律 dev）
-        self.space: str = SPACE_DEV
+        # 目前 space：只在記憶體，不持久化（新殼行程／新 MCP session 一律 dev）。
+        # stdio 只有一格（key None）；HTTP 依 MCP session id 分格
+        self._spaces: OrderedDict[str | None, str] = OrderedDict()
+
+    @property
+    def http(self) -> bool:
+        return self.mode == MODE_HTTP
+
+    @property
+    def space(self) -> str:
+        return self._spaces.get(_session_var.get(), SPACE_DEV)
+
+    @space.setter
+    def space(self, value: str) -> None:
+        key = _session_var.get()
+        self._spaces[key] = value
+        self._spaces.move_to_end(key)
+        while len(self._spaces) > MAX_SESSION_SPACES:
+            self._spaces.popitem(last=False)
+
+    @contextmanager
+    def request_scope(self, ctx: Context | None) -> Iterator[None]:
+        """一次工具呼叫的範圍：HTTP 模式記下 MCP session 與要轉發的認證 header。"""
+        if not self.http:
+            yield
+            return
+        headers = _ctx_headers(ctx)
+        session_id = headers.get(SESSION_HEADER) if headers is not None else None
+        forward = None
+        if headers is not None:
+            forward = {
+                name: value
+                for name in FORWARD_HEADERS
+                if (value := headers.get(name)) is not None
+            }
+        session_token = _session_var.set(session_id or None)
+        forward_token = _forward_var.set(forward)
+        try:
+            yield
+        finally:
+            _forward_var.reset(forward_token)
+            _session_var.reset(session_token)
 
     async def aclose(self) -> None:
         await self.client.aclose()
@@ -336,6 +503,12 @@ class Shell:
         query: Callable[[sqlite3.Connection], dict[str, Any]],
     ) -> dict[str, Any]:
         snapshot_dir = self.settings.snapshot_dir
+        if self.http:
+            raise _tool_error(
+                DEGRADED_REASON,
+                f"服務內部不可用（{cause.detail}）；HTTP 端點沒有快照降級",
+                hint="稍後重試",
+            )
         if snapshot_dir is None:
             raise _tool_error(
                 DEGRADED_REASON,
@@ -402,6 +575,13 @@ class Shell:
                 "invalid_request",
                 f"action 必須是 {list(SPACE_ACTIONS)}，得到 {action!r}",
             )
+        if self.http and _session_var.get() is None:
+            # 沒有 session 就沒有「目前」可言：寫進共用格會改到別的 agent 的 space
+            raise _tool_error(
+                "session_required",
+                "這個 MCP 連線沒有 session，無法切換目前 space",
+                hint=_HINTS["session_required"],
+            )
         try:
             self.space = validate_space(value)
         except (SpaceRequired, InvalidSpace) as exc:
@@ -418,9 +598,13 @@ class Shell:
         display: str | None = None,
         space: str | None = None,
         key: str | None = None,
+        remote_url: str | None = None,
     ) -> dict[str, Any]:
-        """dev：key 省略時由 cwd 的 binding 算；lore／personal：必須帶 key、忽略 cwd。
+        """dev：key 省略時由 remote_url（或 stdio 的 cwd）的 binding 算；
+        lore／personal：必須帶 key、忽略 cwd／remote_url。
 
+        `remote_url` 以與 binding 相同的 `normalize_remote` 正規化，與在該 repo
+        目錄以 cwd 解析得到同一個 key。HTTP 模式不能用 cwd（服務看不到客戶端）。
         `space` 省略用目前 space；顯式傳入只影響這一次（不切換目前 space）。
         """
         try:
@@ -434,6 +618,21 @@ class Shell:
         if key is not None:
             resolved_key, default_display = key, key
             cwd_ignored = cwd is not None
+        elif remote_url is not None and target == SPACE_DEV:
+            normalized = normalize_remote(remote_url)
+            if not normalized:
+                raise _tool_error(
+                    "invalid_request",
+                    "remote_url 不可為空",
+                    hint=_HINTS["remote_url_required"],
+                )
+            bind = {
+                "key": normalized,
+                "display": display_from_remote(remote_url) or normalized,
+                "source": SOURCE_REMOTE_URL,
+            }
+            resolved_key, default_display = normalized, bind["display"]
+            cwd_ignored = cwd is not None
         elif target != SPACE_DEV:
             raise _tool_error(
                 "key_required",
@@ -442,6 +641,18 @@ class Shell:
                     f"例如 vault_resolve(key='{target}/<名稱>', create=True, "
                     "display=...)"
                 ),
+            )
+        elif self.http:
+            if cwd is not None:
+                raise _tool_error(
+                    "cwd_not_supported",
+                    "HTTP 端點不能用 cwd 推算 vault（服務看不到客戶端的檔案系統）",
+                    hint=_HINTS["cwd_not_supported"],
+                )
+            raise _tool_error(
+                "remote_url_required",
+                "HTTP 端點必須帶 remote_url 或 key",
+                hint=_HINTS["cwd_not_supported"],
             )
         else:
             path = cwd or self._cwd()
@@ -470,8 +681,9 @@ class Shell:
                     f"space {target!r} 內的 vault {resolved_key!r} 尚未建立",
                     hint=(
                         "確認這是要記錄的範圍後，以 vault_resolve(create=True, "
-                        "display=...) 建立；若 cwd 不是專案目錄，改傳正確的 cwd；"
-                        "若 vault 在別的 space，先用 space(action='set') 切換"
+                        "display=...) 建立；若 cwd／remote_url 不是這個專案的，"
+                        "改傳正確的值；若 vault 在別的 space，先用 "
+                        "space(action='set') 切換"
                     ),
                     http_status=exc.status,
                     **_compact(binding=bind),
@@ -677,23 +889,62 @@ class Shell:
         """可上傳的目錄：殼的工作目錄一律在內，另加設定的 `mcp.upload_roots`。"""
         return (Path(self._cwd()), *self.settings.upload_roots)
 
-    async def upload(self, path: str, vault: str | None = None) -> dict[str, Any]:
-        """讀本機檔案上傳到目前 space 的 vault。
+    async def upload(
+        self,
+        path: str | None = None,
+        vault: str | None = None,
+        filename: str | None = None,
+        content_base64: str | None = None,
+    ) -> dict[str, Any]:
+        """上傳到目前 space 的 vault：本機檔案（`path`，只限 stdio）或內容
+        （`filename` + `content_base64`，兩種模式皆可）二擇一。
 
-        `vault` 省略時只在 dev 以殼工作目錄的 binding 解析（不建立 vault），並在回應
-        標 `vault_source: "cwd_binding"`；lore／personal 必須明示。
+        `vault` 省略時只在 stdio 的 dev 以殼工作目錄的 binding 解析（不建立 vault），
+        並在回應標 `vault_source: "cwd_binding"`；lore／personal 與 HTTP 必須明示。
         """
-        try:
-            local = read_upload(
-                path,
-                self.upload_roots(),
-                cwd=self._cwd(),
-                max_bytes=self.settings.max_upload_bytes,
+        has_content = filename is not None or content_base64 is not None
+        if path is not None and has_content:
+            raise _tool_error(
+                "invalid_request", "path 與 filename／content_base64 只能擇一"
             )
-        except UploadPathError as exc:
-            raise _tool_error(exc.code, str(exc), hint=_HINTS.get(exc.code)) from None
+        if path is not None and self.http:
+            raise _tool_error(
+                "path_not_supported",
+                "HTTP 端點不收本機路徑",
+                hint=_HINTS["path_not_supported"],
+            )
+        source_path: str | None = None
+        if path is None:
+            if filename is None or content_base64 is None:
+                raise _tool_error(
+                    "invalid_request",
+                    "必須帶 filename 與 content_base64"
+                    + ("" if self.http else "（或本機 path）"),
+                )
+            name, data = _decode_upload(
+                filename, content_base64, self.settings.max_upload_bytes
+            )
+        else:
+            try:
+                local = read_upload(
+                    path,
+                    self.upload_roots(),
+                    cwd=self._cwd(),
+                    max_bytes=self.settings.max_upload_bytes,
+                )
+            except UploadPathError as exc:
+                raise _tool_error(
+                    exc.code, str(exc), hint=_HINTS.get(exc.code)
+                ) from None
+            name, data, source_path = local.name, local.data, str(local.path)
         vault_source = "explicit"
         if vault is None:
+            if self.http:
+                raise _tool_error(
+                    "vault_required",
+                    "HTTP 端點的 upload 必須帶 vault（服務看不到工作目錄）",
+                    hint="先用 vault_resolve(remote_url=...) 取得 key",
+                )
             if self.space != SPACE_DEV:
                 raise _tool_error(
                     "vault_required",
@@ -709,15 +960,16 @@ class Shell:
             result = await self.client.post_multipart(
                 "/v1/documents",
                 {"vault": vault, "space": self.space},
-                filename=local.name,
-                content=local.data,
+                filename=name,
+                content=data,
             )
         except ServiceError as exc:
             raise _from_service_error(exc) from None
         except ServiceUnreachable as exc:
             raise self._write_unreachable(exc) from None
         result["vault_source"] = vault_source
-        result["path"] = str(local.path)
+        if source_path is not None:
+            result["path"] = source_path
         return result
 
     def local_status(self) -> dict[str, Any]:
@@ -749,6 +1001,11 @@ class Shell:
         }
 
     async def status(self, vault: str | None = None) -> dict[str, Any]:
+        if self.http:
+            # HTTP 端點沒有殼端快照；附模式與目前 space
+            result = await self._post("/v1/status", _compact(vault=vault))
+            result["mcp"] = {"mode": MODE_HTTP, "space": self.space}
+            return result
         local = self.local_status()
         try:
             result = await self._post("/v1/status", _compact(vault=vault))
@@ -780,12 +1037,20 @@ def _dump(result: dict[str, Any]) -> str:
 
 
 def build_server(shell: Shell) -> MCPServer:
+    """註冊十個工具。stdio 與 HTTP 共用同一份定義；只有 instructions 與 lifespan
+    依 `shell.mode` 不同（HTTP 沒有快照背景工作）。"""
+
     @asynccontextmanager
     async def lifespan(server: MCPServer) -> AsyncIterator[None]:
         try:
             async with anyio.create_task_group() as tg:
-                if shell.settings.snapshot_on_start and (
-                    shell.settings.snapshot_dir or shell.settings.concept_snapshot_path
+                if (
+                    not shell.http
+                    and shell.settings.snapshot_on_start
+                    and (
+                        shell.settings.snapshot_dir
+                        or shell.settings.concept_snapshot_path
+                    )
                 ):
                     tg.start_soon(shell.snapshot_loop)
                 try:
@@ -798,7 +1063,7 @@ def build_server(shell: Shell) -> MCPServer:
 
     server = MCPServer(
         name="lore-vault",
-        instructions=INSTRUCTIONS,
+        instructions=HTTP_INSTRUCTIONS if shell.http else INSTRUCTIONS,
         version="0.1.0",
         lifespan=lifespan,
     )
@@ -811,15 +1076,17 @@ def build_server(shell: Shell) -> MCPServer:
             str | None,
             Field(description="action='set' 時的目標：'dev'、'lore' 或 'personal'"),
         ] = None,
+        ctx: Context | None = None,
     ) -> str:
-        return _dump(shell.space_tool(action, value))
+        with shell.request_scope(ctx):
+            return _dump(shell.space_tool(action, value))
 
     async def vault_resolve(
         cwd: Annotated[
             str | None,
             Field(
-                description="專案目錄（只用於 dev）；省略時用殼啟動時的工作目錄"
-                "（通常是專案根）"
+                description="專案目錄（只用於 dev、只限本地 stdio 殼）；省略時用殼"
+                "啟動時的工作目錄（通常是專案根）。HTTP 端點不接受，改傳 remote_url"
             ),
         ] = None,
         create: Annotated[
@@ -840,12 +1107,24 @@ def build_server(shell: Shell) -> MCPServer:
         key: Annotated[
             str | None,
             Field(
-                description="直接指定 vault key（不經 cwd 推算）。lore／personal 必填，"
-                "且必須以 '<space>/' 開頭，如 'lore/aeswir-arc'"
+                description="直接指定 vault key（不經 cwd／remote_url 推算）。"
+                "lore／personal 必填，且必須以 '<space>/' 開頭，如 'lore/aeswir-arc'"
             ),
         ] = None,
+        remote_url: Annotated[
+            str | None,
+            Field(
+                description="專案的 git remote（在專案目錄執行 `git remote get-url "
+                "origin` 的輸出原樣傳入；只用於 dev），服務依與 cwd 相同的規則正規化"
+                "成 key。HTTP 端點用這個取代 cwd"
+            ),
+        ] = None,
+        ctx: Context | None = None,
     ) -> str:
-        return _dump(await shell.vault_resolve(cwd, create, display, space, key))
+        with shell.request_scope(ctx):
+            return _dump(
+                await shell.vault_resolve(cwd, create, display, space, key, remote_url)
+            )
 
     async def recall(
         query: Annotated[str, Field(description="查詢詞（中英文、識別字皆可）")],
@@ -864,8 +1143,10 @@ def build_server(shell: Shell) -> MCPServer:
             int | None,
             Field(description="所有結果 title+summary 字數總和上限，預設 2000"),
         ] = None,
+        ctx: Context | None = None,
     ) -> str:
-        return _dump(await shell.recall(query, vault, kinds, limit, budget))
+        with shell.request_scope(ctx):
+            return _dump(await shell.recall(query, vault, kinds, limit, budget))
 
     async def ask(
         question: Annotated[str, Field(description="要問的問題（自然語言）")],
@@ -881,8 +1162,10 @@ def build_server(shell: Shell) -> MCPServer:
             int | None,
             Field(description="取前幾則 note 當片段，預設 10、上限 20"),
         ] = None,
+        ctx: Context | None = None,
     ) -> str:
-        return _dump(await shell.ask(question, vault, kinds, k))
+        with shell.request_scope(ctx):
+            return _dump(await shell.ask(question, vault, kinds, k))
 
     async def get(
         vault: VaultArg,
@@ -897,8 +1180,10 @@ def build_server(shell: Shell) -> MCPServer:
             int | None,
             Field(description="所有 body 字數總和上限，預設 12000；超過的截斷並標示"),
         ] = None,
+        ctx: Context | None = None,
     ) -> str:
-        return _dump(await shell.get(vault, ids, budget))
+        with shell.request_scope(ctx):
+            return _dump(await shell.get(vault, ids, budget))
 
     async def list_(
         vault: VaultArg,
@@ -918,8 +1203,10 @@ def build_server(shell: Shell) -> MCPServer:
             list[str] | None,
             Field(description="'note'／'document'，預設兩者；指定 topics 時只列 note"),
         ] = None,
+        ctx: Context | None = None,
     ) -> str:
-        return _dump(await shell.list_(vault, since, topics, cursor, limit, kinds))
+        with shell.request_scope(ctx):
+            return _dump(await shell.list_(vault, since, topics, cursor, limit, kinds))
 
     async def write(
         vault: Annotated[str, Field(description="vault key（單一 vault，不可 '*'）")],
@@ -936,12 +1223,14 @@ def build_server(shell: Shell) -> MCPServer:
             str | None,
             Field(description=AUTHOR_FIELD_DESCRIPTION),
         ] = None,
+        ctx: Context | None = None,
     ) -> str:
-        return _dump(
-            await shell.write(
-                vault, title, body, topics, links, supersedes, author=author
+        with shell.request_scope(ctx):
+            return _dump(
+                await shell.write(
+                    vault, title, body, topics, links, supersedes, author=author
+                )
             )
-        )
 
     async def update(
         vault: Annotated[str, Field(description="vault key（單一 vault）")],
@@ -965,57 +1254,78 @@ def build_server(shell: Shell) -> MCPServer:
             str | None,
             Field(description=AUTHOR_FIELD_DESCRIPTION + "（記為最後修改者）"),
         ] = None,
+        ctx: Context | None = None,
     ) -> str:
-        return _dump(
-            await shell.update(
-                vault,
-                id,
-                expected_updated,
-                title,
-                body,
-                topics,
-                links,
-                supersedes,
-                author=author,
+        with shell.request_scope(ctx):
+            return _dump(
+                await shell.update(
+                    vault,
+                    id,
+                    expected_updated,
+                    title,
+                    body,
+                    topics,
+                    links,
+                    supersedes,
+                    author=author,
+                )
             )
-        )
 
     async def upload(
         path: Annotated[
-            str,
+            str | None,
             Field(
-                description="本機檔案路徑（絕對，或相對於殼的工作目錄）；必須在殼工作"
-                "目錄或 mcp.upload_roots 之下，不可含 '..'"
+                description="本機檔案路徑（只限本地 stdio 殼；絕對，或相對於殼的工作"
+                "目錄）；必須在殼工作目錄或 mcp.upload_roots 之下，不可含 '..'。"
+                "與 filename／content_base64 擇一"
             ),
-        ],
+        ] = None,
         vault: Annotated[
             str | None,
             Field(
-                description="vault key（單一 vault）。dev 省略時用殼工作目錄 binding；"
-                "lore／personal 必填"
+                description="vault key（單一 vault）。stdio 的 dev 省略時用殼工作目錄 "
+                "binding；lore／personal 與 HTTP 端點必填"
             ),
         ] = None,
+        filename: Annotated[
+            str | None,
+            Field(
+                description="上傳內容的檔名（不含路徑，副檔名決定格式）；"
+                "與 content_base64 一起用，HTTP 端點只能用這個方式"
+            ),
+        ] = None,
+        content_base64: Annotated[
+            str | None,
+            Field(description="檔案內容的 base64（標準字母表）；與 filename 一起用"),
+        ] = None,
+        ctx: Context | None = None,
     ) -> str:
-        return _dump(await shell.upload(path, vault))
+        with shell.request_scope(ctx):
+            return _dump(await shell.upload(path, vault, filename, content_base64))
 
     async def status(
         vault: Annotated[
             str | None, Field(description="另附該 vault 的筆數與最近更新")
         ] = None,
+        ctx: Context | None = None,
     ) -> str:
-        return _dump(await shell.status(vault))
+        with shell.request_scope(ctx):
+            return _dump(await shell.status(vault))
 
     descriptions = {
         "space": (
             "查詢或切換「目前 space」：dev（開發記憶，預設）、lore（世界觀）、"
             "personal（私人）。其他工具只看得到目前 space 的內容（vault='*' 也只涵蓋"
-            "目前 space）。只在本殼行程的記憶體中，新 session 一律回到 dev。"
+            "目前 space）。只在記憶體中（本地殼依行程、HTTP 端點依 MCP session），"
+            "新 session 一律回到 dev。"
         ),
         "vault_resolve": (
-            "取得 vault key。dev：由 cwd 的 git remote 算出（自動解析改名別名）；"
-            "lore／personal：沒有 repo，必須帶 key（'<space>/名稱'），cwd 會被忽略。"
-            "每個 session 開始時先呼叫一次，之後所有工具都帶回傳的 key。"
-            "vault 不存在會回錯誤；確認要建記憶時才用 create=true 建立。"
+            "取得 vault key。dev：由專案的 git remote 算出（自動解析改名別名）——"
+            "本地 stdio 殼可用 cwd（省略時用殼的工作目錄）；HTTP 端點看不到你的檔案"
+            "系統，改傳 remote_url（`git remote get-url origin` 的輸出），沒有 remote "
+            "時直接給 key。lore／personal：沒有 repo，必須帶 key（'<space>/名稱'），"
+            "cwd／remote_url 會被忽略。每個 session 開始時先呼叫一次，之後所有工具都帶"
+            "回傳的 key。vault 不存在會回錯誤；確認要建記憶時才用 create=true 建立。"
         ),
         "recall": (
             "在 vault 內檢索記憶與已上傳文件（關鍵字 + 語意）。note 只回 id、標題、"
@@ -1063,11 +1373,14 @@ def build_server(shell: Shell) -> MCPServer:
             "上傳本機文件（md、txt、程式碼、json、yaml、toml、pdf、docx、pptx；單檔 "
             "25MB）到目前 space 的 vault。回 document_id 與 status（pending：背景抽取"
             "中）；同內容再傳回 duplicate=true；同檔名不同內容為新版本（supersedes）。"
-            "只能讀殼工作目錄或 mcp.upload_roots 之下的檔案。服務不可達時直接失敗。"
+            "兩種給法擇一：path（只限本地 stdio 殼，只能讀殼工作目錄或 "
+            "mcp.upload_roots 之下的檔案），或 filename + content_base64（HTTP 端點"
+            "只能用這個）。服務不可達時直接失敗。"
         ),
         "status": (
-            "服務健康狀態（doctor 對帳、補算積壓、schema 版本）與本地快照狀態。"
-            "服務不可達時仍回傳殼端狀態並標 degraded。"
+            "服務健康狀態（doctor 對帳、補算積壓、schema 版本）。本地 stdio 殼另附"
+            "本地快照狀態（shell），服務不可達時仍回傳殼端狀態並標 degraded；"
+            "HTTP 端點另附 mcp（模式與目前 space）。"
         ),
     }
     for name, fn in (
