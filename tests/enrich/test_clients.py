@@ -172,3 +172,31 @@ def test_urllib_connection_refused_is_provider_unavailable(monkeypatch):
     monkeypatch.setattr(clients.urllib.request, "urlopen", boom)
     with pytest.raises(ProviderUnavailable):
         clients.urllib_transport("http://127.0.0.1:9/x", b"{}", {}, 0.1)
+
+
+def test_urllib_transport_sends_lore_vault_user_agent(monkeypatch):
+    """Cloudflare 1010 會擋預設的 Python-urllib UA；預設傳輸必須帶自訂 UA，
+    呼叫端自帶的 UA 保留。"""
+    seen = []
+
+    class _Resp:
+        status = 200
+        headers = {}
+
+        def read(self):
+            return b"{}"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def capture(request, timeout):
+        seen.append(request.get_header("User-agent"))
+        return _Resp()
+
+    monkeypatch.setattr(clients.urllib.request, "urlopen", capture)
+    clients.urllib_transport("http://127.0.0.1:9/x", b"{}", {}, 0.1)
+    clients.urllib_transport("http://127.0.0.1:9/x", None, {"User-Agent": "c/1"}, 0.1)
+    assert seen == ["lore-vault-enrich/0.1.0", "c/1"]

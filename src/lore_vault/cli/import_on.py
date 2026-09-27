@@ -58,6 +58,7 @@ from typing import Any, TextIO
 
 from lore_vault.binding import folder_key, lookup_key, resolve_binding
 from lore_vault.config import configured_principal
+from lore_vault.hooks.service import with_user_agent
 from lore_vault.notes import links as links_rules
 from lore_vault.schema import (
     AUTHOR_LEGACY,
@@ -111,7 +112,9 @@ class OnImportError(Exception):
 def urllib_getter(
     url: str, headers: Mapping[str, str], timeout: float
 ) -> tuple[int, bytes]:
-    request = urllib.request.Request(url, headers=dict(headers), method="GET")
+    request = urllib.request.Request(
+        url, headers=with_user_agent(dict(headers), "import"), method="GET"
+    )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as resp:
             return resp.status, resp.read()

@@ -6,6 +6,10 @@
 
 兩者對 spool 的處理相同（留在本地、下次再推），分開是為了讓訊息指出要查哪裡。
 不跟隨重導向；例外訊息只含狀態碼與錯誤類型，不含 header 或 token。
+
+所有 urllib 出口一律帶 `User-Agent: lore-vault-<元件>/<版本>`：Cloudflare 的
+Browser Integrity Check（error 1010）會以 403 擋下預設的 `Python-urllib/3.x`。
+`user_agent`／`with_user_agent` 是集中點，非 hook 模組（CLI、enrich）也從這裡取。
 """
 
 from __future__ import annotations
@@ -22,6 +26,25 @@ UNREACHABLE_STATUSES = frozenset({502, 503, 504, 521, 522, 523, 524, 530})
 _MAX_DETAIL = 200
 # 4xx 回應 body 的讀取上限（逐筆結果用；超過就不解析，只留狀態碼）
 _MAX_ERROR_BODY = 4 * 1024 * 1024
+
+# 與 pyproject.toml 的 project.version 同步（有測試守護）。hook 路徑每次編輯都跑，
+# 不用 importlib.metadata：避免 import 成本，也避免套件未安裝時拿不到版本
+CLIENT_VERSION = "0.1.0"
+
+
+def user_agent(component: str) -> str:
+    """`lore-vault-<component>/<CLIENT_VERSION>`。"""
+    return f"lore-vault-{component}/{CLIENT_VERSION}"
+
+
+def with_user_agent(
+    headers: dict[str, str] | None = None, component: str = "hook"
+) -> dict[str, str]:
+    """回傳補上 User-Agent 的 header 副本；呼叫端已自帶（不分大小寫）就保留原值。"""
+    out = dict(headers or {})
+    if not any(key.lower() == "user-agent" for key in out):
+        out["User-Agent"] = user_agent(component)
+    return out
 
 
 class ServiceError(Exception):
@@ -124,7 +147,7 @@ def request_json(
     url = settings.url + path
     if query:
         url += "?" + urllib.parse.urlencode(query)
-    headers = {"Accept": "application/json", **auth_headers(settings)}
+    headers = with_user_agent({"Accept": "application/json", **auth_headers(settings)})
     data = None
     if body is not None:
         data = json.dumps(body, ensure_ascii=False).encode("utf-8")

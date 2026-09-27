@@ -1115,3 +1115,28 @@ def test_orphan_map_reads_codex_rollouts(fake, tmp_path):
     assert first["candidates"][0]["cwd"] == "C:/w/beta"  # 最近一次 turn_context
     assert second["needs_review"] and second["candidates"] == []
     assert "機密正文" not in json.dumps(orphan_map, ensure_ascii=False)
+
+
+def test_urllib_getter_sends_lore_vault_user_agent(monkeypatch):
+    """Cloudflare 1010 會擋預設的 Python-urllib UA；預設 getter 必須帶自訂 UA。"""
+    seen = []
+
+    class _Resp:
+        status = 200
+
+        def read(self):
+            return b"[]"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def capture(request, timeout):
+        seen.append(request.get_header("User-agent"))
+        return _Resp()
+
+    monkeypatch.setattr(mod.urllib.request, "urlopen", capture)
+    assert mod.urllib_getter("http://127.0.0.1:9/api/notes", {}, 0.1) == (200, b"[]")
+    assert seen == ["lore-vault-import/0.1.0"]

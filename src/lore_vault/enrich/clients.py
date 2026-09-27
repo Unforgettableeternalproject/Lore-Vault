@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from lore_vault.config import EmbeddingConfig, Secret, SummaryConfig
+from lore_vault.hooks.service import with_user_agent
 
 # 錯誤訊息中回應內容最多帶幾個字
 _BODY_EXCERPT = 200
@@ -77,7 +78,9 @@ def urllib_transport(
 
     HTTP 錯誤狀態照樣回傳，由用戶端判斷。
     """
-    request = urllib.request.Request(url, data=body, headers=dict(headers))
+    request = urllib.request.Request(
+        url, data=body, headers=with_user_agent(dict(headers), "enrich")
+    )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as resp:
             return HttpResponse(resp.status, resp.read(), dict(resp.headers.items()))
