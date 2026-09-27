@@ -2,7 +2,7 @@
 
 設定鍵：
 - `spool_dir`：spool 目錄（未設 → skipped）；
-  spike 預設 `~/.claude/agent-memory-spike/spool`
+  spike 預設 `~/.lore-vault/spool`（D5 前為 `~/.claude/agent-memory-spike/spool`）
 - `client_env`：hook 端設定檔（判斷「推送未設定」）；未設時用 `spool_dir` 上一層的
   `client.env`（與 spike `paths.CLIENT_ENV_PATH` 同位置）。只讀檔案，不看行程環境變數
 - `spool_warn_age_hours`（預設 1）、`spool_fail_age_hours`（預設 24）：

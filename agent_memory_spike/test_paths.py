@@ -2,9 +2,10 @@
 
 守三件事：
 1. 資料根目錄只在 ``paths.py`` 定義一次，其他模組不得再自己拼
-   ``~/.claude/agent-memory-spike``——拼了就會在 D5 搬家時漏改。
-2. 集中後各模組解析出的路徑與集中前逐一相同（值待 D5 定案才改）。
+   ``~/.lore-vault``（或 D5 前的 ``~/.claude/agent-memory-spike``）。
+2. 各模組解析出的路徑逐一符合登記表（D5 後根目錄為 ``~/.lore-vault``）。
 3. ``LORE_VAULT_SPIKE_HOME`` 覆寫會帶到所有衍生路徑。
+4. D5 過渡 fallback 以整根目錄切換：只有新位置沒有 ``episodes/``、舊位置有時才用舊位置。
 """
 
 from __future__ import annotations
@@ -19,53 +20,57 @@ from pathlib import Path
 
 HERE = Path(__file__).parent
 
-# 集中前（T-10 動工前）各模組的路徑常數，相對於家目錄。
+# 各模組的路徑常數，相對於家目錄。T-10 集中時逐一對過集中前的值；
+# D5 只把根目錄從 .claude/agent-memory-spike 換成 .lore-vault，相對結構不變。
 # 鍵集合也要一致：少了代表某個 monkeypatch 目標消失，多了代表新漏出一個名稱。
 BEFORE = {
-    "calibrate.DEFAULT_CONCEPT_PATH": ".claude/agent-memory-spike/concepts.json",
-    "calibrate.DEFAULT_EPISODE_DIR": ".claude/agent-memory-spike/episodes",
-    "calibrate.DEFAULT_INJECTION_PATH": ".claude/agent-memory-spike/injection_tasks.json",
-    "calibrate.DEFAULT_PROBE_PATH": ".claude/agent-memory-spike/probe_tasks.json",
-    "calibrate.WORK_DIR": ".claude/agent-memory-spike",
-    "consolidate.DEFAULT_CONCEPT_PATH": ".claude/agent-memory-spike/concepts.json",
-    "consolidate.DEFAULT_PAIR_PATH": ".claude/agent-memory-spike/consolidate_pairs.json",
-    "consolidate.WORK_DIR": ".claude/agent-memory-spike",
-    "distill.DEFAULT_CONCEPT_PATH": ".claude/agent-memory-spike/concepts.json",
-    "distill.DEFAULT_EPISODE_DIR": ".claude/agent-memory-spike/episodes",
-    "distill.DEFAULT_TASK_PATH": ".claude/agent-memory-spike/distill_tasks.json",
-    "distill.DEFAULT_WATERMARK_PATH": ".claude/agent-memory-spike/distilled.json",
-    "distill.WORK_DIR": ".claude/agent-memory-spike",
-    "hook_health_alert.EPISODE_DIR": ".claude/agent-memory-spike/episodes",
-    "hook_health_alert.INJECTION_LOG": ".claude/agent-memory-spike/injections.jsonl",
-    "hook_health_alert.LOG_DIR": ".claude/agent-memory-spike/logs",
-    "hook_health_alert.STATE_PATH": ".claude/agent-memory-spike/pipeline_state.json",
-    "hook_health_alert.WORK_DIR": ".claude/agent-memory-spike",
-    "hook_pretooluse.CONCEPT_PATH": ".claude/agent-memory-spike/concepts.json",
-    "hook_pretooluse.INJECTION_LOG": ".claude/agent-memory-spike/injections.jsonl",
-    "hook_pretooluse.STATE_DIR": ".claude/agent-memory-spike/inject_state",
-    "hook_pretooluse.TOUCH_LOG": ".claude/agent-memory-spike/touches.jsonl",
-    "hook_pretooluse.WORK_DIR": ".claude/agent-memory-spike",
-    "hook_session_start.CONCEPT_PATH": ".claude/agent-memory-spike/concepts.json",
-    "hook_session_start.INJECTION_LOG": ".claude/agent-memory-spike/injections.jsonl",
-    "hook_stop.DEFAULT_EPISODE_DIR": ".claude/agent-memory-spike/episodes",
-    "hook_userpromptsubmit.CONCEPT_PATH": ".claude/agent-memory-spike/concepts.json",
-    "hook_userpromptsubmit.INJECTION_LOG": ".claude/agent-memory-spike/injections.jsonl",
-    "pipeline.DEFAULT_EPISODE_DIR": ".claude/agent-memory-spike/episodes",
-    "pipeline.LOCK_PATH": ".claude/agent-memory-spike/pipeline.lock",
-    "pipeline.STATE_PATH": ".claude/agent-memory-spike/pipeline_state.json",
-    "pipeline.WORK_DIR": ".claude/agent-memory-spike",
+    "calibrate.DEFAULT_CONCEPT_PATH": ".lore-vault/concepts.json",
+    "calibrate.DEFAULT_EPISODE_DIR": ".lore-vault/episodes",
+    "calibrate.DEFAULT_INJECTION_PATH": ".lore-vault/injection_tasks.json",
+    "calibrate.DEFAULT_PROBE_PATH": ".lore-vault/probe_tasks.json",
+    "calibrate.WORK_DIR": ".lore-vault",
+    "consolidate.DEFAULT_CONCEPT_PATH": ".lore-vault/concepts.json",
+    "consolidate.DEFAULT_PAIR_PATH": ".lore-vault/consolidate_pairs.json",
+    "consolidate.WORK_DIR": ".lore-vault",
+    "distill.DEFAULT_CONCEPT_PATH": ".lore-vault/concepts.json",
+    "distill.DEFAULT_EPISODE_DIR": ".lore-vault/episodes",
+    "distill.DEFAULT_TASK_PATH": ".lore-vault/distill_tasks.json",
+    "distill.DEFAULT_WATERMARK_PATH": ".lore-vault/distilled.json",
+    "distill.WORK_DIR": ".lore-vault",
+    "hook_health_alert.EPISODE_DIR": ".lore-vault/episodes",
+    "hook_health_alert.INJECTION_LOG": ".lore-vault/injections.jsonl",
+    "hook_health_alert.LOG_DIR": ".lore-vault/logs",
+    "hook_health_alert.STATE_PATH": ".lore-vault/pipeline_state.json",
+    "hook_health_alert.WORK_DIR": ".lore-vault",
+    "hook_pretooluse.CONCEPT_PATH": ".lore-vault/concepts.json",
+    "hook_pretooluse.INJECTION_LOG": ".lore-vault/injections.jsonl",
+    "hook_pretooluse.STATE_DIR": ".lore-vault/inject_state",
+    "hook_pretooluse.TOUCH_LOG": ".lore-vault/touches.jsonl",
+    "hook_pretooluse.WORK_DIR": ".lore-vault",
+    "hook_session_start.CONCEPT_PATH": ".lore-vault/concepts.json",
+    "hook_session_start.INJECTION_LOG": ".lore-vault/injections.jsonl",
+    "hook_stop.DEFAULT_EPISODE_DIR": ".lore-vault/episodes",
+    "hook_userpromptsubmit.CONCEPT_PATH": ".lore-vault/concepts.json",
+    "hook_userpromptsubmit.INJECTION_LOG": ".lore-vault/injections.jsonl",
+    "pipeline.DEFAULT_EPISODE_DIR": ".lore-vault/episodes",
+    "pipeline.LOCK_PATH": ".lore-vault/pipeline.lock",
+    "pipeline.STATE_PATH": ".lore-vault/pipeline_state.json",
+    "pipeline.WORK_DIR": ".lore-vault",
     # 階段 8 新增（不是集中前就有的常數；新名稱在此登記）
-    "hook_pretooluse.CLIENT_ENV_PATH": ".claude/agent-memory-spike/client.env",
-    "hook_stop.CLIENT_ENV_PATH": ".claude/agent-memory-spike/client.env",
-    "pipeline.CLIENT_ENV_PATH": ".claude/agent-memory-spike/client.env",
-    "pipeline.CONCEPT_PATH": ".claude/agent-memory-spike/concepts.json",
-    "retrieve.CONTROL_CONCEPT_PATH": ".claude/agent-memory-spike/control_concepts.json",
-    "retrieve.DEFAULT_CONCEPT_PATH": ".claude/agent-memory-spike/concepts.json",
-    "retrieve.DEFAULT_EPISODE_DIR": ".claude/agent-memory-spike/episodes",
-    "retrieve.WORK_DIR": ".claude/agent-memory-spike",
-    "transcript.INJECTION_LOG": ".claude/agent-memory-spike/injections.jsonl",
-    "transcript.TOUCH_LOG": ".claude/agent-memory-spike/touches.jsonl",
+    "hook_pretooluse.CLIENT_ENV_PATH": ".lore-vault/client.env",
+    "hook_stop.CLIENT_ENV_PATH": ".lore-vault/client.env",
+    "pipeline.CLIENT_ENV_PATH": ".lore-vault/client.env",
+    "pipeline.CONCEPT_PATH": ".lore-vault/concepts.json",
+    "retrieve.CONTROL_CONCEPT_PATH": ".lore-vault/control_concepts.json",
+    "retrieve.DEFAULT_CONCEPT_PATH": ".lore-vault/concepts.json",
+    "retrieve.DEFAULT_EPISODE_DIR": ".lore-vault/episodes",
+    "retrieve.WORK_DIR": ".lore-vault",
+    "transcript.INJECTION_LOG": ".lore-vault/injections.jsonl",
+    "transcript.TOUCH_LOG": ".lore-vault/touches.jsonl",
+    # D5 新增：健康告警對帳舊位置用（覆寫根目錄時不在根目錄底下，不列入覆寫比對）
+    "hook_health_alert.LEGACY_WORK_DIR": ".claude/agent-memory-spike",
 }
+LEGACY_ONLY = {"hook_health_alert.LEGACY_WORK_DIR"}
 
 MODULES = sorted({key.split(".")[0] for key in BEFORE})
 
@@ -105,7 +110,7 @@ def _dump(tmp_path: Path, **extra_env: str) -> dict[str, str]:
 
 
 def test_every_module_resolves_the_same_paths_as_before(tmp_path):
-    """集中前後逐一相同；D5 真的改根目錄時這裡會紅，那是要的訊號。"""
+    """逐一符合登記表；根目錄再變動時這裡會紅，那是要的訊號。"""
     assert _dump(tmp_path) == BEFORE
 
 
@@ -113,14 +118,19 @@ def test_env_override_moves_every_derived_path(tmp_path):
     override = tmp_path / "vault-data"
     got = _dump(tmp_path, LORE_VAULT_SPIKE_HOME=str(override))
     # 覆寫根目錄本身就是 WORK_DIR，相對路徑只剩根目錄以下那段
-    prefix = ".claude/agent-memory-spike"
-    expected = {k: v[len(prefix):].lstrip("/") or "." for k, v in BEFORE.items()}
+    prefix = ".lore-vault"
+    expected = {
+        k: v[len(prefix):].lstrip("/") or "."
+        for k, v in BEFORE.items()
+        if k not in LEGACY_ONLY
+    }
     assert got == expected
 
 
 # ---- 「還有模組自己拼資料根目錄」的掃描 ----
 
 SPIKE_DIRNAME = "agent-memory-spike"
+DATA_DIRNAMES = (SPIKE_DIRNAME, ".lore-vault")
 _PATH_HINTS = ("Path(", "expanduser", "os.path.join", "Path.home")
 
 
@@ -131,18 +141,20 @@ def find_hardcoded_spike_paths(source: str) -> list[int]:
     提示訊息、XML 屬性裡出現目錄名也不算——只抓兩種「拿來當路徑」的形狀：
     ``... / "agent-memory-spike"`` 這種路徑片段，以及同一行有 ``Path(``／
     ``Path.home``／``expanduser``／``os.path.join`` 又帶到目錄名的字串。
+    新舊目錄名（``DATA_DIRNAMES``）都抓：舊名防回退，新名防另起爐灶。
     """
     hits: list[int] = []
     lines = source.splitlines()
     prev_significant = None
     for tok in tokenize.generate_tokens(io.StringIO(source).readline):
-        if tok.type == tokenize.STRING and SPIKE_DIRNAME in tok.string:
+        name = next((d for d in DATA_DIRNAMES if d in tok.string), None)
+        if tok.type == tokenize.STRING and name:
             is_docstring = prev_significant in (None, tokenize.NEWLINE, tokenize.INDENT,
                                                 tokenize.DEDENT)
             value = tok.string.strip("rbuRBUfF").strip("'\"")
             line = lines[tok.start[0] - 1]
             if not is_docstring and (
-                value == SPIKE_DIRNAME or any(h in line for h in _PATH_HINTS)
+                value == name or any(h in line for h in _PATH_HINTS)
             ):
                 hits.append(tok.start[0])
         if tok.type not in (tokenize.COMMENT, tokenize.NL):
@@ -158,6 +170,17 @@ def test_scanner_flags_the_pre_t10_hardcoding():
         'X = Path("~/.claude/agent-memory-spike/logs").expanduser()\n'
     )
     assert find_hardcoded_spike_paths(legacy) == [2, 3]
+
+
+def test_scanner_flags_hardcoding_the_new_root():
+    """D5 後的新目錄名一樣只能在 paths.py 出現。"""
+    source = (
+        "from pathlib import Path\n"
+        'A = Path.home() / ".lore-vault" / "episodes"\n'
+        'B = Path("~/.lore-vault/logs").expanduser()\n'
+        'HINT = "查法：`~/.lore-vault/logs/`"\n'
+    )
+    assert find_hardcoded_spike_paths(source) == [2, 3]
 
 
 def test_scanner_ignores_docs_and_display_strings():
@@ -180,3 +203,59 @@ def test_only_paths_module_hardcodes_the_data_root():
             offenders[py.name] = hits
     assert offenders == {}, f"資料根目錄應只在 paths.py 定義：{offenders}"
 
+
+def test_run_pipeline_ps1_takes_log_dir_from_paths():
+    """排程腳本不在 Python 掃描範圍內，另外守：log 目錄要從 paths.LOG_DIR 取，不寫死。"""
+    text = (HERE / "run_pipeline.ps1").read_text(encoding="utf-8-sig")
+    assert "paths.LOG_DIR" in text
+    assert SPIKE_DIRNAME not in text
+
+
+# ---- D5 過渡 fallback：整根目錄切換 ----
+
+_WORK_DIR = """
+import sys
+sys.path.insert(0, sys.argv[1])
+import paths
+print(paths.WORK_DIR)
+"""
+
+
+def _work_dir(home: Path, *mkdirs: str, **extra_env: str) -> Path:
+    home.mkdir(exist_ok=True)
+    for rel in mkdirs:
+        (home / rel).mkdir(parents=True)
+    env = {k: v for k, v in os.environ.items() if k != "LORE_VAULT_SPIKE_HOME"}
+    env.update(HOME=str(home), USERPROFILE=str(home), **extra_env)
+    proc = subprocess.run(
+        [sys.executable, "-S", "-c", _WORK_DIR, str(HERE)],
+        env=env, capture_output=True, text=True, encoding="utf-8", check=True,
+    )
+    return Path(proc.stdout.strip())
+
+
+def test_fresh_machine_uses_new_root(tmp_path):
+    home = tmp_path / "home"
+    assert _work_dir(home) == home / ".lore-vault"
+
+
+def test_unmigrated_legacy_data_keeps_the_old_root(tmp_path):
+    """舊位置有語料、新位置沒有：整根留在舊位置，Stop hook 寫入與管線讀取不分裂。"""
+    home = tmp_path / "home"
+    got = _work_dir(home, ".claude/agent-memory-spike/episodes", ".lore-vault/snapshot")
+    assert got == home / ".claude" / "agent-memory-spike"
+
+
+def test_new_root_wins_once_episodes_land(tmp_path):
+    """episodes/ 搬到新位置就整根切過去，舊位置殘留也不會拉回去。"""
+    home = tmp_path / "home"
+    got = _work_dir(home, ".claude/agent-memory-spike/episodes", ".lore-vault/episodes")
+    assert got == home / ".lore-vault"
+
+
+def test_env_override_skips_fallback(tmp_path):
+    home = tmp_path / "home"
+    override = tmp_path / "vault-data"
+    got = _work_dir(home, ".claude/agent-memory-spike/episodes",
+                    LORE_VAULT_SPIKE_HOME=str(override))
+    assert got == override

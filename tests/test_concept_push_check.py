@@ -1,6 +1,6 @@
 """doctor `concept_push.lag`：服務端 concept 是否落後主機本地 concepts.json。
 
-全部在 tmp_path 建 spike 資料目錄，不碰 ~/.claude/agent-memory-spike，也不連服務。
+全部在 tmp_path 建 spike 資料目錄，不碰 ~/.lore-vault，也不連服務。
 """
 
 from __future__ import annotations

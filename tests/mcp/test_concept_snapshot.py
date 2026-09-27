@@ -46,7 +46,7 @@ def test_default_path_is_inside_snapshot_dir(tmp_path):
     with_dir = load_shell_settings(
         environ={**env, "LORE_VAULT_MCP_SNAPSHOT_DIR": str(tmp_path)}
     )
-    # 刻意不預設成 spike 現行的 ~/.claude/agent-memory-spike/concepts.json
+    # 刻意不預設成 spike 管線的 ~/.lore-vault/concepts.json（快照在 snapshot/ 底下）
     assert with_dir.concept_snapshot_path == tmp_path / "concepts.json"
     explicit = load_shell_settings(
         environ={

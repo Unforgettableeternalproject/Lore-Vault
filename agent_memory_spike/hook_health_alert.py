@@ -36,8 +36,10 @@ from typing import Any
 # paths.py 只用標準庫、不 import 同目錄模組，不破壞本 hook「不 import transcript」的性質
 sys.path.insert(0, str(Path(__file__).parent))
 from paths import (  # noqa: E402
+    DATA_MARKER,
     EPISODE_DIR,
     INJECTION_LOG,
+    LEGACY_WORK_DIR,
     LOG_DIR,
     WORK_DIR,
 )
@@ -118,6 +120,18 @@ def collect_alerts() -> list[str]:
     if age is not None and age > SILENT_INJECT_DAYS:
         alerts.append(f"已 {age:.0f} 天沒有任何記憶被注入，可能是 scope 對不上（例如 repo 改名）")
 
+    # 5. D5 資料目錄改名的對帳。paths 以整根目錄切換，這裡看兩種沒切乾淨的狀態：
+    #    還在用舊位置（fallback 生效），或新舊兩邊都有 episodes/（寫入已分裂）
+    try:
+        if WORK_DIR == LEGACY_WORK_DIR:
+            alerts.append(f"資料目錄仍在舊位置 `{LEGACY_WORK_DIR}`（D5 過渡 fallback），"
+                          "請搬到 `~/.lore-vault/`")
+        elif (LEGACY_WORK_DIR / DATA_MARKER).is_dir():
+            alerts.append(f"舊資料目錄 `{LEGACY_WORK_DIR}` 仍有 {DATA_MARKER}/，"
+                          f"與 `{WORK_DIR}` 的語料可能分裂")
+    except OSError:
+        pass
+
     return alerts
 
 
@@ -126,7 +140,7 @@ def format_alert(alerts: list[str]) -> str:
              "⚠️ coding agent 記憶層有異常，這是自動健檢的結果："]
     lines += [f"- {a}" for a in alerts]
     lines.append("查法：`python agent_memory_spike/hook_stop.py --doctor`、"
-                 "`~/.claude/agent-memory-spike/logs/`")
+                 "`~/.lore-vault/logs/`")
     lines.append("</agent-memory-health>")
     return "\n".join(lines)
 

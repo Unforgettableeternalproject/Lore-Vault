@@ -49,6 +49,9 @@ def work(tmp_path, monkeypatch):
     monkeypatch.setattr(health, "STATE_PATH", state)
     monkeypatch.setattr(health, "EPISODE_DIR", episodes)
     monkeypatch.setattr(health, "INJECTION_LOG", injections)
+    # D5 對帳看真實家目錄的舊位置，一律隔離到 tmp
+    monkeypatch.setattr(health, "WORK_DIR", tmp_path)
+    monkeypatch.setattr(health, "LEGACY_WORK_DIR", tmp_path / "legacy")
     return tmp_path
 
 
@@ -115,6 +118,29 @@ def test_silent_injection_is_reported(work):
 def test_injection_gap_within_threshold_is_silent(work):
     """注入本來就稀疏（約 18%/編輯輪），幾天沒有是正常的，不能喊。"""
     _aged(work / "injections.jsonl", health.SILENT_INJECT_DAYS - 1)
+    assert health.collect_alerts() == []
+
+
+def test_legacy_fallback_in_use_is_reported(work, monkeypatch):
+    """D5：paths 還解析到舊位置代表資料沒搬，要講。"""
+    monkeypatch.setattr(health, "LEGACY_WORK_DIR", work)
+    alerts = health.collect_alerts()
+    assert len(alerts) == 1
+    assert "D5 過渡 fallback" in alerts[0]
+
+
+def test_split_between_new_and_legacy_is_reported(work):
+    """D5：新位置在用、舊位置又長出 episodes/，就是寫入分裂。"""
+    (work / "legacy" / "episodes").mkdir(parents=True)
+    alerts = health.collect_alerts()
+    assert len(alerts) == 1
+    assert "分裂" in alerts[0]
+
+
+def test_legacy_dir_without_episodes_is_silent(work):
+    """搬完留在舊位置的說明檔不算分裂。"""
+    (work / "legacy").mkdir()
+    (work / "legacy" / "README.txt").write_text("moved", encoding="utf-8")
     assert health.collect_alerts() == []
 
 

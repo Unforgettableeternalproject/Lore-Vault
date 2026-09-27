@@ -32,7 +32,7 @@
 2. **全域 hook 路徑**：`~/.claude/settings.json` 的 `SessionStart`（health alert）、`Stop`、`PreToolUse` 三個 hook 寫死舊絕對路徑。切換時**一次整批替換**，確認舊路徑完全移除——並存會造成一輪注入雙倍條目。
 3. **排程**：Windows 工作排程器 `AgentMemoryPipeline`（每日 03:30）指向舊 `run_pipeline.ps1`，要重新註冊。腳本內假設 repo 與 `U.E.P-s-Core` 同層並使用 U.E.P env——**本 repo 不依賴 U.E.P env**，要改用自己的直譯器。
 4. **PowerShell 腳本兩個坑要保留**：必須存成 UTF-8 with BOM（PS 5.1 會把無 BOM 的中文註解吃掉整行）；Python 輸出走 `cmd /c` 重導向，不用 `*>>`。
-5. **資料目錄**：目前在 `~/.claude/agent-memory-spike/`（約 90MB，含多份 `.bak-*` 與實驗中間產物）。是否改名、中間產物是否搬〔待定：D5〕。資料路徑常數散在 `transcript.py` / `hook_stop.py` 等處。
+5. **資料目錄**：原在 `~/.claude/agent-memory-spike/`（約 90MB，含多份 `.bak-*` 與實驗中間產物）。D5 已裁決並於 2026-09-27 完成：活資料搬到 `~/.lore-vault/`（與 MCP 殼同目錄，檔名不衝突），舊備份與實驗中間產物封存成主機備份目錄的 `spike-archive-20260927.zip`（80 個條目、1072 檔）。路徑常數集中在 `agent_memory_spike/paths.py`；過渡期新位置沒有 `episodes/`、舊位置有時整根 fallback 回舊位置，`hook_health_alert` 會告警。
 6. **hook 直譯器**：目前是系統 Python 3.14（`pythoncore-3.14-64`），hook 必須維持零依賴或只依賴該直譯器可用的套件。
 7. **對照組兩支**帶過來，README 延續「為什麼不掛」的說明，避免日後誤掛。
 8. **headless `claude -p` 的四個坑**（pipeline 裁決用）：吃全域 CLAUDE.md 與 SessionStart 注入、寫不進 `~/.claude/`、Bash allowlist 認字面路徑、prompt 走 stdin。

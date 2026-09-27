@@ -21,7 +21,11 @@ $repo = Split-Path -Parent $PSScriptRoot
 # 直譯器用本 repo 的 .venv（不依賴 U.E.P env）；由本檔位置推導，不寫死機器路徑
 $python = Join-Path $repo ".venv\Scripts\python.exe"
 $script = Join-Path $PSScriptRoot "pipeline.py"
-$logDir = Join-Path $env:USERPROFILE ".claude\agent-memory-spike\logs"
+# log 目錄以 paths.LOG_DIR 為準（唯一來源，含 D5 過渡 fallback 與 LORE_VAULT_SPIKE_HOME 覆寫）；
+# 取不到才退回預設位置，免得 log 無處可寫
+$logDir = & $python -S -c "import sys; sys.path.insert(0, sys.argv[1]); import paths; print(paths.LOG_DIR)" $PSScriptRoot 2>$null |
+    Select-Object -Last 1
+if (-not $logDir) { $logDir = Join-Path $env:USERPROFILE ".lore-vault\logs" }
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
 # 一天一檔。管線本身有 lockfile，重複觸發不會疊跑，log 用 append 也不會互相蓋掉

@@ -30,7 +30,7 @@ Coding agent 記憶層實驗。與 `echo_memory/` 完全無關——不 import�
 | `test_inject.py` | 3 | 注入 hook 測試（10 項） |
 | `test_pipeline.py` | 3 | 管線機制測試（11 項） |
 
-資料一律放在 repo 外的 `~/.claude/agent-memory-spike/`——hook 全域掛載，
+資料一律放在 repo 外的 `~/.lore-vault/`（D5 前為 `~/.claude/agent-memory-spike/`）——hook 全域掛載，
 會收到所有專案的對話原文，包含商業專案。
 
 ---
@@ -119,7 +119,7 @@ Stop hook 的 payload 有 `last_assistant_message`，看起來可以直接用。
 每個 session 一個 jsonl，append 寫入。不同 session 落在不同檔案，
 天然沒有跨程序寫入衝突——把鎖的問題留到真的要做跨 session 聚合時再解。
 
-存放位置：`~/.claude/agent-memory-spike/episodes/`，**刻意放在 repo 外面**。
+存放位置：`~/.lore-vault/episodes/`，**刻意放在 repo 外面**。
 
 這個 hook 是全域掛載的，會收到所有專案的對話原文，包含商業專案。
 放在 repo 內就算有 gitignore，仍有 `git add -f` 或規則變動而外洩的風險；
@@ -168,7 +168,7 @@ python hook_stop.py --repair-all
 python hook_stop.py --sync <transcript_path> --dry-run
 ```
 
-動語料前先備份 `~/.claude/agent-memory-spike/episodes/`——`--repair-all` 是不可逆的。
+動語料前先備份 `~/.lore-vault/episodes/`——`--repair-all` 是不可逆的。
 
 ## 量測（2026-07-25，Windows 11）
 

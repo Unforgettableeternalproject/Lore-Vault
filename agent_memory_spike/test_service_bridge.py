@@ -457,7 +457,7 @@ def test_push_concepts_other_rejections_still_raise(tmp_path, monkeypatch):
 
 @pytest.fixture
 def _isolated_state(tmp_path, monkeypatch):
-    """pipeline_state.json 指到 tmp：不碰 ~/.claude/agent-memory-spike。"""
+    """pipeline_state.json 指到 tmp：不碰 ~/.lore-vault。"""
     state_path = tmp_path / "pipeline_state.json"
     monkeypatch.setattr(pipeline, "STATE_PATH", state_path)
     return state_path

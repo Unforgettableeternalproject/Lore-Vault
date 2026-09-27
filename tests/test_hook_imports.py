@@ -238,6 +238,7 @@ def test_spike_hook_entrypoints_run_without_site_packages(tmp_path, args):
     assert result.returncode == 0, result.stderr
     assert "Traceback" not in result.stderr
     # 沒有寫出任何東西到家目錄以外；--dry-run／--stats 也不該建資料目錄
+    assert not (home / ".lore-vault" / "spool").exists()
     assert not (home / ".claude" / "agent-memory-spike" / "spool").exists()
 
 

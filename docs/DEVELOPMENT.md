@@ -553,7 +553,7 @@ hook 進入點（`agent_memory_spike/hook_stop.py`、`hook_pretooluse.py`）依�
 
 ### hook 端設定 `client.env`
 
-預設 `~/.claude/agent-memory-spike/client.env`（`paths.CLIENT_ENV_PATH`；`LORE_VAULT_CLIENT_ENV` 可改位置），
+預設 `~/.lore-vault/client.env`（`paths.CLIENT_ENV_PATH`；`LORE_VAULT_CLIENT_ENV` 可改位置），
 KEY=VALUE、只用標準庫解析；行程環境變數中同名鍵優先。
 
 | 鍵 | 說明 |
