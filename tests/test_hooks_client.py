@@ -537,3 +537,48 @@ def test_doctor_concept_snapshot_paths_skipped_when_either_side_unset(tmp_path):
     no_mcp = {"client_env": str(env), "config": None, "environ": {}}
     assert _agreement(no_mcp).status is Status.SKIPPED
     assert _agreement({}).status is Status.SKIPPED
+
+
+# ── User-Agent（Cloudflare Browser Integrity Check，error 1010）──
+
+
+def test_request_json_sends_lore_vault_user_agent():
+    """預設的 `Python-urllib/3.x` 會被 Cloudflare 1010 擋成 403；
+    hook／spike 共用的 `request_json` 必須帶自訂 UA。"""
+    from lore_vault.hooks import service
+
+    with FakeService(lambda *a: (200, {"items": []}, {})) as svc:
+        service.request_json(_settings(svc.url), "GET", "/v1/episodes", timeout=5)
+    [req] = svc.requests
+    assert req["headers"]["user-agent"] == "lore-vault-hook/0.1.1"
+
+
+def test_spool_push_sends_lore_vault_user_agent(tmp_path):
+    _spool_n(tmp_path, 1)
+    with FakeService() as svc:
+        spool.push_pending(tmp_path, _settings(svc.url))
+    assert [r["headers"]["user-agent"] for r in svc.requests] == [
+        "lore-vault-hook/0.1.1"
+    ]
+
+
+def test_with_user_agent_keeps_caller_value_case_insensitively():
+    from lore_vault.hooks.service import user_agent, with_user_agent
+
+    assert with_user_agent({"user-agent": "custom/1"}) == {"user-agent": "custom/1"}
+    assert with_user_agent({"A": "b"}, "enrich") == {
+        "A": "b",
+        "User-Agent": user_agent("enrich"),
+    }
+    assert user_agent("enrich") == "lore-vault-enrich/0.1.1"
+
+
+def test_client_version_matches_pyproject():
+    """hook 路徑不讀套件 metadata，用固定字串；不可與 pyproject 漂移。"""
+    import tomllib
+
+    from lore_vault.hooks.service import CLIENT_VERSION
+
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    assert CLIENT_VERSION == data["project"]["version"]

@@ -56,6 +56,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 INSTALLER_VERSION = "3"
+# Cloudflare Browser Integrity Check（error 1010）會以 403 擋下預設的
+# `Python-urllib/3.x`；本腳本獨立發佈、不 import lore_vault，所以自帶常數
+USER_AGENT = f"lore-vault-installer/{INSTALLER_VERSION}"
 MIN_PYTHON = (3, 12)
 
 DEFAULT_TIMEOUT = 15.0
@@ -838,6 +841,14 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def _with_user_agent(headers: dict[str, str]) -> dict[str, str]:
+    """補上 `USER_AGENT`；呼叫端已自帶 User-Agent（不分大小寫）就保留。"""
+    out = dict(headers)
+    if not any(key.lower() == "user-agent" for key in out):
+        out["User-Agent"] = USER_AGENT
+    return out
+
+
 def _classify_unreachable(detail: str) -> str:
     low = detail.lower()
     if "ssl" in low or "certificate" in low or "tls" in low:
@@ -875,7 +886,7 @@ def http_self_check(
         base_url.rstrip("/") + "/v1/status",
         data=None,
         method="POST",
-        headers=dict(headers),
+        headers=_with_user_agent(headers),
     )
     opener = urllib.request.build_opener(_NoRedirect())
     try:
@@ -949,7 +960,7 @@ def episode_ingest_check(
         base_url.rstrip("/") + "/v1/episodes",
         data=json.dumps({"episodes": []}).encode("utf-8"),
         method="POST",
-        headers={**headers, "Content-Type": "application/json"},
+        headers=_with_user_agent({**headers, "Content-Type": "application/json"}),
     )
     opener = urllib.request.build_opener(_NoRedirect())
     try:

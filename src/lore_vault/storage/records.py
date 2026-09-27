@@ -38,8 +38,18 @@ def _check_limit(limit: int) -> None:
 # ── Episode ─────────────────────────────────────────────────────────
 
 
-def insert_episode(conn: sqlite3.Connection, vault: str, episode: Episode) -> bool:
+def insert_episode(
+    conn: sqlite3.Connection,
+    vault: str,
+    episode: Episode,
+    *,
+    origin_key: str | None = None,
+) -> bool:
     """寫入一輪 episode。唯一鍵 (session_id, prompt_id, turn_index)。
+
+    `origin_key`：被改路由到雜項 vault 時，收料當下客戶端送來的原始 binding key
+    （D14，`vaults.route_episode_vault`）；其餘為 None。
+    重送比對不看它（由 vault 決定）。
 
     重送相同內容（spool 重試）→ 回傳 False、不寫入；
     同鍵但內容不同 → 拋 `DuplicateRecord`，不默默覆蓋。
@@ -69,8 +79,9 @@ def insert_episode(conn: sqlite3.Connection, vault: str, episode: Episode) -> bo
         conn.execute(
             """
             INSERT INTO episodes (vault, session_id, prompt_id, turn_index, machine,
-                                  repo, started_at, ended_at, data, recorded)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                  repo, started_at, ended_at, data, recorded,
+                                  origin_key)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 key,
@@ -83,6 +94,7 @@ def insert_episode(conn: sqlite3.Connection, vault: str, episode: Episode) -> bo
                 stored.ended_at,
                 data,
                 utc_now(),
+                origin_key,
             ),
         )
     return True
@@ -313,13 +325,18 @@ def export_concepts(conn: sqlite3.Connection, vault: str) -> tuple[list[Concept]
     回傳 (concept 清單, 被排除的 scope 缺欄位筆數)。scope 缺欄位（MISSING）的
     concept 不匯出：spike scorer 以 `concept.get("scope")` 判斷，缺鍵會被當成
     None＝跨專案通用而放行到所有 repo（spike 的 scope 三態事故）。
+
+    雜項 vault（D14）的 concept 排在最後、組內仍依 ord：PreToolUse scorer 的排序是
+    穩定的，同分時靠清單順序決勝，這就是雜項來源在注入時的降權（同分排後）。
     """
     scope = resolve_read(conn, vault, space=SPACE_DEV)
-    clause, params = vault_clause(scope, "vault")
+    clause, params = vault_clause(scope, "c.vault")
     rows = conn.execute(
         f"""
-        SELECT data, scope_state FROM concepts WHERE {clause}
-        ORDER BY ord, id
+        SELECT c.data, c.scope_state FROM concepts c
+        JOIN vaults v ON v.key = c.vault
+        WHERE {clause}
+        ORDER BY (v.kind = 'misc'), c.ord, c.id
         """,
         params,
     ).fetchall()
@@ -386,8 +403,12 @@ def insert_injection(
     injection: Injection,
     *,
     recorded: str | None = None,
+    origin_key: str | None = None,
 ) -> bool:
     """寫入一筆注入 side-car；回傳是否實際寫入。
+
+    `origin_key`：被改路由到雜項 vault 時的原始 binding key（D14，
+    `vaults.route_injection_vault`）；其餘為 None，不參與重送比對。
 
     冪等：同 vault 已有內容完全相同的紀錄（session_id、prompt_id、
     prompt_fingerprint、injected 全等）→ 視為重送，回傳 False、不寫入。
@@ -419,8 +440,8 @@ def insert_injection(
         conn.execute(
             """
             INSERT INTO injections (vault, session_id, prompt_id, prompt_fingerprint,
-                                    data, recorded)
-            VALUES (?, ?, ?, ?, ?, ?)
+                                    data, recorded, origin_key)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 key,
@@ -429,6 +450,7 @@ def insert_injection(
                 injection.prompt_fingerprint,
                 data,
                 rec,
+                origin_key,
             ),
         )
     return True

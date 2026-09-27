@@ -27,6 +27,7 @@ from lore_vault.storage.errors import (
     DuplicateRecord,
     InvalidSpace,
     NotFound,
+    ReservedVault,
     SpaceKeyPrefixRequired,
     SpaceRequired,
     StorageError,
@@ -134,6 +135,7 @@ def install_error_handlers(app: FastAPI) -> None:
     simple(SpaceRequired, 400, "space_required")
     simple(InvalidSpace, 400, "invalid_space")
     simple(SpaceKeyPrefixRequired, 400, "space_key_prefix_required")
+    simple(ReservedVault, 400, "reserved_vault")
     simple(NotFound, 404, "not_found")
     simple(NoChanges, 400, "no_changes")
     simple(InvalidCursor, 400, "invalid_cursor")

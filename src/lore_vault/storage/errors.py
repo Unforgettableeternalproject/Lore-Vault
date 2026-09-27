@@ -31,6 +31,10 @@ class VaultConflict(StorageError):
     """vault key／別名與既有資料衝突（別名重複、別名撞到其他 vault 的 key）。"""
 
 
+class ReservedVault(StorageError, ValueError):
+    """違反雜項 vault 的保留規則（key `misc` ⇔ kind misc、無別名，D14）。"""
+
+
 class NotFound(StorageError, LookupError):
     """指定 vault 內找不到該筆資料。"""
 

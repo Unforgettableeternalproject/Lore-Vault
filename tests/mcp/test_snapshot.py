@@ -123,7 +123,7 @@ async def test_pull_installs_snapshot_and_manifest(app, seeded, snapshot_dir):
     on_disk = storage_snapshot.read_manifest(snapshot_dir)
     assert on_disk == manifest
     assert on_disk.schema_version == SCHEMA_VERSION
-    assert on_disk.service_version == "0.1.0"
+    assert on_disk.service_version == "0.1.1"
     assert on_disk.sha256 == _sha(snapshot_dir)
 
 

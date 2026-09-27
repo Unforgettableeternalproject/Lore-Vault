@@ -958,8 +958,11 @@ def _serve_http(status_code: int, body: dict, location: str | None = None):
     import http.server
     import threading
 
+    user_agents: list[str | None] = []
+
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_POST(self):  # noqa: N802
+            user_agents.append(self.headers.get("User-Agent"))
             raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
             code, payload = _status_rule(raw, status_code, body)
             data = json.dumps(payload).encode()
@@ -983,6 +986,7 @@ def _serve_http(status_code: int, body: dict, location: str | None = None):
             pass
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.user_agents = user_agents  # type: ignore[attr-defined]
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
 
@@ -1021,6 +1025,28 @@ def test_http_self_check_against_local_service(code, body, location, category):
     assert FAKE_TOKEN not in json.dumps(data, ensure_ascii=False)
     if category == "ok":
         assert data["schema_version"] == 14
+
+
+def test_http_self_check_sends_installer_user_agent():
+    """Cloudflare 1010 會擋預設的 Python-urllib UA；自檢必須帶自訂 UA。"""
+    server = _serve_http(200, {"ok": True})
+    try:
+        inst.http_self_check(f"http://127.0.0.1:{server.server_port}", {}, 5)
+    finally:
+        server.shutdown()
+    assert server.user_agents == [f"lore-vault-installer/{inst.INSTALLER_VERSION}"]
+    assert inst.USER_AGENT == f"lore-vault-installer/{inst.INSTALLER_VERSION}"
+
+
+def test_http_self_check_keeps_caller_user_agent():
+    server = _serve_http(200, {"ok": True})
+    try:
+        inst.http_self_check(
+            f"http://127.0.0.1:{server.server_port}", {"user-agent": "custom/1"}, 5
+        )
+    finally:
+        server.shutdown()
+    assert server.user_agents == ["custom/1"]
 
 
 def test_http_self_check_connection_refused():
@@ -1557,9 +1583,11 @@ def _serve_episodes(code: int, body: dict):
     import threading
 
     seen: list[bytes] = []
+    user_agents: list[str | None] = []
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_POST(self):  # noqa: N802
+            user_agents.append(self.headers.get("User-Agent"))
             seen.append(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
             data = json.dumps(body).encode()
             self.send_response(code)
@@ -1572,6 +1600,7 @@ def _serve_episodes(code: int, body: dict):
             pass
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.user_agents = user_agents  # type: ignore[attr-defined]
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, seen
 
@@ -1604,3 +1633,13 @@ def test_episode_ingest_check_sends_empty_batch(code, body, category):
     # 只送空批次：不會在正式服務寫入假 episode
     assert [json.loads(b) for b in seen] == [{"episodes": []}]
     assert FAKE_TOKEN not in json.dumps(data, ensure_ascii=False)
+
+
+def test_episode_ingest_check_sends_installer_user_agent():
+    """Cloudflare 1010 會擋預設的 Python-urllib UA；收料檢查必須帶自訂 UA。"""
+    server, _seen = _serve_episodes(200, {"accepted": 0, "results": []})
+    try:
+        inst.episode_ingest_check(f"http://127.0.0.1:{server.server_port}", {}, 5)
+    finally:
+        server.shutdown()
+    assert server.user_agents == [f"lore-vault-installer/{inst.INSTALLER_VERSION}"]

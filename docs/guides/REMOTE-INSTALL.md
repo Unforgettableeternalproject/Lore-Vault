@@ -123,6 +123,18 @@ claude mcp add --transport http -s user lore-vault <服務位址>/mcp \
 HTTP 模式的機器之後想要 PreToolUse 注入，改用完整殼重跑安裝即可。
 
 更新 hook：取得新 kit 後重跑安裝（加 `--episodes`）；`--update` 只重裝 wheel，不動 hook。
+hook 目錄是否換新以 kit `hooks/VERSION.json` 的版本與 commit 判定；同一 commit 打出的 kit 會被視為相同而略過。
+
+episode 的 vault 在寫入當下由服務端決定並凍結，客戶端一律送 session 工作目錄算出的 key：
+
+- 有 git remote 的 repo：key 為 remote 正規化（`github.com/<owner>/<repo>`），vault 不存在時自動建立
+- 沒有 remote、且尚未註冊的位置（key `folder/<資料夾名>`，例如從桌面啟動就是 `folder/desktop`）：一律收進單一的**雜項 vault**（key `misc`），原本的 key 記在該筆 episode 的 `origin_key`。雜項 vault 優先度較低（跨 vault 查詢降權、注入同分排後），也不會成為 `vault_resolve` 的結果
+- 沒有 remote 的專案要有自己的 vault：先在專案目錄跑 `/pm init`（建立 `folder/<資料夾名>` vault），之後的 episode 才會進該 vault；init 之前已收進雜項的不會自動搬移
+
+做專案工作時請從專案目錄啟動 Claude Code。
+
+**疑難排解：收料檢查或推送回 403（`server: cloudflare`、body 為 `error code: 1010`）**
+Cloudflare 的瀏覽器完整性檢查擋下了 Python urllib 的預設 User-Agent。v0.1.0 之後的 hook 與安裝程式都會帶 `lore-vault-<元件>/<版本>`；仍遇到時請更新到新 kit。自行撰寫的標準庫 hook 若要打 Cloudflare 後面的服務，同樣要帶自訂 User-Agent。
 
 以下手動步驟保留作為參考與除錯用；安裝程式失敗時可對照單步排查。
 

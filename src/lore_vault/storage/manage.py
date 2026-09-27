@@ -28,10 +28,17 @@ from lore_vault.schema.chars import check_fields
 from . import documents as store
 from .checks import MAX_DETAILS, Reconciliation
 from .db import transaction
-from .errors import NotFound, StorageError, UnknownVault, VaultRequired
+from .errors import (
+    NotFound,
+    ReservedVault,
+    StorageError,
+    UnknownVault,
+    VaultRequired,
+)
 from .timeutil import normalize_utc
 from .vaults import (
     ALL_VAULTS,
+    MISC_VAULT_KEY,
     check_key_prefix,
     resolve_read,
     resolve_write,
@@ -217,8 +224,13 @@ def add_alias(
     checked = validate_space(space)
     name = _clean_alias(alias)
     check_key_prefix(checked, name)
+    if name == MISC_VAULT_KEY:
+        raise ReservedVault(f"{MISC_VAULT_KEY!r} 保留給雜項 vault，不可當別名")
     with transaction(conn):
         key = resolve_write(conn, vault, space=checked)
+        if key == MISC_VAULT_KEY:
+            # 別名會讓 vault_resolve 把一般位置解析到雜項 vault（D14）
+            raise ReservedVault("雜項 vault 不可加別名；專案請以 /pm init 另建 vault")
         owner = _alias_owner(conn, name)
         if owner is not None:
             owner_key, owner_space = owner

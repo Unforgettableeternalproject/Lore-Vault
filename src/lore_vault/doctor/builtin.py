@@ -202,6 +202,10 @@ def vaults_auto_created(ctx: DoctorContext) -> CheckResult:
     )
 
 
+def vaults_misc_routing(ctx: DoctorContext) -> CheckResult:
+    return _to_result(storage_ingest.misc_routing(ctx.require("db")))
+
+
 def space_valid_values(ctx: DoctorContext) -> CheckResult:
     return _to_result(storage_checks.space_valid_values(ctx.require("db")))
 
@@ -501,6 +505,15 @@ def default_registry() -> Registry:
             "vaults",
             vaults_auto_created,
             "episode 收料／管線自動建立的 vault 數與來源（供審視）",
+        )
+    )
+    registry.add(
+        Check(
+            "vaults.misc_routing",
+            "vaults",
+            vaults_misc_routing,
+            "雜項 vault 唯一且無別名、episode 的 origin_key 與歸屬一致、"
+            "不再有收料自動建立的 folder vault（D14）",
         )
     )
     registry.add(
