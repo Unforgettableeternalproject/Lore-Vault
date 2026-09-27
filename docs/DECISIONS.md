@@ -118,6 +118,8 @@ spike 接入跨機器架構——**艾斯維爾同意照以下草案試做**（�
 
 是否從 `~/.claude/agent-memory-spike/` 改名（例如 `~/.lore-vault/`）；實驗中間產物（`*_tasks.json`、`*_verdicts*/`、`consolidate_pairs*` 等）搬或封存。
 
+**已裁決（艾斯維爾 2026-09-27）**：改名為 `~/.lore-vault/`（與 MCP 殼同目錄，檔名不得互相衝突）；舊備份（`episodes.bak-*`、`concepts.json.bak-*`）與實驗中間產物打包封存到主機備份目錄後移出常駐目錄，不直接刪除。搬移要避開 03:30 排程，且 Stop hook 每輪都會寫入，程式切換與資料搬移須同一步完成。
+
 ### D6 對 U.E.P 的接口
 
 **不在本次範圍（A16）。**
@@ -224,3 +226,11 @@ Ollama 另裝了 `nomic-embed-text`，PM 未使用。
 - 轉發：compose profile `tunnel` 掛 cloudflared（`TUNNEL_TOKEN`）；對外 IP 用 `LORE_VAULT_BIND`（預設 `127.0.0.1`）與 `LORE_VAULT_PORT`（預設 `5056`），直綁對外 IP 沒有 TLS，須自接反向代理
 - 安裝器：拿掉作者網域預設，服務位址改必填；Cloudflare Access 改為選配；新增 HTTP 模式（免殼）
 - CI 這一輪不做
+
+### D13 遠端機器收 episode 與服務設定頁
+
+艾斯維爾 2026-09-27 裁決：
+
+1. **遠端收 episode（完整）**：遠端安裝器安裝 hook（Stop 等）並寫 `client.env`，episode 直接推到服務（不經主機）；03:30 管線改為從服務拉取全部機器的 episode 蒸餾（`--pull-episodes` 接進流程），處理跨機器去重。
+2. **隱私開關**：服務端收 episode 由設定控制，**預設關閉**（自架者不會意外集中對話原文）；本機部署打開。
+3. **UI 設定頁**：上述開關與其他可在執行期安全調整的設定，在 UI 設定頁公開並可修改（存 DB、覆寫設定檔預設值）；需重啟才生效或涉及密鑰的設定不放進 UI。
