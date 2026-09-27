@@ -3,6 +3,50 @@
 給「主機以外的機器」上的 agent 照做：把舊的 `open-notebook` MCP 換成連遠端服務的 Lore Vault MCP 殼，並換上新版 pm skill。
 依據：2026-09-26 在第二台機器實測成功的流程。設定鍵與 token 來源優先序見 [DEVELOPMENT.md](../DEVELOPMENT.md)「MCP 殼」段。
 
+## 快速安裝（安裝程式）
+
+自用 kit，把下方「步驟」2～8 包成一支互動式安裝程式，由目標機的**人類**執行；步驟 10 的驗證仍由主機端委託該機 agent。
+
+1. **主機**（Lore-Vault repo，`develop` 最新）打包 kit：
+
+   ```powershell
+   uv run python scripts/build_remote_kit.py --out <輸出目錄>
+   ```
+
+   產出 `lore-vault-kit-<版本>-<日期>-<commit>/` 與同名 `.zip`：wheel、`SKILL.md`（取自 repo 的
+   `integrations/claude/skills/pm/SKILL.md`）、`install.py`（取自 `integrations/remote/install.py`）、`README.txt`（含 wheel sha256）。
+   未指定 `--out` 時輸出到系統暫存的 `lore-vault-kits/`；同名 kit 已存在要加 `--force`。
+2. **傳到目標機**：zip 經聊天室（`chatroom_send_file`）或其他方式傳過去並解壓。kit 不含任何密鑰。
+3. **目標機人類**在 kit 資料夾執行（先完全結束 Claude Code；PowerShell 5.1／cmd 皆可）：
+
+   ```powershell
+   python install.py --dry-run   # 先看會做什麼，不寫檔
+   python install.py             # 逐步確認安裝；token 以不回顯方式輸入
+   ```
+
+   - 偵測 Python ≥ 3.12、uv、claude CLI、`~/.cloudflared/pm-token.env`（只看兩個鍵在不在）；缺一就停下
+   - 備份 `.bak-precutover`（已存在不覆蓋）→ 建 venv → `uv pip install --reinstall` wheel → 寫 `mcp.toml`
+     → 寫 `mcp.env`（UTF-8 無 BOM）→ `claude mcp remove open-notebook`（有才移除；project scope 不動，只提示）
+     與 `claude mcp add lore-vault -s user -- ...`（list 參數，不用 add-json）→ 顯示差異摘要後覆寫 pm skill → 本機自檢
+   - 本機自檢：用 venv python 經 CF Access＋bearer 打一次 `/v1/status`，失敗分類提示（DNS／連線／TLS／逾時／CF 403／bearer 401／服務錯誤）
+   - Git Bash（mintty）無法隱藏輸入：改用 PowerShell、`winpty python install.py`，或先設環境變數 `LORE_VAULT_API_TOKEN`
+   - 任一步失敗會停下並說明處理方式；修正後重跑同一指令，已完成的步驟自動略過
+4. **貼報告給主機**：安裝程式最後印出驗證報告（同時存到 `~/.lore-vault/install-report-<時間>.txt`），
+   含機器名、各步驟結果、wheel sha256、status 摘要、`claude mcp list` 的 lore-vault 條目，家目錄遮成 `~`，不含任何密鑰。
+   主機核對 sha256 與 status 後，請目標機人類重開 Claude Code，再請該機 agent 做步驟 10 的驗證。
+
+其他旗標：
+
+| 旗標 | 用途 |
+|---|---|
+| `--update` | 服務端新版上線後只重裝 wheel＋自檢，不動設定；之後 `/mcp` 重連即可 |
+| `--yes` | 非互動；token 取自環境變數 `LORE_VAULT_API_TOKEN`（有設就覆寫 `mcp.env`，沒設則沿用既有 `mcp.env`），既有 `mcp.toml` 保留 |
+| `--rollback` | 還原兩份 `.bak-precutover`（`~/.claude.json` 整份回到備份時狀態），之後重開 Claude Code |
+| `--base-url URL` | 覆寫服務位址（會覆寫既有 `mcp.toml`） |
+| `--no-mask` | 報告不把家目錄遮成 `~` |
+
+以下手動步驟保留作為參考與除錯用；安裝程式失敗時可對照單步排查。
+
 ## 規則（先讀）
 
 - **標「人類」的步驟 agent 不執行**：這些步驟實測會被 agent 端安全分類器擋下。agent 把指令整理好交給人類貼上執行，完成後由 agent 驗證；不要換寫法、換工具或拆步驟繞過。
