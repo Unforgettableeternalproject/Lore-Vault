@@ -73,4 +73,4 @@ HTTP 連線沒有本地快照：服務不可達時 MCP 工具直接失敗，照�
 
 ## 協調
 
-Lore Vault 負責記憶；有 MEMPAL 工具的機器才用 `mempal_cowork_push(content, cwd)` 通知已協作的 agent（沒有就略過），Chatroom 沿用房內協定。只傳交接、阻礙或影響對方決策的新資訊，不廣播逐步進度。
+Lore Vault 負責記憶；跨 agent 協調走 Chatroom，沿用房內協定。只傳交接、阻礙或影響對方決策的新資訊，不廣播逐步進度。

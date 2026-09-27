@@ -44,7 +44,6 @@
 - UI 為 WCAG AA 覆寫的色票是否回改設計系統
 - 摘要長度（改短需重算，有 API 費用）
 - 遠端機器是否也收 episode
-- Dystopia 的 CLAUDE.md 仍以 mempal 當長期記憶，與全域規則衝突
 - JSAI-API／JSAI-Functions／JSAI-Web／U.E.P's Mind Reflourished 的 CLAUDE.md 有進版控，記憶段改動尚未 commit
 
 ## 已知問題
