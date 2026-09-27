@@ -2,7 +2,7 @@
 name: pm
 description: 查詢與維護 Lore Vault 專案記憶；用於歷史決策、隱性限制、跨 session 接續及明確的 /pm 指令。
 user-invocable: true
-allowed-tools: Bash, Read, Grep, Glob, Agent, mcp__lore-vault__space, mcp__lore-vault__vault_resolve, mcp__lore-vault__recall, mcp__lore-vault__get, mcp__lore-vault__list, mcp__lore-vault__write, mcp__lore-vault__update, mcp__lore-vault__upload, mcp__lore-vault__status
+allowed-tools: Bash, Read, Grep, Glob, Agent, mcp__lore-vault__space, mcp__lore-vault__vault_resolve, mcp__lore-vault__recall, mcp__lore-vault__ask, mcp__lore-vault__get, mcp__lore-vault__list, mcp__lore-vault__write, mcp__lore-vault__update, mcp__lore-vault__upload, mcp__lore-vault__status
 argument-hint: "[init|explore|query|note|sync|status] [args...]"
 ---
 
@@ -27,6 +27,7 @@ argument-hint: "[init|explore|query|note|sync|status] [args...]"
 - 範圍在儲存層強制，結果只會來自指定的 vault 與目前 space，不必再以列舉交叉比對。
 - `score` 是排序融合分數，不是相似度，不用固定門檻；以標題與摘要判斷相關性。
 - 回應有 `truncated`／`omitted` 時表示被預算裁掉；要瀏覽近期寫入用 `list(vault, since?, topics?)`，`has_more=true` 以 `next_cursor` 續頁，未讀完不宣稱完整。
+- `ask(question, vault)` 把 recall 前 10 則 note 交模型整理成逐點回答（附 note_ids）；可參考但不可當唯一事實來源，關鍵事實以 `get` 核對。只涵蓋 note。
 - `recall` 預設一併回已上傳文件的段落（`kind=chunk`），全文用 `get` 取 `doc:…`／`chunk:…`。
 
 無關或無結果就查程式碼，不反覆換詞湊答案。檔案搜尋優先 FFF，特殊查詢按工具能力選擇。
