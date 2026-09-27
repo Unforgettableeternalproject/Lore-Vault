@@ -230,6 +230,105 @@ def test_get_episodes_paginates_with_vault_and_filters(client):
     assert status["display"] == "folder/b"
 
 
+def test_get_episodes_after_seq_is_insert_ordered_not_started_ordered(client):
+    """增量水位用 seq：started_at 很舊但晚到貨的 episode 仍在水位之後（D13）。"""
+    client.post(
+        "/v1/episodes",
+        json={
+            "episodes": [
+                episode(
+                    turn_index=i,
+                    started_at=f"2026-09-0{i + 2}T00:00:00Z",
+                    ended_at=None,
+                )
+                for i in range(3)
+            ]
+        },
+    )
+    first = client.get("/v1/episodes", params={"vault": "*", "after_seq": 0}).json()
+    assert [i["turn_index"] for i in first["items"]] == [0, 1, 2]
+    assert first["total"] == 3 and first["next_after_seq"] is None
+    watermark = first["max_seq"]
+    assert watermark == max(i["seq"] for i in first["items"])
+    # 延遲到貨：對話時間比既有全部都早
+    client.post(
+        "/v1/episodes",
+        json={
+            "episodes": [
+                episode(
+                    session_id="s-late",
+                    started_at="2026-08-01T00:00:00Z",
+                    ended_at=None,
+                )
+            ]
+        },
+    )
+    late = client.get(
+        "/v1/episodes", params={"vault": "*", "after_seq": watermark}
+    ).json()
+    assert [i["session_id"] for i in late["items"]] == ["s-late"]
+    assert late["total"] == 4 and late["max_seq"] > watermark
+    # since 模式（對話時間）在水位上會漏掉它——這正是不用 started_at 當水位的原因
+    by_time = client.get(
+        "/v1/episodes", params={"vault": "*", "since": "2026-09-04T00:00:00Z"}
+    ).json()
+    assert "s-late" not in {i["session_id"] for i in by_time["items"]}
+
+
+def test_get_episodes_after_seq_paginates(client):
+    client.post(
+        "/v1/episodes", json={"episodes": [episode(turn_index=i) for i in range(5)]}
+    )
+    seen: list[int] = []
+    after = 0
+    while True:
+        page = client.get(
+            "/v1/episodes", params={"vault": "*", "after_seq": after, "limit": 2}
+        ).json()
+        seen += [i["turn_index"] for i in page["items"]]
+        if page["next_after_seq"] is None:
+            break
+        after = page["next_after_seq"]
+    assert seen == [0, 1, 2, 3, 4]
+    assert page["total"] == 5
+
+
+def test_get_episodes_after_seq_rejects_mixed_modes(client):
+    for extra in (
+        {"cursor": "x"},
+        {"since": "2026-09-01T00:00:00Z"},
+        {"session_id": "s-1"},
+    ):
+        resp = client.get(
+            "/v1/episodes", params={"vault": "*", "after_seq": 0, **extra}
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "invalid_cursor"
+    assert client.get(
+        "/v1/episodes", params={"vault": "*", "after_seq": -1}
+    ).status_code in (
+        400,
+        422,
+    )
+
+
+def test_get_episodes_after_seq_does_not_leak_across_vaults(client, monkeypatch):
+    client.post(
+        "/v1/episodes",
+        json={"episodes": [episode(), episode(session_id="s-b", vault="folder/b")]},
+    )
+
+    def leaked() -> tuple[set[str], int]:
+        page = client.get(
+            "/v1/episodes", params={"vault": "folder/b", "after_seq": 0}
+        ).json()
+        return {i["vault"] for i in page["items"]} - {"folder/b"}, page["total"]
+
+    assert leaked() == (set(), 1)
+    monkeypatch.setattr(records, "vault_clause", lambda scope, column: ("1 = 1", ()))
+    assert leaked() == ({"github.com/owner/repo-x"}, 2)
+
+
 def test_get_episodes_bad_cursor(client):
     resp = client.get("/v1/episodes", params={"vault": "*", "cursor": "%%%"})
     assert resp.status_code == 400

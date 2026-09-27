@@ -35,6 +35,7 @@ from .documents_check import (
     documents_superseded_removed,
     documents_vector_rows,
 )
+from .episode_pull_check import episode_pull_status
 from .framework import Check, CheckResult, CheckSkipped, DoctorContext, Registry
 from .hook_imports import DEFAULT_HOOKS_DIR, DEFAULT_SPIKE_DIR, check_hook_imports
 from .snapshot_check import snapshot_age, snapshot_schema
@@ -616,6 +617,14 @@ def default_registry() -> Registry:
             "concept_push",
             concept_push_lag,
             "主機 concepts.json 的 id 都已推送到服務、上次推送沒有失敗",
+        )
+    )
+    registry.add(
+        Check(
+            "episode_pull.status",
+            "episode_pull",
+            episode_pull_status,
+            "管線上次從服務拉取 episode 成功、快取與服務端筆數一致、服務端沒有少資料",
         )
     )
     return registry

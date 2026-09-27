@@ -539,6 +539,6 @@ def test_push_record_keys_agree_with_doctor_and_health_alert():
 
 
 def test_pipeline_stages_are_untouched():
-    """轉接層預設關閉：三個判卷階段與順序不變。"""
+    """三個判卷階段與順序不變；D13 只在蒸餾前多一個 pull（episode 來源）。"""
     assert [name for name, _, _ in pipeline.STAGES] == [
-        "collect", "health", "distill", "consolidate", "calibrate"]
+        "collect", "health", "pull", "distill", "consolidate", "calibrate"]

@@ -29,10 +29,18 @@ detach 之後失敗是靜默的、難追；而且剛結束工作時機器最忙�
     python pipeline.py --run               # 實跑（受 --max-groups 限制）
     python pipeline.py --run --stage distill   # 只跑一個階段
 
-## 服務轉接層（階段 8，骨架，預設關閉）
+## 服務轉接層（階段 8）
 
 A13：三個階段都要 `claude -p`，整條管線留在主機排程，改經服務 HTTP 讀 episode、寫 concept。
-這裡先提供轉接函式與兩個手動旗標，**不接進 STAGES、不改任何階段的判卷邏輯**：
+
+**episode 來源（D13）**：`pull` 階段（health 之後、distill 之前）先推本機 spool，再依服務端
+`seq` 水位增量拉取全部機器的 episode 到 `paths.EPISODE_CACHE_DIR`，與本機 jsonl 依
+(session_id, prompt_id, turn_index) 合併去重，蒸餾讀合併結果（`distill.py --episode-dir`）。
+服務不可達時預設退回本機 jsonl（`--on-pull-failure fail` 改為停止）；`--episode-source local`
+強制只讀本機（除錯用）。結果記在 `pipeline_state.json` 的 `episode_pull`，
+健康告警與 doctor `episode_pull.status` 讀它。設計與保護見 `episode_source.py`。
+
+以下兩個手動旗標保留（不經 STAGES、不改判卷邏輯）：
 
     python pipeline.py --pull-episodes OUT.jsonl [--since UTC]   # GET /v1/episodes（全部 vault）
     python pipeline.py --push-concepts [--dry-run]               # POST /v1/concepts（upsert + 刪除）
@@ -66,6 +74,9 @@ from paths import PIPELINE_LOCK_PATH as LOCK_PATH  # noqa: E402
 from paths import PIPELINE_STATE_PATH as STATE_PATH  # noqa: E402
 from paths import WORK_DIR  # noqa: E402
 from paths import CLIENT_ENV_PATH, CONCEPT_PATH  # noqa: E402
+from paths import EPISODE_CACHE_DIR  # noqa: E402
+
+import episode_source as ep_source  # noqa: E402
 
 # 鎖過期時間。程序被 kill 掉時鎖不會被清掉，沒有這個機制管線會永遠停擺；
 # 訂在 6 小時是因為單輪最慢的階段（校準）實測也遠短於此
@@ -300,7 +311,12 @@ def stage_distill(ctx: dict[str, Any]) -> tuple[bool, str]:
     if ctx["dry_run"]:
         return True, f"會產出增量蒸餾任務並裁決最多 {limit} 組"
 
-    ok, out = run_tool(["agent_memory_spike/distill.py", "--emit", "--all", "--incremental"])
+    # 語料來源由 pull 階段決定（D13）；`--stage distill` 單跑時在這裡補做一次
+    ok, summary = ensure_episode_source(ctx)
+    if not ok:
+        return False, summary
+    ok, out = run_tool(["agent_memory_spike/distill.py", "--emit", "--all", "--incremental",
+                        "--episode-dir", str(ctx["episode_dir"])])
     if not ok:
         return False, f"產任務失敗: {out[-300:]}"
 
@@ -443,6 +459,69 @@ def stage_calibrate(ctx: dict[str, Any]) -> tuple[bool, str]:
     return ok, pick_summary(out, "更新", "已校準")
 
 
+# 蒸餾的語料來源（D13）。預設從服務拉取全部機器的 episode、與本機 jsonl 合併去重；
+# 服務不可達時退回本機（只會漏掉遠端 episode，不會錯），在 state 的 episode_pull 標示，
+# 健康告警與 doctor episode_pull.status 讀它。細節見 episode_source.py
+EPISODE_SOURCES = ("service", "local")
+PULL_FAILURE_MODES = ("local", "fail")
+EPISODE_PULL_KEY = ep_source.EPISODE_PULL_KEY
+SPOOL_DIR = DEFAULT_EPISODE_DIR.parent / "spool"  # 同 hook_stop.spool_dir_for
+
+
+def push_spool_best_effort() -> str:
+    """拉取前先把本機 spool 推上去：collect 階段（--sync-all）補的輪次只進 spool、不推。
+    失敗不影響拉取——沒推上去的輪次本機 jsonl 仍有，合併時照樣收進來。"""
+    try:
+        from lore_vault.hooks import spool as lv_spool
+
+        settings = service_settings()
+        return lv_spool.push_all(SPOOL_DIR, settings).summary()
+    except Exception as exc:  # noqa: BLE001
+        return f"推送略過：{type(exc).__name__}: {exc}"[:200]
+
+
+def ensure_episode_source(ctx: dict[str, Any]) -> tuple[bool, str]:
+    """決定這一輪蒸餾讀哪個目錄，存進 ctx["episode_dir"]；同一輪只做一次。"""
+    if ctx.get("episode_dir") is not None:
+        return True, ctx.get("episode_summary") or ""
+    source = ctx.get("episode_source", "service")
+    on_failure = ctx.get("on_pull_failure", "local")
+    push_note = push_spool_best_effort() if source == "service" else None
+    state = load_state()
+    outcome = ep_source.resolve_source(
+        source=source, on_failure=on_failure, local_dir=DEFAULT_EPISODE_DIR,
+        cache_dir=EPISODE_CACHE_DIR, spool_dir=SPOOL_DIR,
+        settings_loader=service_settings, previous=state.get(EPISODE_PULL_KEY),
+    )
+    if push_note:
+        outcome.record["spool_push"] = push_note
+    state[EPISODE_PULL_KEY] = outcome.record
+    save_state(state)
+    summary = outcome.summary + (f"｜spool：{push_note}" if push_note else "")
+    print(f"[pipeline] episode 來源：{summary}", file=sys.stderr)
+    if outcome.ok:
+        ctx["episode_dir"] = outcome.episode_dir
+        ctx["episode_summary"] = summary
+    return outcome.ok, summary
+
+
+def stage_pull(ctx: dict[str, Any]) -> tuple[bool, str]:
+    """拉取：服務 → 本地快取 → 與本機 jsonl 合併去重（蒸餾讀合併結果）。"""
+    if ctx["dry_run"]:
+        source = ctx.get("episode_source", "service")
+        if source == "local":
+            return True, f"會只讀本機 jsonl {DEFAULT_EPISODE_DIR}（--episode-source local）"
+        cache_state = ep_source.load_cache_state(EPISODE_CACHE_DIR)
+        watermark = cache_state.get("after_seq")
+        plan = (f"從 seq > {watermark} 增量拉取" if isinstance(watermark, int)
+                else "全量拉取（沒有水位）")
+        fallback = ("失敗時退回本機 jsonl" if ctx.get("on_pull_failure", "local") == "local"
+                    else "失敗時停止管線")
+        return True, (f"會先推 spool，再{plan} GET /v1/episodes?vault=*，"
+                      f"與本機 {DEFAULT_EPISODE_DIR} 合併到 {EPISODE_CACHE_DIR}；{fallback}")
+    return ensure_episode_source(ctx)
+
+
 def pick_summary(output: str, *keywords: str) -> str:
     """從工具輸出裡挑一行當摘要。
 
@@ -480,6 +559,7 @@ def _pending_count(path: Path, key: str) -> int:
 STAGES: list[tuple[str, str, Callable[[dict[str, Any]], tuple[bool, str]]]] = [
     ("collect", "收料：補齊所有 transcript 的新輪次", stage_collect),
     ("health", "健檢：語料有問題就不往下走", stage_health),
+    ("pull", "拉取：從服務取全部機器的 episode，與本機合併去重", stage_pull),
     ("distill", "蒸餾：語料 → concept 候選", stage_distill),
     ("consolidate", "收斂：去重、矛盾偵測、關係閉包", stage_consolidate),
     ("calibrate", "校準：行為測試量 surprisal", stage_calibrate),
@@ -487,7 +567,8 @@ STAGES: list[tuple[str, str, Callable[[dict[str, Any]], tuple[bool, str]]]] = [
 
 
 def run_pipeline(*, dry_run: bool, max_groups: int, only: str | None,
-                 calibrate_max: int | None = None) -> int:
+                 calibrate_max: int | None = None, episode_source: str = "service",
+                 on_pull_failure: str = "local") -> int:
     """依序跑各階段。
 
     **前一階段失敗就停下**：語料壞掉時蒸餾只會蒸出錯的記憶，
@@ -496,8 +577,8 @@ def run_pipeline(*, dry_run: bool, max_groups: int, only: str | None,
     # 校準上限可以跟 max_groups 分開調：校準是逐條行為測試，積壓量遠大於蒸餾，
     # 而 max_groups 同時管蒸餾與收斂的裁決批次（40 組會頂到逾時），不能一起放大
     ctx = {"dry_run": dry_run, "max_groups": max_groups,
-           "calibrate_max": calibrate_max if calibrate_max is not None else max_groups}
-    state = load_state()
+           "calibrate_max": calibrate_max if calibrate_max is not None else max_groups,
+           "episode_source": episode_source, "on_pull_failure": on_pull_failure}
     results: list[dict[str, Any]] = []
     out = sys.stderr
 
@@ -520,6 +601,8 @@ def run_pipeline(*, dry_run: bool, max_groups: int, only: str | None,
             break
 
     if not dry_run:
+        # 跑完才讀 state：階段之間會寫它（pull 的 episode_pull），不能用開跑時的舊副本蓋掉
+        state = load_state()
         state["last_run"] = {"results": results, "max_groups": max_groups}
         save_state(state)
     return 0 if all(r["ok"] for r in results) else 1
@@ -751,6 +834,12 @@ def main() -> int:
                         help="搭配 --pull-episodes：只讀 started_at >= since（UTC）")
     parser.add_argument("--push-concepts", action="store_true",
                         help="（服務轉接骨架）把 concepts.json 推到服務（upsert + 刪除）")
+    parser.add_argument("--episode-source", choices=EPISODE_SOURCES, default="service",
+                        help="蒸餾語料來源：service＝服務拉取全部機器並與本機合併（預設）；"
+                             "local＝只讀本機 jsonl（除錯用，等同 D13 之前）")
+    parser.add_argument("--on-pull-failure", choices=PULL_FAILURE_MODES, default="local",
+                        help="服務拉取失敗時：local＝退回本機 jsonl 繼續（預設，會標示降級）；"
+                             "fail＝停止管線")
     args = parser.parse_args()
 
     for stream in (sys.stdout, sys.stderr):
@@ -775,7 +864,8 @@ def main() -> int:
     try:
         return run_pipeline(dry_run=args.dry_run, max_groups=args.max_groups,
                             calibrate_max=args.calibrate_max,
-                            only=args.stage)
+                            only=args.stage, episode_source=args.episode_source,
+                            on_pull_failure=args.on_pull_failure)
     finally:
         release_lock()
 

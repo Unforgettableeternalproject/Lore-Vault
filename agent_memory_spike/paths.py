@@ -59,3 +59,7 @@ PIPELINE_LOCK_PATH = WORK_DIR / "pipeline.lock"
 # 可用 LORE_VAULT_CLIENT_ENV 改位置。episode spool 在 episode 目錄的同層 `spool/`
 # （預設即 WORK_DIR / "spool"），佈局見 src/lore_vault/hooks/spool.py
 CLIENT_ENV_PATH = WORK_DIR / "client.env"
+
+# D13：管線從服務拉取全部機器的 episode 的本地快取（佈局見 episode_source.py）。
+# 水位存在快取目錄內：整個目錄刪掉等於重置，下次自動全量重拉
+EPISODE_CACHE_DIR = WORK_DIR / "episode_cache"

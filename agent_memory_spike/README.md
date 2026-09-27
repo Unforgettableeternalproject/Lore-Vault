@@ -25,7 +25,8 @@ Coding agent 記憶層實驗。與 `echo_memory/` 完全無關——不 import�
 | `experiment/phase2-retrieval.md` | 2 | 檢索驗證結果 |
 | `consolidate.py` | 2.5 | 池子收斂（語意去重 + 矛盾偵測 + 關係閉包 + 雙評審合議） |
 | `hook_pretooluse.py` | 3 | PreToolUse hook，編輯前注入相關記憶（**已全域掛載**） |
-| `pipeline.py` | 3 | 自動化管線（收料 → 蒸餾 → 收斂 → 校準） |
+| `pipeline.py` | 3 | 自動化管線（收料 → 拉取 → 蒸餾 → 收斂 → 校準） |
+| `episode_source.py` | 8 | 管線的 episode 來源：從服務增量拉取全部機器、與本機 jsonl 合併去重（D13） |
 | `test_consolidate.py` | 2.8 | 關係閉包與雙評審合議測試（11 項） |
 | `test_inject.py` | 3 | 注入 hook 測試（10 項） |
 | `test_pipeline.py` | 3 | 管線機制測試（11 項） |
