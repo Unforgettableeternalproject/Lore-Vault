@@ -390,11 +390,11 @@ def stage_calibrate(ctx: dict[str, Any]) -> tuple[bool, str]:
     整場測試退化成自評，而自評在最有價值的條目上系統性失準。
     """
     if ctx["dry_run"]:
-        return True, f"會對最多 {ctx['max_groups']} 條未校準的記憶跑行為測試"
+        return True, f"會對最多 {ctx['calibrate_max']} 條未校準的記憶跑行為測試"
 
     ok, out = run_tool([
         "agent_memory_spike/calibrate.py", "--emit",
-        "--sample", str(ctx["max_groups"]),
+        "--sample", str(ctx["calibrate_max"]),
     ])
     if not ok:
         return False, f"出題失敗: {out[-300:]}"
@@ -486,13 +486,17 @@ STAGES: list[tuple[str, str, Callable[[dict[str, Any]], tuple[bool, str]]]] = [
 ]
 
 
-def run_pipeline(*, dry_run: bool, max_groups: int, only: str | None) -> int:
+def run_pipeline(*, dry_run: bool, max_groups: int, only: str | None,
+                 calibrate_max: int | None = None) -> int:
     """依序跑各階段。
 
     **前一階段失敗就停下**：語料壞掉時蒸餾只會蒸出錯的記憶，
     收斂沒跑完就校準則會把等一下要被刪掉的條目也測一遍。
     """
-    ctx = {"dry_run": dry_run, "max_groups": max_groups}
+    # 校準上限可以跟 max_groups 分開調：校準是逐條行為測試，積壓量遠大於蒸餾，
+    # 而 max_groups 同時管蒸餾與收斂的裁決批次（40 組會頂到逾時），不能一起放大
+    ctx = {"dry_run": dry_run, "max_groups": max_groups,
+           "calibrate_max": calibrate_max if calibrate_max is not None else max_groups}
     state = load_state()
     results: list[dict[str, Any]] = []
     out = sys.stderr
@@ -739,6 +743,8 @@ def main() -> int:
     parser.add_argument("--stage", type=str, help="只跑指定階段")
     parser.add_argument("--max-groups", type=int, default=DEFAULT_MAX_GROUPS,
                         help="每次執行的組數上限（成本封頂）")
+    parser.add_argument("--calibrate-max", type=int, default=None,
+                        help="校準階段每次最多測幾條（預設同 --max-groups）")
     parser.add_argument("--pull-episodes", type=Path, metavar="OUT",
                         help="（服務轉接骨架）從服務讀全部 episode 寫成 JSONL")
     parser.add_argument("--since", type=str, default=None,
@@ -768,6 +774,7 @@ def main() -> int:
         return 1
     try:
         return run_pipeline(dry_run=args.dry_run, max_groups=args.max_groups,
+                            calibrate_max=args.calibrate_max,
                             only=args.stage)
     finally:
         release_lock()

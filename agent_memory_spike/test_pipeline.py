@@ -155,6 +155,19 @@ def test_only_runs_the_requested_stage(tmp_path, monkeypatch):
     assert ran == ["b"]
 
 
+def test_calibrate_max_is_separate_from_max_groups(tmp_path, monkeypatch):
+    """放大校準上限不能連帶放大蒸餾／收斂的裁決批次（那邊 40 組就逾時）。"""
+    monkeypatch.setattr(pipeline, "LOCK_PATH", tmp_path / "lock")
+    monkeypatch.setattr(pipeline, "STATE_PATH", tmp_path / "state.json")
+    seen: list[tuple[int, int]] = []
+    monkeypatch.setattr(pipeline, "STAGES", [
+        ("a", "", lambda ctx: (seen.append((ctx["max_groups"], ctx["calibrate_max"])), (True, ""))[1]),
+    ])
+    run_pipeline(dry_run=False, max_groups=24, only=None, calibrate_max=72)
+    run_pipeline(dry_run=False, max_groups=24, only=None)
+    assert seen == [(24, 72), (24, 24)]
+
+
 def test_credited_reads_the_actual_ledger_line():
     """管線層要自己驗收「這一輪真的進帳幾筆」。
 
