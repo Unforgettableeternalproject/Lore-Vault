@@ -1,0 +1,39 @@
+/* 複製自 ui/design-source/_ds/…/tokens/base.css（U.E.P 設計系統），請勿直接修改；更新設計系統時整檔重新複製。 */
+*,*::before,*::after{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--font-sans)}
+a{color:var(--uep-gold);text-decoration-color:color-mix(in srgb,var(--uep-gold) 52%,transparent)}
+a:hover{color:var(--uep-gold-soft)}
+
+/* Hairline rules — the site's main divider */
+.hairline{height:1px;background:var(--hairline);border:0;margin:0}
+.hairline-thick{height:1px;background:var(--hairline-strong);border:0}
+
+/* UEP's voice: gold, semibold, wrapped pretty */
+.uep-voice{color:var(--uep-gold);font-weight:600;letter-spacing:.01em;text-wrap:pretty}
+[data-theme='dark'] .uep-voice{color:var(--uep-gold-soft)}
+.uep-voice--shimmer{background:linear-gradient(100deg,var(--uep-gold) 0%,var(--uep-gold) 30%,#ffe98a 50%,var(--uep-gold) 70%,var(--uep-gold) 100%);background-size:300% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:uep-shimmer 5.5s linear infinite}
+.uep-voice--glow{text-shadow:0 0 8px rgba(213,182,24,.45),0 0 22px rgba(213,182,24,.18)}
+.uep-voice--fade{animation:uep-voice-fade 5s ease-in-out infinite}
+@keyframes uep-voice-fade{0%,100%{opacity:.45}50%{opacity:1}}
+.uep-voice--echo{text-shadow:1px 1px 0 rgba(213,182,24,.25),2px 2px 0 rgba(213,182,24,.15),3px 3px 0 rgba(213,182,24,.08)}
+
+/* Halo behind the U.E.P portrait */
+.uep-halo{position:relative}
+.uep-halo::before{content:'';position:absolute;inset:-8%;border-radius:50%;background:radial-gradient(circle at center,rgba(213,182,24,.45) 0%,rgba(213,182,24,.18) 40%,transparent 70%);filter:blur(6px);animation:uep-pulse 4.2s ease-in-out infinite;z-index:0}
+.uep-halo>*{position:relative;z-index:1}
+
+/* In-prose UEP dialogue block */
+[data-role='uep']{position:relative;margin:14px 0;padding:12px 18px 12px 46px;border-left:3px solid #d5b618;background:color-mix(in srgb,#d5b618 5%,transparent);border-radius:0 6px 6px 0;color:var(--ink)}
+[data-role='uep']::before{content:'U';position:absolute;left:12px;top:12px;width:24px;height:24px;display:grid;place-items:center;font-family:var(--font-mono);font-size:12px;font-weight:700;color:#fff;background:#d5b618;border-radius:3px}
+[data-role='uep'][data-side='right']{border-left:none;border-right:3px solid #d5b618;padding:12px 46px 12px 18px;text-align:right}
+[data-role='uep'][data-side='right']::before{left:auto;right:12px}
+[data-theme='dark'] [data-role='uep']{background:color-mix(in srgb,#d5b618 8%,transparent)}
+
+/* Thin scrollbars everywhere */
+*::-webkit-scrollbar{width:6px;height:6px}
+*::-webkit-scrollbar-thumb{background:var(--line-strong);border-radius:3px}
+*::-webkit-scrollbar-track{background:transparent}
+
+@media (prefers-reduced-motion:reduce){
+  .uep-voice--shimmer,.uep-voice--fade,.uep-halo::before{animation:none}
+}

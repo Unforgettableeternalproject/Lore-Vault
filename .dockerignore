@@ -1,0 +1,15 @@
+# 只送 pyproject.toml、uv.lock、src/、docker/、ui/app/ 進建置上下文；其餘一律排除。
+# 密鑰（.env）與語料（agent_memory_spike/data、data/）絕不能進映像。
+*
+!pyproject.toml
+!uv.lock
+!src/
+!docker/
+!ui/app/
+# UI 的本機產物不送（映像內由 ui-builder 階段 npm ci + build 重新產生）
+ui/app/node_modules/
+ui/app/dist/
+ui/app/test-results/
+ui/app/playwright-report/
+**/__pycache__
+**/*.py[cod]

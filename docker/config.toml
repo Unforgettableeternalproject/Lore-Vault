@@ -1,0 +1,28 @@
+# 映像內預設設定（LORE_VAULT_CONFIG 指向本檔）。個別項目可用環境變數
+# LORE_VAULT_<區段>_<項目> 覆寫；密鑰不可寫在這裡（OPENAI_API_KEY 等走 env_file）。
+
+[database]
+# /data 是 named volume（docker-compose.yml 的 lore-vault-data）
+path = "/data/lore.db"
+
+[embedding]
+# 主機上的 Ollama；ollama profile 以 LORE_VAULT_EMBEDDING_BASE_URL=http://ollama:11434 覆寫
+base_url = "http://host.docker.internal:11434"
+
+[backup]
+# 主機 bind mount 的備份目錄：只放備份檔，不是 live DB
+dir = "/backups"
+
+[documents]
+# 原始檔 blob 放 named volume 內（與資料庫同一個 volume，不 bind mount）
+blob_dir = "/data/blobs"
+
+[ui]
+# ui-builder 階段建置的靜態檔（Dockerfile COPY 到這裡）；服務在 /ui 提供
+static_dir = "/app/ui"
+# 採信 CF-Connecting-IP 的直接來源（逗號分隔 IP／CIDR），登入紀錄才記得到真實來源：
+# - 主機上的 cloudflared 經發布埠連入，來源是 Docker 閘道（如 172.20.0.1）
+# - tunnel profile 的 cloudflared 在同一個 compose 網路，來源是該網路的容器 IP
+# 兩者都落在 Docker 預設網段 172.16.0.0/12；compose 網路若被分配到 192.168.x.x，
+# 用環境變數 LORE_VAULT_UI_TRUSTED_PROXIES 覆寫。
+trusted_proxies = "172.16.0.0/12"

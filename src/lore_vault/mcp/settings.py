@@ -1,0 +1,100 @@
+"""MCP 殼設定：沿用 `lore_vault.config` 的優先序（環境變數 > 設定檔 > 預設）與密鑰規則。
+
+- 非密鑰項目在設定檔 `[mcp]` 區段，或環境變數 `LORE_VAULT_MCP_<項目>`
+- bearer token 只從環境變數 `LORE_VAULT_API_TOKEN`（或 `--env-file`）讀
+- Cloudflare Access service token：`CF_ACCESS_CLIENT_ID`／`CF_ACCESS_CLIENT_SECRET`
+  來自環境變數、`--env-file`，或 `mcp.cf_access_env_file` 指向的檔案
+- 密鑰一律包在 `Secret`，repr／錯誤訊息不含值
+"""
+
+from __future__ import annotations
+
+import os
+from collections.abc import Mapping
+from dataclasses import dataclass
+from os import PathLike
+from pathlib import Path
+
+from lore_vault.config import (
+    API_TOKEN_ENV,
+    ConfigError,
+    Secret,
+    api_token,
+    cf_access_credentials,
+    load_config,
+)
+
+# concept 快照在快照目錄下的預設檔名
+# （與 spike 的 concepts.json 不同目錄，不會覆蓋現行檔）
+CONCEPT_SNAPSHOT_NAME = "concepts.json"
+
+
+@dataclass(frozen=True)
+class ShellSettings:
+    base_url: str
+    token: Secret
+    cf_access: tuple[Secret, Secret] | None = None
+    timeout: float = 10.0
+    snapshot_dir: Path | None = None
+    snapshot_interval: float = 900.0
+    snapshot_max_age_hours: float = 24.0
+    # PreToolUse 讀的 concept 快照檔（T-40）；None＝不拉
+    concept_snapshot_path: Path | None = None
+    # 殼啟動時是否在背景拉快照（測試關掉以便手動控制）
+    snapshot_on_start: bool = True
+    # `upload` 可讀的額外目錄（殼的工作目錄一律可讀，見 `Shell.upload_roots`）
+    upload_roots: tuple[Path, ...] = ()
+    # `upload` 在殼端先擋的檔案大小上限（服務端另有同一上限）
+    max_upload_bytes: int = 25 * 1024 * 1024
+    # `ask` 工具的請求逾時（服務端檢索 + 模型呼叫）
+    ask_timeout: float = 90.0
+    # `download` 一次最多收多少位元組：stdio 殼為 documents.max_file_bytes（寫本機檔）；
+    # HTTP 端點為 mcp.http_download_max_bytes（base64 進上下文，刻意設小）
+    download_max_bytes: int = 25 * 1024 * 1024
+
+
+def load_shell_settings(
+    *,
+    config_path: str | PathLike[str] | None = None,
+    env_file: str | PathLike[str] | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> ShellSettings:
+    config = load_config(config_path, env_file=env_file, environ=environ)
+    mcp = config.mcp
+    token = api_token(env_file=env_file, environ=environ)
+    if token is None:
+        raise ConfigError(f"未設定 {API_TOKEN_ENV}，MCP 殼無法向服務認證")
+    cf_file = (
+        Path(mcp.cf_access_env_file).expanduser() if mcp.cf_access_env_file else None
+    )
+    cf = cf_access_credentials(cf_env_file=cf_file, env_file=env_file, environ=environ)
+    snapshot_dir = Path(mcp.snapshot_dir).expanduser() if mcp.snapshot_dir else None
+    if mcp.concept_snapshot_path:
+        concept_path: Path | None = Path(mcp.concept_snapshot_path).expanduser()
+    else:
+        concept_path = snapshot_dir / CONCEPT_SNAPSHOT_NAME if snapshot_dir else None
+    return ShellSettings(
+        base_url=mcp.base_url.rstrip("/"),
+        token=token,
+        cf_access=cf,
+        timeout=mcp.timeout,
+        snapshot_dir=snapshot_dir,
+        snapshot_interval=mcp.snapshot_interval,
+        snapshot_max_age_hours=mcp.snapshot_max_age_hours,
+        concept_snapshot_path=concept_path,
+        upload_roots=parse_upload_roots(mcp.upload_roots),
+        max_upload_bytes=config.documents.max_file_bytes,
+        ask_timeout=mcp.ask_timeout,
+        download_max_bytes=config.documents.max_file_bytes,
+    )
+
+
+def parse_upload_roots(value: str | None) -> tuple[Path, ...]:
+    """`mcp.upload_roots`：以 os.pathsep 分隔的目錄清單；空白項忽略。"""
+    if not value:
+        return ()
+    return tuple(
+        Path(part.strip()).expanduser()
+        for part in value.split(os.pathsep)
+        if part.strip()
+    )

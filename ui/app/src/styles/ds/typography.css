@@ -1,0 +1,50 @@
+/* 複製自 ui/design-source/_ds/…/tokens/typography.css（U.E.P 設計系統），請勿直接修改；更新設計系統時整檔重新複製。 */
+/* Four families, three voices.
+   Stacks resolve per-glyph: Georgia carries latin, the CJK serifs behind it
+   carry Chinese while Noto Serif TC is still downloading. Keep the platform
+   CJK serifs in the stack — they are the normal state, not a failure path. */
+:root{
+  --font-display:'Cormorant Garamond','Source Han Serif TC','Noto Serif TC',Georgia,'Songti TC','Noto Serif CJK TC',serif;
+  --font-serif-tc:'Noto Serif TC','Source Han Serif TC',Georgia,'Songti TC','Noto Serif CJK TC',serif;
+  --font-sans:'Inter','Noto Sans TC',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+  --font-mono:'JetBrains Mono',ui-monospace,'SF Mono',monospace;
+  --font-timeline:'Cinzel','Noto Serif TC',serif;
+
+  /* Display scale (var(--font-display), weight 500-600) */
+  --size-display-hero:76px;   /* home hero h1 */
+  --size-display-entry:88px;  /* zone entry h1 */
+  --size-display-zone:58px;   /* reader landing / zone title */
+  --size-display-scene:52px;  /* journey scene zone title */
+  --size-display-article:42px;
+  --size-display-h1:34px;
+  --size-display-h2:28px;
+  --size-display-sidebar:26px;
+  --size-display-card:22px;
+  --size-display-brand:15px;
+
+  /* Reading scale (var(--font-serif-tc)) */
+  --size-prose:17px;
+  --line-prose:2.08; /* @kind other */
+  --size-lede:16px;
+  --line-lede:1.9; /* @kind other */
+  --size-narration:15px;
+  --line-narration:2; /* @kind other */
+  --size-body:14px;
+  --size-blurb:13px;
+  --line-blurb:1.8; /* @kind other */
+
+  /* Mono labels — always uppercase, always tracked out */
+  --size-label:11px;
+  --size-label-sm:10px;
+  --size-label-xs:9px;
+  --track-label:.12em;
+  --track-label-wide:.16em;
+  --track-label-crumb:.22em;
+  --track-label-ritual:.34em;
+
+  /* Semantic aliases */
+  --text-prose-font:var(--font-serif-tc);
+  --text-title-font:var(--font-display);
+  --text-label-font:var(--font-mono);
+  --text-ui-font:var(--font-sans);
+}

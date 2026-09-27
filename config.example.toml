@@ -1,0 +1,152 @@
+# Lore Vault 設定範例（複製成 config.toml 後修改；以 --config 或環境變數 LORE_VAULT_CONFIG 指定）。
+# 優先序：環境變數 LORE_VAULT_<區段>_<項目>（例：LORE_VAULT_EMBEDDING_BASE_URL）> 本檔 > 預設值。
+# 密鑰不可寫在這裡：OpenAI key 只從環境變數 OPENAI_API_KEY（或 .env）讀取，
+# 本檔出現 api_key／token／secret／password 之類的鍵會直接拒絕載入。
+# HTTP API 的 bearer token 只從環境變數 LORE_VAULT_API_TOKEN 讀取（未設定時服務拒絕啟動）。
+
+[database]
+# 資料庫路徑（資料目錄尚未定案，見 D5；無預設值）
+# path = "C:/path/to/lore.db"
+
+[embedding]
+provider = "ollama"
+# docker 內請改 http://host.docker.internal:11434
+base_url = "http://localhost:11434"
+model = "bge-m3"
+dim = 1024
+timeout = 30.0
+# HTTP API 請求路徑（recall、write 查重）的逾時（秒）；逾時即降級為只走 lexical
+query_timeout = 3.0
+# 模型未載入時（Ollama /api/ps 查不到這個模型＝冷啟動）請求路徑改用的逾時（秒）；
+# 探測失敗時仍用 query_timeout
+cold_query_timeout = 20.0
+# 每分鐘呼叫上限；0 = 不限
+rate_per_minute = 0
+# Ollama keep_alive：請求後模型留在記憶體多久（Go duration；純整數為秒數、負值＝常駐；
+# 空字串＝不送，用 Ollama 預設 5m）。冷啟動載入約 2 秒，逼近 query_timeout
+keep_alive = "30m"
+
+[summary]
+provider = "openai"
+base_url = "https://api.openai.com/v1"
+model = "gpt-6-luna"
+# 必須明確設定：不指定時推理會吃光 max_completion_tokens、回傳空字串（D4）
+reasoning_effort = "low"
+max_completion_tokens = 1000
+timeout = 60.0
+rate_per_minute = 30
+
+[ask]
+# ask()（D11）：recall 取回的 note 片段交模型整理成逐點回答（POST /v1/ask、MCP ask）。
+# key 同樣走 OPENAI_API_KEY；沒有 key 時 ask 回 ask_not_configured，doctor ask.provider 為 warn
+# 關閉時 ask 回 403 ask_disabled（UI 設定頁可在執行期覆寫）
+enabled = true
+provider = "openai"
+base_url = "https://api.openai.com/v1"
+model = "gpt-6-luna"
+# 必須明確設定：不指定時推理會吃光 max_completion_tokens、回傳空字串（D4）
+reasoning_effort = "low"
+max_completion_tokens = 2000
+# 模型呼叫逾時（秒）；MCP 殼的 mcp.ask_timeout 要比它長
+timeout = 60.0
+# 每則 note 送進模型的正文節錄上限（字元）；k 預設 10、上限 20
+snippet_max_chars = 6000
+
+[episodes]
+# 服務是否接受各機器 hook 推送的 episode（對話紀錄，POST /v1/episodes）。預設關閉：
+# 自架者不會意外把對話原文集中到服務上。關閉時回 403 episode_ingest_disabled，
+# 客戶端 spool 把紀錄留在本機、拉長退避，開啟後自動補推；已收進來的照常可讀。
+# 也可用環境變數 LORE_VAULT_EPISODES_INGEST=true，或在 UI 設定頁執行期切換（存 DB、覆寫本值）
+ingest = false
+
+[worker]
+# 同一版本最多嘗試幾次，超過標記失敗（doctor enrich.failed 會紅）
+max_attempts = 3
+# 每輪每種補算最多處理幾則
+batch_size = 50
+# 失敗後重試間隔（秒）：第 n 次失敗後等 retry_backoff * 2^(n-1)
+retry_backoff = 60.0
+# 常駐模式兩輪之間的間隔（秒）
+poll_interval = 30.0
+
+[backup]
+# 備份目錄（容器內為 /backups，由主機 bind mount 一個只放備份的目錄）
+# dir = "/backups"
+# 保留最近幾份
+keep = 7
+# doctor「最近一次備份」門檻（小時）：超過或從未備份為 fail
+max_age_hours = 26.0
+
+[api]
+# HTTP 服務是否在同一程序內跑背景補算 worker（單一寫入程序，A9）；關閉時另跑 python -m lore_vault.enrich
+enrich_worker = true
+# 啟動後在背景做一次 embedding 暖機（用完整 embedding.timeout；不阻擋啟動、失敗只記 log，
+# 結果見 /v1/status 的 embedding.warmup）
+embedding_warmup = true
+# 同程序的文件 worker（抽取 → 切段 → 索引 → chunk 向量）；documents.blob_dir 未設定時不啟動
+document_worker = true
+
+[mcp]
+# 各機器本地 MCP 殼（python -m lore_vault.mcp）。token 與 CF 憑證是密鑰，不寫在這裡：
+# LORE_VAULT_API_TOKEN、CF_ACCESS_CLIENT_ID／CF_ACCESS_CLIENT_SECRET 走環境變數或 --env-file。
+# 服務位址：本機 docker 為 127.0.0.1:5056；遠端改成 Cloudflare 子網域（https://...）
+base_url = "http://127.0.0.1:5056"
+# 每個請求的逾時（秒）；逾時視為服務不可達（讀取降級、寫入失敗）
+timeout = 10.0
+# 本地唯讀快照目錄（無預設；未設定時服務不可達就無法降級讀取）
+# snapshot_dir = "C:/path/to/lore-vault/snapshot"
+# 定期拉快照的間隔（秒）；0 = 只在殼啟動時拉一次
+snapshot_interval = 900.0
+# doctor 快照年齡門檻（小時）
+snapshot_max_age_hours = 24.0
+# Cloudflare Access service token 檔（格式同 ~/.cloudflared/pm-token.env）；本機直連不需要
+# cf_access_env_file = "~/.cloudflared/pm-token.env"
+# PreToolUse 讀的 concept 快照檔（GET /v1/concepts/export）；未設定時為 <snapshot_dir>/concepts.json
+# hook 端以 client.env 的 LORE_VAULT_CONCEPT_SNAPSHOT 指向同一個檔才會改讀它
+# concept_snapshot_path = "C:/path/to/lore-vault/snapshot/concepts.json"
+# upload 工具可讀的額外目錄（os.pathsep 分隔，Windows 為 ';'）。殼的工作目錄一律可讀——
+# 殼能讀到工作目錄下的任何檔案；路徑含 '..' 或 symlink 逃出白名單一律拒絕
+# upload_roots = "C:/Users/<you>/Documents/lore;D:/worldbuilding"
+# （download 工具寫本機檔也限在同一份白名單內；既有檔預設不覆寫）
+# 服務內建 HTTP MCP（/mcp）的 download 以 base64 回傳原始檔的上限（位元組）；
+# 內容會進 agent 上下文，超過時改用 stdio 殼或 UI 下載
+http_download_max_bytes = 1048576
+# ask 工具的請求逾時（秒）：涵蓋服務端檢索 + 模型呼叫，要比 ask.timeout 長
+ask_timeout = 90.0
+
+[documents]
+# 文件原始檔（blob，依 sha256 內容定址、去重）目錄；無預設，未設定時不能收文件。
+# docker 內為 /data/blobs（named volume），不要放 NTFS bind mount
+# blob_dir = "C:/path/to/lore-vault/blobs"
+# 單檔原始大小上限（位元組，預設 25MB）
+max_file_bytes = 26214400
+# 抽出文字總長上限（字元）；超過標 too_large
+max_chars = 10000000
+# pdf 抽出文字去空白後少於此字數標 empty_extraction（多半是掃描件；docx／pptx 不套）
+min_chars = 50
+# 切段：每個 chunk 的估算 token 上限與相鄰 chunk 重疊（只影響之後抽取的文件）
+chunk_max_tokens = 400
+chunk_overlap_tokens = 50
+# 卡在 extracting 超過此秒數 doctor documents.stuck_processing 為 fail
+stuck_seconds = 3600.0
+# pdf／docx／pptx 在子行程抽取：超過此秒數中止並標 corrupt（detail 註明 timeout）
+extract_timeout = 60.0
+# 抽取子行程的虛擬記憶體上限（MB，只在 Linux 生效；0 = 不限制）
+extract_memory_mb = 1024
+
+[ui]
+# 使用者 UI（A21）。登入用 DB 內的 UI 帳號密碼（A23）：`python -m lore_vault.cli.admin
+# ui-set-password --user <名稱>` 設定；全域失敗 3 次即鎖定、需 `ui-unlock --yes` 人工解鎖（規則固定）
+# Vite 建置產物目錄（含 index.html）；未設定 = 不提供 /ui 靜態檔（/ui/api/* 仍可用）
+# static_dir = "C:/path/to/Lore-Vault/ui/app/dist"
+# session cookie 帶 Secure（名稱為 __Host-lv_session）；只有用非 localhost 的 http 開發時才關閉
+cookie_secure = true
+# session 絕對期限（小時）與閒置期限（分鐘）；session 只存在服務記憶體，重啟即失效
+session_absolute_hours = 12.0
+session_idle_minutes = 60.0
+# 同時存在的 session 上限（超過淘汰最舊）
+max_sessions = 32
+# 登入紀錄保留天數（過期的在服務啟動與每次登入嘗試時清除）
+login_log_retention_days = 90.0
+# 受信任代理（逗號分隔 IP／CIDR）：直接連線來源在清單內時才採信 CF-Connecting-IP（登入紀錄的來源）；空 = 一律用直接連線來源
+trusted_proxies = ""

@@ -1,0 +1,874 @@
+#!/usr/bin/env python3
+"""Phase 3 C：把「收料 → 蒸餾 → 收斂 → 校準 → 入池」串成一條可排程的管線。
+
+至今每一輪都是手動派 subagent 跑的。那樣可行但不可持續：語料每天都在長，
+而蒸餾、收斂、校準各自都要幾十個 agent。
+
+## 裁決走 `claude -p`，不走 API
+
+headless 的 `claude -p` 與手動派 subagent 等價——同一個模型、同一組工具、
+同一份訂閱額度，不額外花錢。走 API 要另外付費，而且得自己重建工具迴圈。
+
+## 為什麼不掛在 hook 上
+
+想過 `SessionEnd`。不行：蒸餾要跑幾分鐘，hook 得 detach 才不會卡住結束流程，
+detach 之後失敗是靜默的、難追；而且剛結束工作時機器最忙。
+排程器在凌晨跑，兩個問題都沒有。
+
+## 三道安全閥
+
+1. **lockfile**：兩個蒸餾疊在一起會重複寫入 concept 池，而 `--incremental`
+   的 watermark 是跑完才寫的，疊跑期間兩邊都看到「還沒做過」
+2. **每次上限**：語料累積一週再跑，一次可能有上百組，成本要封頂
+3. **dry-run 預設**：這條管線會改 `concepts.json`，而刪掉的條目救不回來
+
+## 用法
+
+    python pipeline.py --status            # 看上次跑到哪
+    python pipeline.py --run --dry-run     # 印出要做什麼，不執行
+    python pipeline.py --run               # 實跑（受 --max-groups 限制）
+    python pipeline.py --run --stage distill   # 只跑一個階段
+
+## 服務轉接層（階段 8）
+
+A13：三個階段都要 `claude -p`，整條管線留在主機排程，改經服務 HTTP 讀 episode、寫 concept。
+
+**episode 來源（D13）**：`pull` 階段（health 之後、distill 之前）先推本機 spool，再依服務端
+`seq` 水位增量拉取全部機器的 episode 到 `paths.EPISODE_CACHE_DIR`，與本機 jsonl 依
+(session_id, prompt_id, turn_index) 合併去重，蒸餾讀合併結果（`distill.py --episode-dir`）。
+服務不可達時預設退回本機 jsonl（`--on-pull-failure fail` 改為停止）；`--episode-source local`
+強制只讀本機（除錯用）。結果記在 `pipeline_state.json` 的 `episode_pull`，
+健康告警與 doctor `episode_pull.status` 讀它。設計與保護見 `episode_source.py`。
+
+以下兩個手動旗標保留（不經 STAGES、不改判卷邏輯）：
+
+    python pipeline.py --pull-episodes OUT.jsonl [--since UTC]   # GET /v1/episodes（全部 vault）
+    python pipeline.py --push-concepts [--dry-run]               # POST /v1/concepts（upsert + 刪除）
+
+服務位址與 token 讀 `client.env`（同 Stop hook，見 `paths.CLIENT_ENV_PATH`）。
+
+`--push-concepts` 不在 STAGES 內，由排程腳本 `run_pipeline.ps1` 在 `--run` 成功後另跑一次。
+每次實推（非 dry-run）都把結果寫進 `pipeline_state.json` 的 `concept_push`（成功或失敗），
+SessionStart 健康告警讀它；doctor `concept_push.lag` 比對本地 id 與已推送 id。
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Callable
+
+sys.path.insert(0, str(Path(__file__).parent))
+from hook_stop import DEFAULT_EPISODE_DIR  # noqa: E402
+
+HERE = Path(__file__).parent
+from paths import PIPELINE_LOCK_PATH as LOCK_PATH  # noqa: E402
+from paths import PIPELINE_STATE_PATH as STATE_PATH  # noqa: E402
+from paths import WORK_DIR  # noqa: E402
+from paths import CLIENT_ENV_PATH, CONCEPT_PATH  # noqa: E402
+from paths import EPISODE_CACHE_DIR  # noqa: E402
+
+import episode_source as ep_source  # noqa: E402
+
+# 鎖過期時間。程序被 kill 掉時鎖不會被清掉，沒有這個機制管線會永遠停擺；
+# 訂在 6 小時是因為單輪最慢的階段（校準）實測也遠短於此
+LOCK_STALE_SECONDS = 6 * 60 * 60
+
+# 每次執行的組數上限。語料累積一週可能有上百組，而每組都要一次 LLM 裁決
+DEFAULT_MAX_GROUPS = 40
+
+# 一次裁決的逾時。實測 20 組蒸餾一次呼叫要 ~13 分鐘，原本的 15 分鐘
+# 對 40 組的批次會直接超時；排程在凌晨跑，慢一點無所謂，但不能無限等
+ADJUDICATION_TIMEOUT = 1800
+
+
+# 每個裁決 prompt 的開場。**這段是實測逼出來的**：
+# headless 的 `claude -p` 一樣會載入全域 CLAUDE.md 與 SessionStart 注入，
+# 於是第一次實跑時它進入了對話模式——把標記誤認成別的工具的標記、
+# 反問我要不要順便派人審查，一個指令都沒執行。
+# 講明「非互動、直接執行、不要回問」之後才會照做。
+# 標記也從 [PIPELINE] 換成 [AUTO]：前者與 claude-codex-pipeline 撞名。
+AUTO_PREAMBLE = """\
+[AUTO] 這是一個**非互動的自動化批次任務**，沒有人在旁邊看，你的回覆會被程式解析。
+
+因此：直接執行下面的步驟，不要回問、不要徵求確認、不要提議別的做法、
+不要說明你打算怎麼做。完成後只回覆被要求的那個 JSON 區塊。
+
+"""
+
+
+class LockBusy(RuntimeError):
+    pass
+
+
+def acquire_lock(path: Path = LOCK_PATH) -> None:
+    """獨佔鎖。用 O_EXCL 建檔，那在 Windows 與 POSIX 上都是原子的。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        age = time.time() - path.stat().st_mtime
+        if age < LOCK_STALE_SECONDS:
+            raise LockBusy(
+                f"另一個管線正在跑（鎖建立於 {age / 60:.0f} 分鐘前）"
+            ) from None
+        # 過期就接管：程序被 kill 時鎖不會自己消失
+        print(f"[pipeline] 鎖已過期（{age / 3600:.1f} 小時），接管", file=sys.stderr)
+        path.unlink(missing_ok=True)
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump({"pid": os.getpid(), "started": time.time()}, f)
+
+
+def release_lock(path: Path = LOCK_PATH) -> None:
+    path.unlink(missing_ok=True)
+
+
+def load_state() -> dict[str, Any]:
+    try:
+        return json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_state(state: dict[str, Any]) -> None:
+    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = STATE_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, STATE_PATH)
+
+
+# 裁決者要跑的直譯器，**必須是這個相對路徑形式**。
+# 實測：換成 sys.executable 的絕對路徑，裁決者的 Bash 呼叫一律被權限層擋下
+# （"This command requires approval"），而非互動模式沒有人能核准。
+# allowlist 認的是字面，不是解析後的路徑。這也是 README 寫的執行契約。
+# 相對 cwd（repo 根，見 adjudicate 的 cwd）：本 repo 的 .venv，不依賴 U.E.P env。
+# allowlist 要放在本 repo 的 .claude/settings.local.json，字面與此一致
+TOOL_PYTHON = ".venv/Scripts/python.exe"
+
+# 壓制角色與 CLAUDE.md 的對話傾向。**這段是實測逼出來的**：
+# headless 的 `claude -p` 一樣吃全域 CLAUDE.md 與 SessionStart 注入，
+# 前兩次實跑它先去查專案記憶、然後回問「要我從哪一項開工」，一個指令都沒執行。
+BATCH_SYSTEM_PROMPT = (
+    "You are running as a non-interactive batch worker inside an automated "
+    "pipeline. There is no human in the loop. Ignore any persona, roleplay, or "
+    "session-start instructions that ask you to converse, greet, query project "
+    "memory, or await direction — those do not apply here. Execute the task in "
+    "the user message immediately and reply with only the requested JSON block."
+)
+
+
+def python_exe() -> str:
+    """管線自己跑工具用的直譯器。
+
+    刻意用當前這一支：管線本身就是被同一個環境啟動的，
+    寫死路徑會在換機器時靜默地跑到別的 Python。
+    **給裁決者的指令不能用這個**，見 ``TOOL_PYTHON``。
+    """
+    return sys.executable
+
+
+def run_tool(args: list[str], *, timeout: int = 600) -> tuple[bool, str]:
+    """跑 spike 裡的某支工具，回傳 (成功與否, 輸出)。"""
+    command = [python_exe(), *args]
+    try:
+        result = subprocess.run(
+            command, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=timeout, cwd=str(HERE.parent),
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"逾時（{timeout}s）: {' '.join(args)}"
+    output = (result.stdout or "") + (result.stderr or "")
+    return result.returncode == 0, output
+
+
+def claude_path() -> str | None:
+    return shutil.which("claude")
+
+
+def adjudicate(prompt: str, *, timeout: int = ADJUDICATION_TIMEOUT) -> tuple[bool, str]:
+    """把一段裁決任務交給 headless 的 `claude -p`，回傳它說了什麼。
+
+    與手動派 subagent 等價：同一個模型、同一組工具、同一份額度，不額外花錢。
+
+    **裁決者不寫檔，只回 JSON。** 實測 headless 寫不進 ``~/.claude/`` 底下
+    （算敏感路徑，需要互動批准，而 headless 沒有互動），而 spike 的產物全都在那裡。
+    可以放寬權限繞過，但讓裁決者只做判斷、由這裡負責落地更乾淨：
+    寫入的範圍被程式限死，裁決者拿到的權限也就不需要超過讀取。
+    """
+    binary = claude_path()
+    if binary is None:
+        return False, "找不到 claude CLI"
+    try:
+        # prompt 走 stdin 而不是命令列參數：把它接在 --append-system-prompt 後面時，
+        # 實測 claude 收不到任務內容（回「Could you send the task content?」），
+        # 而且 Windows 的命令列有 32K 長度上限，判卷材料很容易撞到
+        result = subprocess.run(
+            [binary, "-p", "--append-system-prompt", BATCH_SYSTEM_PROMPT],
+            input=prompt, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=timeout, cwd=str(HERE.parent),
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"裁決逾時（{timeout}s）"
+    return result.returncode == 0, result.stdout or result.stderr or ""
+
+
+_FENCE = "```"
+
+
+def extract_json(text: str) -> Any | None:
+    """從裁決者的回覆裡抽出 JSON。
+
+    回覆通常是「一段說明 + 一個 ```json 區塊」。先找柵欄，找不到再退回
+    「第一個 ``{``/``[`` 到最後一個 ``}``/``]``」——那個退路救得回沒有加柵欄的情況，
+    而多抓到的前後文會讓 json.loads 直接失敗，不會靜默產生半截資料。
+    """
+    candidates: list[str] = []
+    if _FENCE in text:
+        parts = text.split(_FENCE)
+        # 奇數索引才是柵欄內容
+        for block in parts[1::2]:
+            block = block.strip()
+            if block.startswith("json"):
+                block = block[4:].strip()
+            if block.startswith(("{", "[")):
+                candidates.append(block)
+    # 兩種括號都試，但**先試開始得早、涵蓋得長的那個**：
+    # 回覆是一個陣列時，先找 `{` 會抽到陣列裡的第一個物件而不是整個陣列，
+    # 那樣 json.loads 會成功，於是靜默地只收到一筆
+    spans: list[tuple[int, int]] = []
+    for opener, closer in (("{", "}"), ("[", "]")):
+        start, end = text.find(opener), text.rfind(closer)
+        if 0 <= start < end:
+            spans.append((start, end))
+    for start, end in sorted(spans, key=lambda span: (span[0], -span[1])):
+        candidates.append(text[start:end + 1])
+
+    for candidate in candidates:
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def adjudicate_to_file(prompt: str, path: Path, *,
+                       timeout: int = ADJUDICATION_TIMEOUT) -> tuple[bool, str]:
+    """裁決一次，把它回覆裡的 JSON 落地成檔案。
+
+    落地由這裡做而不是由裁決者做，理由見 ``adjudicate``。
+    抽不出 JSON 就算失敗——**不要寫一個空檔案**，那會讓下游的 ``--ingest``
+    收到「零筆結果」而看起來像正常跑完，正是這個專案反覆踩到的靜默失敗。
+    """
+    ok, reply = adjudicate(prompt, timeout=timeout)
+    if not ok:
+        return False, reply[-300:]
+    payload = extract_json(reply)
+    if payload is None:
+        return False, f"回覆裡沒有可解析的 JSON: {reply[-300:]}"
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    count = len(payload) if isinstance(payload, list) else len(
+        payload.get("verdicts") or payload.get("results") or payload or {}
+    )
+    return True, f"{count} 筆 → {path.name}"
+
+
+# --- 階段 -------------------------------------------------------------------
+# 每個階段都是 (名稱, 說明, 執行函式)。函式收 (ctx) 回傳 (成功與否, 摘要)。
+# 拆成階段而不是一支長函式，是為了能單獨重跑——某一階段的裁決失敗時，
+# 前面已經完成的部分不該重來（蒸餾特別貴）。
+
+
+def stage_collect(ctx: dict[str, Any]) -> tuple[bool, str]:
+    """收料：把所有 transcript 的新輪次補進語料。"""
+    if ctx["dry_run"]:
+        return True, "會跑 hook_stop.py --sync-all"
+    ok, out = run_tool(["agent_memory_spike/hook_stop.py", "--sync-all"])
+    return ok, pick_summary(out, "sync-all")
+
+
+def stage_health(ctx: dict[str, Any]) -> tuple[bool, str]:
+    """健檢：語料有問題就不該往下蒸餾，錯的語料只會蒸出錯的記憶。"""
+    if ctx["dry_run"]:
+        return True, "會跑 hook_stop.py --doctor"
+    ok, out = run_tool(["agent_memory_spike/hook_stop.py", "--doctor"])
+    return ok, pick_summary(out, "發現", "未發現不一致")
+
+
+def stage_distill(ctx: dict[str, Any]) -> tuple[bool, str]:
+    """蒸餾：產出候選任務 → 裁決 → 收回。"""
+    limit = ctx["max_groups"]
+    if ctx["dry_run"]:
+        return True, f"會產出增量蒸餾任務並裁決最多 {limit} 組"
+
+    # 語料來源由 pull 階段決定（D13）；`--stage distill` 單跑時在這裡補做一次
+    ok, summary = ensure_episode_source(ctx)
+    if not ok:
+        return False, summary
+    ok, out = run_tool(["agent_memory_spike/distill.py", "--emit", "--all", "--incremental",
+                        "--episode-dir", str(ctx["episode_dir"])])
+    if not ok:
+        return False, f"產任務失敗: {out[-300:]}"
+
+    pending = _pending_count(WORK_DIR / "distill_tasks.json", "tasks")
+    if pending == 0:
+        return True, "沒有新的候選組"
+
+    batch = min(pending, limit)
+    # 回覆的信封格式必須在這裡釘死。`--show` 印的判準只定義**單組**的
+    # 輸出（`{"concepts": [...]}`），手動時代的每組 id 信封是派工 prompt 給的。
+    # 第一次自動實跑漏了這段，裁決者把 24 組融成一包沒有 id 的 concepts，
+    # ingest 對不上任何 task → 收回 0 條、watermark 不進帳，而階段照樣報 OK
+    prompt = (
+        AUTO_PREAMBLE + "記憶蒸餾任務。在這個 repo 底下執行：\n\n"
+        f'"{TOOL_PYTHON}" agent_memory_spike/distill.py --show 0-{batch - 1}\n\n'
+        "輸出開頭是蒸餾準則，照著做。除了那個指令之外不需要讀取其他檔案。\n"
+        "**不要寫任何檔案**——把結果直接以一個 ```json 區塊回覆給我。\n"
+        "回覆格式是一個 JSON 陣列，**每一組候選一個元素、id 原樣照抄**，"
+        "空手的組也要列出（concepts 給空陣列）：\n"
+        '[{"id": "cand-000", "concepts": [...]}, {"id": "cand-001", "concepts": []}, ...]'
+    )
+    # 落地到專用目錄，**不能與手動批次共用 distill_out**：那裡躺著舊 emit
+    # 的結果檔，跟著一起 ingest 只會整批對不上 id、把警告淹掉
+    ok, reply = adjudicate_to_file(prompt, WORK_DIR / "distill_out_auto" / "auto-00.json")
+    if not ok:
+        return False, f"裁決失敗: {reply}"
+
+    ok, out = run_tool([
+        "agent_memory_spike/distill.py", "--ingest",
+        str(WORK_DIR / "distill_out_auto" / "auto-00.json"), "--incremental",
+    ])
+    if ok and _credited(out) <= 0:
+        # 蒸餾花了幾分鐘的裁決，一組都沒被記進 watermark = 收回端沒吃到，
+        # 下次還會重蒸同一批。這是失敗，不是「沒有新東西」
+        return False, f"裁決結果一組都沒對上 tasks: {pick_summary(out, '⚠', '組')}"
+    return ok, pick_summary(out, "concept", "distill")
+
+
+def stage_consolidate(ctx: dict[str, Any]) -> tuple[bool, str]:
+    """收斂：算配對 → 裁決 → 收回 → 補關係閉包。
+
+    閉包一定要在收回之後跑：`DUPLICATE` 是等價關係、矛盾沿等價類傳播，
+    而兩兩判定不會自己閉合。
+    """
+    if ctx["dry_run"]:
+        return True, "會算相似對、裁決、收回，然後補關係閉包"
+
+    ok, out = run_tool(["agent_memory_spike/consolidate.py", "--pairs"], timeout=1800)
+    if not ok:
+        return False, f"算配對失敗: {out[-300:]}"
+
+    pending = _pending_count(WORK_DIR / "consolidate_pairs.json", "pairs")
+    if pending == 0:
+        return True, "沒有值得判定的配對"
+
+    batch = min(pending, ctx["max_groups"])
+    prompt = (
+        AUTO_PREAMBLE + "記憶池收斂的配對判定。在這個 repo 底下執行：\n\n"
+        f'"{TOOL_PYTHON}" agent_memory_spike/consolidate.py --show 0-{batch - 1}\n\n'
+        "輸出開頭是判定準則，照著做。**判斷紀律那節要嚴格遵守：不確定就給 DISTINCT**，"
+        "誤判會不可逆地刪掉真實記憶。\n"
+        "**不要寫任何檔案**——把結果直接以一個 ```json 區塊回覆給我即可。"
+    )
+    ok, reply = adjudicate_to_file(prompt, WORK_DIR / "consolidate_out_auto" / "batch-00.json")
+    if not ok:
+        return False, f"裁決失敗: {reply}"
+
+    ok, out = run_tool([
+        "agent_memory_spike/consolidate.py", "--ingest",
+        str(WORK_DIR / "consolidate_out_auto"),
+    ])
+    if not ok:
+        return False, f"收回失敗: {out[-300:]}"
+
+    ok2, out2 = run_tool([
+        "agent_memory_spike/consolidate.py", "--transitive",
+        str(WORK_DIR / "consolidate_out_auto"), "--apply",
+    ])
+    return ok and ok2, (pick_summary(out, "→", "移除")
+                        + " | " + pick_summary(out2, "→", "沒有需要處理"))
+
+
+def stage_calibrate(ctx: dict[str, Any]) -> tuple[bool, str]:
+    """校準：出題 → 受測 → 判卷 → 收回。
+
+    受測與判卷**必須是兩次獨立的裁決**：合成一次就等於讓受測者看到答案，
+    整場測試退化成自評，而自評在最有價值的條目上系統性失準。
+    """
+    if ctx["dry_run"]:
+        return True, f"會對最多 {ctx['calibrate_max']} 條未校準的記憶跑行為測試"
+
+    ok, out = run_tool([
+        "agent_memory_spike/calibrate.py", "--emit",
+        "--sample", str(ctx["calibrate_max"]),
+    ])
+    if not ok:
+        return False, f"出題失敗: {out[-300:]}"
+
+    pending = _pending_count(WORK_DIR / "probe_tasks.json", "probes")
+    if pending == 0:
+        return True, "沒有待校準的條目"
+
+    answer_dir = WORK_DIR / "probe_out_auto"
+    probe_prompt = (
+        AUTO_PREAMBLE + "這批是同事丟過來的開發問題，需要你逐題作答。在這個 repo 底下執行：\n\n"
+        f'"{TOOL_PYTHON}" agent_memory_spike/calibrate.py --show-probes 0-{pending - 1}\n\n'
+        "那份輸出開頭有作答須知，照著做。**除了那一個指令之外不要執行任何其他指令、"
+        "不要讀取任何檔案、不要 grep、不要搜尋**——這些專案不在你手上，查了也找不到對的東西。\n"
+        "**不要寫任何檔案**——把作答結果直接以一個 ```json 區塊回覆給我，"
+        '格式 [{"id": "c-000", "answer": "..."}]。'
+    )
+    ok, reply = adjudicate_to_file(probe_prompt, answer_dir / "answers-00.json")
+    if not ok:
+        return False, f"受測失敗: {reply}"
+
+    # 信封格式同樣要釘死（理由見 stage_distill）：第一次自動實跑判卷者
+    # 回了 {"c-689": {...}} 這種以 id 為鍵的 dict，ingest 期望的是
+    # [{"id": ..., "verdict": ...}]，更新 0 條而摘要被 report 的
+    # 「已校準 214」蓋住，看起來像正常跑完
+    judge_prompt = (
+        AUTO_PREAMBLE + "判卷任務。在這個 repo 底下執行：\n\n"
+        f'"{TOOL_PYTHON}" agent_memory_spike/calibrate.py '
+        f"--show-judge 0-{pending - 1} --answer-path {answer_dir}\n\n"
+        "輸出開頭是判卷準則，逐題照著判，判定要嚴格。\n"
+        "**不要寫任何檔案**——把結果直接以一個 ```json 區塊回覆給我。\n"
+        "回覆格式是一個 JSON 陣列，每題一個元素、id 原樣照抄：\n"
+        '[{"id": "c-000", "verdict": "...", "evidence": "...", "note": "..."}, ...]'
+    )
+    ok, reply = adjudicate_to_file(judge_prompt, WORK_DIR / "verdicts_auto" / "verdicts-00.json")
+    if not ok:
+        return False, f"判卷失敗: {reply}"
+
+    ok, out = run_tool([
+        "agent_memory_spike/calibrate.py", "--ingest", str(WORK_DIR / "verdicts_auto"),
+    ])
+    if ok and _credited(out, r"更新 (\d+) 條") <= 0:
+        # 判卷跑完卻一條都沒更新 = 收回端沒吃到判定，
+        # 「已校準 N」那行是既有存量，不能拿來當這一輪的成功證據
+        return False, "判卷結果一條都沒對上 concepts"
+    return ok, pick_summary(out, "更新", "已校準")
+
+
+# 蒸餾的語料來源（D13）。預設從服務拉取全部機器的 episode、與本機 jsonl 合併去重；
+# 服務不可達時退回本機（只會漏掉遠端 episode，不會錯），在 state 的 episode_pull 標示，
+# 健康告警與 doctor episode_pull.status 讀它。細節見 episode_source.py
+EPISODE_SOURCES = ("service", "local")
+PULL_FAILURE_MODES = ("local", "fail")
+EPISODE_PULL_KEY = ep_source.EPISODE_PULL_KEY
+SPOOL_DIR = DEFAULT_EPISODE_DIR.parent / "spool"  # 同 hook_stop.spool_dir_for
+
+
+def push_spool_best_effort() -> str:
+    """拉取前先把本機 spool 推上去：collect 階段（--sync-all）補的輪次只進 spool、不推。
+    失敗不影響拉取——沒推上去的輪次本機 jsonl 仍有，合併時照樣收進來。"""
+    try:
+        from lore_vault.hooks import spool as lv_spool
+
+        settings = service_settings()
+        return lv_spool.push_all(SPOOL_DIR, settings).summary()
+    except Exception as exc:  # noqa: BLE001
+        return f"推送略過：{type(exc).__name__}: {exc}"[:200]
+
+
+def ensure_episode_source(ctx: dict[str, Any]) -> tuple[bool, str]:
+    """決定這一輪蒸餾讀哪個目錄，存進 ctx["episode_dir"]；同一輪只做一次。"""
+    if ctx.get("episode_dir") is not None:
+        return True, ctx.get("episode_summary") or ""
+    source = ctx.get("episode_source", "service")
+    on_failure = ctx.get("on_pull_failure", "local")
+    push_note = push_spool_best_effort() if source == "service" else None
+    state = load_state()
+    outcome = ep_source.resolve_source(
+        source=source, on_failure=on_failure, local_dir=DEFAULT_EPISODE_DIR,
+        cache_dir=EPISODE_CACHE_DIR, spool_dir=SPOOL_DIR,
+        settings_loader=service_settings, previous=state.get(EPISODE_PULL_KEY),
+    )
+    if push_note:
+        outcome.record["spool_push"] = push_note
+    state[EPISODE_PULL_KEY] = outcome.record
+    save_state(state)
+    summary = outcome.summary + (f"｜spool：{push_note}" if push_note else "")
+    print(f"[pipeline] episode 來源：{summary}", file=sys.stderr)
+    if outcome.ok:
+        ctx["episode_dir"] = outcome.episode_dir
+        ctx["episode_summary"] = summary
+    return outcome.ok, summary
+
+
+def stage_pull(ctx: dict[str, Any]) -> tuple[bool, str]:
+    """拉取：服務 → 本地快取 → 與本機 jsonl 合併去重（蒸餾讀合併結果）。"""
+    if ctx["dry_run"]:
+        source = ctx.get("episode_source", "service")
+        if source == "local":
+            return True, f"會只讀本機 jsonl {DEFAULT_EPISODE_DIR}（--episode-source local）"
+        cache_state = ep_source.load_cache_state(EPISODE_CACHE_DIR)
+        watermark = cache_state.get("after_seq")
+        plan = (f"從 seq > {watermark} 增量拉取" if isinstance(watermark, int)
+                else "全量拉取（沒有水位）")
+        fallback = ("失敗時退回本機 jsonl" if ctx.get("on_pull_failure", "local") == "local"
+                    else "失敗時停止管線")
+        return True, (f"會先推 spool，再{plan} GET /v1/episodes?vault=*，"
+                      f"與本機 {DEFAULT_EPISODE_DIR} 合併到 {EPISODE_CACHE_DIR}；{fallback}")
+    return ensure_episode_source(ctx)
+
+
+def pick_summary(output: str, *keywords: str) -> str:
+    """從工具輸出裡挑一行當摘要。
+
+    取最後一行不行——各支工具的結尾常常是排版或範例，
+    實測 `calibrate --report` 的最後一行是某條記憶的 scope，那對排程報告毫無意義。
+    """
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    for keyword in keywords:
+        for line in lines:
+            if keyword in line:
+                return line
+    return lines[-1] if lines else "（無輸出）"
+
+
+def _credited(output: str, pattern: str = r"已蒸餾組數 (\d+)") -> int:
+    """從收回端的輸出裡讀出「這一輪真的被記帳的筆數」。
+
+    收回端的 ingest 對「格式不符」的容錯是靜默跳過（那是為了單筆髒資料
+    不毀整批），所以**零筆成功也會 exit 0**。管線層必須自己驗收：
+    裁決花了幾分鐘，一筆都沒進帳就是失敗，不是「沒有新東西」。
+    找不到那行輸出時回 -1——版本不合時寧可誤報失敗，也不要靜默放行。
+    """
+    match = re.search(pattern, output)
+    return int(match.group(1)) if match else -1
+
+
+def _pending_count(path: Path, key: str) -> int:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return 0
+    return len(payload.get(key) or [])
+
+
+STAGES: list[tuple[str, str, Callable[[dict[str, Any]], tuple[bool, str]]]] = [
+    ("collect", "收料：補齊所有 transcript 的新輪次", stage_collect),
+    ("health", "健檢：語料有問題就不往下走", stage_health),
+    ("pull", "拉取：從服務取全部機器的 episode，與本機合併去重", stage_pull),
+    ("distill", "蒸餾：語料 → concept 候選", stage_distill),
+    ("consolidate", "收斂：去重、矛盾偵測、關係閉包", stage_consolidate),
+    ("calibrate", "校準：行為測試量 surprisal", stage_calibrate),
+]
+
+
+def run_pipeline(*, dry_run: bool, max_groups: int, only: str | None,
+                 calibrate_max: int | None = None, episode_source: str = "service",
+                 on_pull_failure: str = "local") -> int:
+    """依序跑各階段。
+
+    **前一階段失敗就停下**：語料壞掉時蒸餾只會蒸出錯的記憶，
+    收斂沒跑完就校準則會把等一下要被刪掉的條目也測一遍。
+    """
+    # 校準上限可以跟 max_groups 分開調：校準是逐條行為測試，積壓量遠大於蒸餾，
+    # 而 max_groups 同時管蒸餾與收斂的裁決批次（40 組會頂到逾時），不能一起放大
+    ctx = {"dry_run": dry_run, "max_groups": max_groups,
+           "calibrate_max": calibrate_max if calibrate_max is not None else max_groups,
+           "episode_source": episode_source, "on_pull_failure": on_pull_failure}
+    results: list[dict[str, Any]] = []
+    out = sys.stderr
+
+    for name, description, func in STAGES:
+        if only and name != only:
+            continue
+        print(f"\n[pipeline] === {name} — {description}", file=out)
+        started = time.time()
+        try:
+            ok, summary = func(ctx)
+        except Exception as exc:  # noqa: BLE001 — 一個階段炸掉不該讓整條管線沒有紀錄
+            ok, summary = False, f"例外: {exc}"
+        elapsed = time.time() - started
+        print(f"[pipeline] {'OK ' if ok else 'FAIL'} {name} ({elapsed:.0f}s): {summary}",
+              file=out)
+        results.append({"stage": name, "ok": ok, "summary": summary,
+                        "seconds": round(elapsed, 1)})
+        if not ok:
+            print(f"[pipeline] {name} 失敗，停止後續階段", file=out)
+            break
+
+    if not dry_run:
+        # 跑完才讀 state：階段之間會寫它（pull 的 episode_pull），不能用開跑時的舊副本蓋掉
+        state = load_state()
+        state["last_run"] = {"results": results, "max_groups": max_groups}
+        save_state(state)
+    return 0 if all(r["ok"] for r in results) else 1
+
+
+def show_status() -> int:
+    out = sys.stderr
+    state = load_state()
+    last = state.get("last_run")
+    if not last:
+        print("[pipeline] 還沒跑過", file=out)
+    else:
+        print(f"[pipeline] 上次執行（上限 {last.get('max_groups')} 組）：", file=out)
+        for entry in last.get("results", []):
+            print(f"  {'OK ' if entry['ok'] else 'FAIL'} {entry['stage']:<12} "
+                  f"{entry['seconds']:>6.1f}s  {entry['summary']}", file=out)
+    if LOCK_PATH.exists():
+        age = (time.time() - LOCK_PATH.stat().st_mtime) / 60
+        print(f"  ⚠ 鎖存在（{age:.0f} 分鐘前建立）——有管線正在跑，或上次沒有正常結束",
+              file=out)
+    print(f"  claude CLI: {claude_path() or '找不到'}", file=out)
+    return 0
+
+
+# --- 服務轉接層（階段 8 骨架；預設關閉）----------------------------------------
+# 契約見 src/lore_vault/api/spike.py。失敗拋 lore_vault.hooks.service.ServiceError 子類，
+# 呼叫端決定要不要停；這裡不吞例外——管線是排程跑的，失敗要看得見。
+
+SERVICE_TIMEOUT = 60.0
+EPISODE_PAGE_SIZE = 500
+CONCEPT_BATCH_SIZE = 500  # 服務端上限 1000（concepts + delete 合計）
+PUSHED_IDS_KEY = "service_pushed_concept_ids"
+# 最近一次實推的結果：{"ok", "at", "summary", "upserted", "deleted"}。
+# 健康告警與 doctor（lore_vault.doctor.concept_push_check）讀同一個鍵，改名要一起改
+CONCEPT_PUSH_KEY = "concept_push"
+CONCEPT_PUSH_SUMMARY_LIMIT = 300
+
+
+def service_settings():  # noqa: ANN201 — lore_vault.hooks.client_env.ClientSettings
+    from lore_vault.hooks.client_env import load_client_settings
+
+    settings = load_client_settings(CLIENT_ENV_PATH)
+    if not settings.push_configured:
+        raise RuntimeError(settings.describe())
+    return settings
+
+
+def fetch_episodes(settings, *, vault: str = "*", since: str | None = None,  # noqa: ANN001
+                   page_size: int = EPISODE_PAGE_SIZE, max_pages: int = 10_000,
+                   timeout: float = SERVICE_TIMEOUT) -> list[dict[str, Any]]:
+    """`GET /v1/episodes` 依 cursor 讀到底。每筆是 Episode dict 另加寫入時凍結的 `vault`。"""
+    from lore_vault.hooks.service import ServiceRejected, request_json
+
+    items: list[dict[str, Any]] = []
+    cursor: str | None = None
+    for _ in range(max_pages):
+        query = {"vault": vault, "limit": str(page_size)}
+        if since:
+            query["since"] = since
+        if cursor:
+            query["cursor"] = cursor
+        page = request_json(settings, "GET", "/v1/episodes", timeout=timeout, query=query)
+        if not isinstance(page, dict) or not isinstance(page.get("items"), list):
+            raise ServiceRejected("GET /v1/episodes 回應格式不符（缺 items）")
+        items.extend(page["items"])
+        cursor = page.get("next_cursor")
+        if not cursor:
+            return items
+    raise RuntimeError(f"episode 分頁超過 {max_pages} 頁仍未讀完")
+
+
+def diff_concept_ids(previous: list[str], current: list[dict[str, Any]]) -> list[str]:
+    """上次推過、這次池子裡已不存在的 id（收斂刪掉的）→ 要送 delete 的清單。"""
+    now_ids = {c.get("id") for c in current}
+    return sorted(i for i in previous if i not in now_ids)
+
+
+def push_concept_changes(settings, concepts: list[dict[str, Any]],  # noqa: ANN001
+                         delete: list[str], *, vault: str = "*",
+                         batch_size: int = CONCEPT_BATCH_SIZE,
+                         timeout: float = SERVICE_TIMEOUT) -> list[dict[str, Any]]:
+    """`POST /v1/concepts`（mode=upsert）。每批在服務端是整批成功或整批不寫；
+    超過 `batch_size` 會拆批，拆開的批次之間不保證原子。回傳各批回應。
+
+    每筆照 concepts.json 原樣送、不帶 vault；新 concept 的歸屬由服務端依 A17 決定。
+    整批被拒時拋 `ServiceRejected`，`body` 帶逐筆結果（見 `format_rejected_results`）。"""
+    from lore_vault.hooks.service import request_json
+
+    responses: list[dict[str, Any]] = []
+    ops: list[tuple[str, Any]] = [("c", c) for c in concepts] + [("d", d) for d in delete]
+    for start in range(0, max(len(ops), 1), batch_size):
+        chunk = ops[start:start + batch_size]
+        if not chunk:
+            break
+        body = {
+            "vault": vault,
+            "mode": "upsert",
+            "concepts": [x for kind, x in chunk if kind == "c"],
+            "delete": [x for kind, x in chunk if kind == "d"],
+        }
+        responses.append(request_json(settings, "POST", "/v1/concepts", body, timeout=timeout))
+    return responses
+
+
+def pull_episodes_command(out: Path, since: str | None) -> int:
+    items = fetch_episodes(service_settings(), since=since)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_suffix(out.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as fh:
+        for item in items:
+            fh.write(json.dumps(item, ensure_ascii=False) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, out)
+    print(f"[pipeline] 從服務讀到 {len(items)} 筆 episode → {out}", file=sys.stderr)
+    return 0
+
+
+REJECT_DETAIL_LIMIT = 300
+
+
+def format_rejected_results(body: Any, concepts: list[dict[str, Any]]) -> list[str] | None:
+    """整批被拒時的逐筆原因（一筆一行）；body 不是 batch_rejected 形狀回 None。
+
+    只印 index／id／status／code／候選 vault／錯誤訊息，不印 statement：
+    服務端的 schema 錯誤訊息可能帶欄位值，印出前把本地 statement 原文遮掉並截斷。
+    """
+    error = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(error, dict) or not isinstance(error.get("results"), list):
+        return None
+    statements = [c.get("statement") for c in concepts
+                  if isinstance(c, dict) and isinstance(c.get("statement"), str)
+                  and c.get("statement")]
+    lines = [f"服務端拒收整批（{error.get('code')}）：{error.get('message')}"]
+    failed = [r for r in [*error["results"], *(error.get("delete_results") or [])]
+              if isinstance(r, dict) and r.get("status") in ("invalid", "conflict")]
+    for r in failed:
+        message = str(r.get("error") or "")
+        for statement in statements:
+            message = message.replace(statement, "<statement>")
+        if len(message) > REJECT_DETAIL_LIMIT:
+            message = message[:REJECT_DETAIL_LIMIT] + "…"
+        parts = [f"  [{r.get('index', '-')}] id={r.get('id')!r}", f"status={r.get('status')}"]
+        if r.get("code"):
+            parts.append(f"code={r['code']}")
+        if r.get("candidates"):
+            parts.append(f"candidates={','.join(map(str, r['candidates']))}")
+        lines.append(" ".join(parts) + f"：{message}")
+    return lines
+
+
+def push_concepts_command(*, dry_run: bool, concept_path: Path = CONCEPT_PATH) -> int:
+    """送 `vault="*"`、每筆不帶 vault：repo-scope 新 concept 的歸屬由服務端依 A17 決定
+    （source_turns → scope 比對）。無法決定或歧義時整批被拒，逐筆原因印到 stderr、回 1。
+
+    實推（非 dry-run）不論成敗都寫 `concept_push` 紀錄：排程失敗只會留在 log 裡，
+    沒有這筆紀錄健康告警就看不到（注入內容會靜默停在上次成功推送）。
+    被拒回 1；其他例外記錄後照舊拋出（traceback 進 log）。失敗時不更新已推送 id。"""
+    from lore_vault.hooks.service import ServiceRejected
+
+    state = load_state()
+    upserted = deleted = 0
+    try:
+        concepts = json.loads(concept_path.read_text(encoding="utf-8"))
+        delete = diff_concept_ids(list(state.get(PUSHED_IDS_KEY) or []), concepts)
+        upserted, deleted = len(concepts), len(delete)
+        print(f"[pipeline] 推送 concept：upsert {upserted}、刪除 {deleted}", file=sys.stderr)
+        if dry_run:
+            return 0
+        try:
+            responses = push_concept_changes(service_settings(), concepts, delete)
+        except ServiceRejected as exc:
+            lines = format_rejected_results(exc.body, concepts)
+            if lines is None:
+                raise
+            for line in lines:
+                print(f"[pipeline] {line}", file=sys.stderr)
+            print("[pipeline] 推送中止；拆批時先前批次可能已套用，修正後重跑即可（upsert 冪等）",
+                  file=sys.stderr)
+            record_concept_push(state, ok=False,
+                                summary=f"{lines[0]}（{len(lines) - 1} 筆被拒）",
+                                upserted=upserted, deleted=deleted)
+            return 1
+    except Exception as exc:
+        if not dry_run:
+            record_concept_push(state, ok=False, summary=f"{type(exc).__name__}: {exc}",
+                                upserted=upserted, deleted=deleted)
+        raise
+    state[PUSHED_IDS_KEY] = sorted(c["id"] for c in concepts if c.get("id"))
+    applied = sum(1 for r in responses if isinstance(r, dict) and r.get("applied"))
+    record_concept_push(state, ok=True,
+                        summary=f"upsert {upserted}、刪除 {deleted}，套用 {applied}/{len(responses)} 批",
+                        upserted=upserted, deleted=deleted)
+    print(f"[pipeline] 服務端套用 {applied}/{len(responses)} 批", file=sys.stderr)
+    return 0
+
+
+def record_concept_push(state: dict[str, Any], *, ok: bool, summary: str,
+                        upserted: int, deleted: int) -> None:
+    """把本次推送結果寫進 state 並落地（連同呼叫端已改好的其他鍵）。
+
+    summary 只放例外型別／訊息與計數；hooks.service 的例外訊息只有 HTTP 狀態與
+    設定提示，不含回應內文與密鑰。"""
+    if len(summary) > CONCEPT_PUSH_SUMMARY_LIMIT:
+        summary = summary[:CONCEPT_PUSH_SUMMARY_LIMIT] + "…"
+    state[CONCEPT_PUSH_KEY] = {
+        "ok": ok,
+        "at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "summary": summary,
+        "upserted": upserted,
+        "deleted": deleted,
+    }
+    save_state(state)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Phase 3 自動化管線")
+    parser.add_argument("--run", action="store_true", help="執行管線")
+    parser.add_argument("--status", action="store_true", help="看上次跑到哪")
+    parser.add_argument("--dry-run", action="store_true", help="只印出要做什麼")
+    parser.add_argument("--stage", type=str, help="只跑指定階段")
+    parser.add_argument("--max-groups", type=int, default=DEFAULT_MAX_GROUPS,
+                        help="每次執行的組數上限（成本封頂）")
+    parser.add_argument("--calibrate-max", type=int, default=None,
+                        help="校準階段每次最多測幾條（預設同 --max-groups）")
+    parser.add_argument("--pull-episodes", type=Path, metavar="OUT",
+                        help="（服務轉接骨架）從服務讀全部 episode 寫成 JSONL")
+    parser.add_argument("--since", type=str, default=None,
+                        help="搭配 --pull-episodes：只讀 started_at >= since（UTC）")
+    parser.add_argument("--push-concepts", action="store_true",
+                        help="（服務轉接骨架）把 concepts.json 推到服務（upsert + 刪除）")
+    parser.add_argument("--episode-source", choices=EPISODE_SOURCES, default="service",
+                        help="蒸餾語料來源：service＝服務拉取全部機器並與本機合併（預設）；"
+                             "local＝只讀本機 jsonl（除錯用，等同 D13 之前）")
+    parser.add_argument("--on-pull-failure", choices=PULL_FAILURE_MODES, default="local",
+                        help="服務拉取失敗時：local＝退回本機 jsonl 繼續（預設，會標示降級）；"
+                             "fail＝停止管線")
+    args = parser.parse_args()
+
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except (AttributeError, OSError):
+            pass
+
+    if args.pull_episodes:
+        return pull_episodes_command(args.pull_episodes, args.since)
+    if args.push_concepts:
+        return push_concepts_command(dry_run=args.dry_run)
+
+    if args.status or not args.run:
+        return show_status()
+
+    try:
+        acquire_lock()
+    except LockBusy as exc:
+        print(f"[pipeline] {exc}", file=sys.stderr)
+        return 1
+    try:
+        return run_pipeline(dry_run=args.dry_run, max_groups=args.max_groups,
+                            calibrate_max=args.calibrate_max,
+                            only=args.stage, episode_source=args.episode_source,
+                            on_pull_failure=args.on_pull_failure)
+    finally:
+        release_lock()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

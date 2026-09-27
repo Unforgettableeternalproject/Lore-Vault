@@ -1,0 +1,54 @@
+[project]
+name = "lore-vault"
+version = "0.1.0"
+description = "給 coding agent 的本機記憶系統"
+license = "MIT"
+license-files = ["LICENSE"]
+# 下限 3.12：服務端 docker image 可用 python:3.12-slim 以上；hook 由系統 Python 3.14
+# 直接執行且只用標準庫，不受此欄限制。不設上限，開發環境由 .python-version 釘在 3.14，
+# 讓 spike 既有測試與 hook 跑在同一個直譯器版本上。
+requires-python = ">=3.12"
+# 以下為之後階段會用到的套件（HTTP API、向量、MCP 薄殼、.env 設定），先放寬鬆下限，
+# 骨架本身不 import 它們。
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "numpy>=2.0",
+    "mcp>=1.0",
+    "python-dotenv>=1.0",
+    "httpx2>=2.13",
+    "pypdf[crypto]>=6.19.0",
+    "python-docx>=1.2.0",
+    "python-pptx>=1.0.2",
+    "pyyaml>=6.0.3",
+    "python-multipart>=0.0.20",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["uv_build>=0.9,<0.10"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "lore_vault"
+
+[tool.pytest.ini_options]
+# 一鍵指令：`uv run pytest` 同時跑新測試與 agent_memory_spike 既有測試。
+testpaths = ["tests", "agent_memory_spike"]
+# importlib 模式：tests/ 與 agent_memory_spike/ 有同名測試檔（如 test_pipeline.py）也不衝突；
+# spike 測試自行 sys.path.insert 載入同目錄模組，不受影響。
+addopts = ["--import-mode=importlib"]
+norecursedirs = ["data", "experiment", ".*", "__pycache__"]
+
+[tool.ruff]
+line-length = 88
+# agent_memory_spike 是併入的 spike 子樹，維持原有風格、只做最小改動，不納入 lint。
+extend-exclude = ["agent_memory_spike"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
