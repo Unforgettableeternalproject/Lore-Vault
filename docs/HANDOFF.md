@@ -22,11 +22,13 @@
 2. 觀察期結束：停舊 PM 容器（5055）；停排程 `\PM Cache Sync`（本機）、`PM Cache Sync`／`PM Proxy`（Clockwork-Community）；封存 `~/.claude/pm/`、`pm-kit/`、`pm-cache/`；刪 `~/.claude.json`、`settings.json`、pm skill、weekly-compliance 的 `.bak-precutover`
 3. TestSeperateMemorySystem 另開 PR 移除 spike
 
-## D12 對外自架發佈（`feature/self-host`，已實作、未部署）
+## D12 對外自架發佈（已併入 `develop`，2026-09-27 部署到本機，待艾斯維爾實測）
 
 - 內容：服務內建 HTTP MCP `/mcp`、principal 可設定（`LORE_VAULT_PRINCIPAL`，預設 `owner`）、首次啟動自動產生 token／管理員（`/data/secrets/`）、compose profile `ollama`／`tunnel` 與 `LORE_VAULT_BIND`／`PORT`、安裝器通用化（HTTP 免殼模式）；指南見 `docs/guides/SELF-HOST.md`
 - **重新部署前**：本機 `.env` 已補 `LORE_VAULT_PRINCIPAL=UEPBernie`（2026-09-27）；缺了新 note 會記成 `owner`，doctor `notes.principal_agreement` 會 warn
-- 未實測：docker 實際啟動、Linux 的 secrets 權限、ollama profile 拉模型閘門、cloudflared 連線、`claude mcp add --transport http` 實連
+- 部署驗證：健康、doctor 0 fail、`notes.principal_agreement` pass（UEPBernie）、`/mcp` 未帶 token 回 401；部署前備份 `lore-20260927T110517066Z.db`
+- 同輪 UI：檢索頁 Ask 分頁、筆記／文件篩選對齊記憶層（`/v1/list` 新參數）
+- 未實測：Linux 的 secrets 權限、ollama profile 拉模型閘門、cloudflared 連線、`claude mcp add --transport http` 實連
 - 合併 `main` 前待辦：LICENSE（授權未定）；README（英／繁中）依 Chatroom 格式重寫但仍不追蹤，開頭對話為草稿待艾斯維爾改寫；沒有預建映像（CI 未做），目前是 `up -d --build`
 
 ## 下一輪
