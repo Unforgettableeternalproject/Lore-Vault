@@ -33,6 +33,16 @@
 - 未實測：`LORE_VAULT_BIND`（Docker Desktop 限制）、CF Access 路徑、tunnel 實連；原列：Linux 的 secrets 權限、ollama profile 拉模型閘門、cloudflared 連線、`claude mcp add --transport http` 實連
 - 合併 `main` 前待辦：LICENSE（授權未定）；README（英／繁中）依 Chatroom 格式重寫但仍不追蹤，開頭對話為草稿待艾斯維爾改寫；沒有預建映像（CI 未做），目前是 `up -d --build`
 
+## 2026-09-27 晚間這輪（已併入 develop、已部署，schema v15）
+
+- D5：spike 資料根改為 `~/.lore-vault/`，舊目錄只留 README.txt；實驗產物封存 `spike-archive-20260927.zip`（備份目錄）
+- D13：服務收 episode 開關（預設關，本機 `.env` 已開）、UI 設定頁 9 項執行期設定；管線改從服務拉 episode（`after_seq` 水位、`~/.lore-vault/episode_cache/`）；遠端安裝器 v3 可裝 episode hook（`--episodes`）
+- 首次以服務為來源的 03:30 管線是 **2026-09-28**：看 `pipeline_state.json` 的 `episode_pull` 與 doctor `episode_pull.status`（需 `--spike-home`）
+- MEMPAL 全面移除（本體、登記、hook、各專案指示；封存 `mempal-archive-20260927.zip`）；Codex 改接 Lore Vault
+- `enrich.backlog` 改用 `notes.enqueued`（v14）
+- 遠端 kit 尚未重打：Clockwork-Community 的舊 wheel 讀不了 v15 快照（僅影響離線降級），且沒有 delete／download 工具與 episode hook；正式 release 時一起處理
+- 待辦小項：spool 推送持續失敗時 doctor 看不到（審查建議）；安裝器以同名腳本判斷外部登記是 heuristic；Echo-Stream AGENTS.md 仍有 Open Notebook 舊描述
+
 ## 下一輪
 
 - 文件段落（chunk）的 ask 評估：需要時由艾斯維爾提供測試語料
@@ -40,11 +50,9 @@
 
 ## 待裁決
 
-- D5 spike 資料目錄改名、實驗中間產物去留
 - UI 為 WCAG AA 覆寫的色票是否回改設計系統
 - 摘要長度（改短需重算，有 API 費用）
-- 遠端機器是否也收 episode
-- JSAI-API／JSAI-Functions／JSAI-Web／U.E.P's Mind Reflourished 的 CLAUDE.md 有進版控，記憶段改動尚未 commit
+- JSAI-API／JSAI-Functions／JSAI-Web（位置未確認）／U.E.P's Mind Reflourished 的 CLAUDE.md 有進版控，記憶段改動尚未 commit
 
 ## 已知問題
 
