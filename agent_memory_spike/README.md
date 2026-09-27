@@ -10,7 +10,7 @@ Coding agent 記憶層實驗。與 `echo_memory/` 完全無關——不 import�
 | 檔案 | 階段 | 用途 |
 |---|---|---|
 | `hook_session_start.py` | 0 | SessionStart hook，注入記憶 |
-| `data/golden_memories.json` | 0 | 黃金資料，人工萃取自 PM notebook |
+| `data/golden_memories.json` | 0 | 黃金資料，人工萃取自 PM notebook（本機資料、不進版控） |
 | `experiment/questions.md` | 0 | 對照題組與判定標準 |
 | `experiment/results.md` | 0 | A/B 實驗結果 |
 | `experiment/surprisal-calibration.md` | 0 | 自評 vs 行為測試的校準實驗 |

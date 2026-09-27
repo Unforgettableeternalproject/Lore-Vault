@@ -12,11 +12,9 @@ __pycache__/
 
 # 本機資料（語料含商業專案原文，一律不進版控）
 data/*
-!data/golden_memories.json
 # agent_memory_spike（自 TestSeperateMemorySystem 34b783b、581dbc8 補回）：
-# 只追蹤人工萃取的黃金資料；episodes/ 與其他執行期產物含對話原文，不進版控
+# 資料目錄（含 golden_memories.json、episodes/ 與其他執行期產物）一律不進版控
 agent_memory_spike/data/*
-!agent_memory_spike/data/golden_memories.json
 *.db
 *.sqlite
 *.bak-*

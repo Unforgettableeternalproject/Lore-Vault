@@ -3,7 +3,7 @@
 
 ## 這個檔案換掉了什麼
 
-原本是 Phase 0 的 kill-switch 實驗版：讀 ``data/golden_memories.json``
+原本是 Phase 0 的 kill-switch 實驗版：讀 ``data/golden_memories.json``（本機資料、不進版控）
 （39 條手挑資料，事後確認約一半是模型本來就會的雜訊），scope 過濾之外沒有任何篩選。
 現在改讀 ``concepts.json`` 的**已校準池**，只放行 ``surprisal >= 0.8`` 的條目。
 
