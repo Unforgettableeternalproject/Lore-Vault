@@ -68,7 +68,7 @@
 | `supersedes` | 更正關係：新 note 取代舊 note 時標記，而不是另建更正篇 |
 | `superseded_by` | 衍生欄位（不存 DB）：同 vault 內 `supersedes` 指向它的 note；多則時取 `updated` 最新者（同時間取 id 大者）。`get`／`list` 帶出 |
 | `author` | 寫入者自報的身分名（A22，schema v12）：agent 用自己的角色名、UI 登入寫入帶 `Xavier (Bernie)`；未填存 null（對外顯示為未具名），服務**不代填**。單行、去前後空白後 1–64 字、控制字元規則同其他欄位；`legacy` 保留給舊 PM 匯入（API／MCP 自稱會被拒） |
-| `principal` | 服務依憑證判定的主體（A22）：**不可由請求指定**（body 帶了 422）。Bearer 依 `api.principals` 的「憑證 → principal」對照，目前唯一的 token 對應 `UEPBernie`（與 Eternity 帳號一致；v13 起，舊的 `xavier` 由遷移改寫），日後一 token 一 principal；UI session 的 principal 是登入帳號的 username（A23）。DB 欄位可為 NULL、無 DEFAULT，儲存層 `insert_note` 拒收缺 principal，doctor `notes.attribution` 對帳 |
+| `principal` | 服務依憑證判定的主體（A22）：**不可由請求指定**（body 帶了 422）。Bearer 依 `api.principals` 的「憑證 → principal」對照，目前唯一的 token 對應 `LORE_VAULT_PRINCIPAL`（D12，預設 `owner`；本機現行部署設 `UEPBernie` 與 Eternity 帳號及 v13 遷移結果一致），日後一 token 一 principal；UI session 的 principal 是登入帳號的 username（A23；首次啟動建立的管理員預設同 principal）。doctor `notes.principal_agreement` 在既有 note 的 principal 不含設定值時 warn（漏設 env 的提醒）。DB 欄位可為 NULL、無 DEFAULT，儲存層 `insert_note` 拒收缺 principal，doctor `notes.attribution` 對帳 |
 | `updated_by`, `updated_by_principal` | 最後一次寫入（建立或修改）者的自報名與 principal；建立時同 `author`／`principal`。`update` 的 `author` 參數寫進這裡（未填也記 null，不沿用上一位），原 `author` 不變 |
 | `created`, `updated` | |
 
@@ -175,28 +175,39 @@ spike 接入端點（階段 8，同樣需 bearer；每筆 body 項目 = schema d
 
 `/v1/list` 另接受 `until`（updated 上界，含端點；與 `since` 一起做日期區間）、`offset`（頁碼分頁，與 `cursor` 擇一）與 `with_total`（回 `total`＝相同篩選下的總筆數，回應同時帶回 `offset`）；UI 的分頁元件使用，MCP 殼仍用 cursor。
 
+`/v1/list` 的篩選參數（UI 筆記／文件頁；MCP 殼不帶）：
+
+- `title`：note 標題／文件檔名含該字串（ASCII 不分大小寫，`%`、`_` 照字面比對）；兩種 kind 都適用。
+- `author`：note 作者含該字串（同上）；`author_state`：`named`（有作者，含舊資料的 `legacy`）／`missing`（未具名）。與 `topics` 一樣只屬 note，指定時不列文件。
+- `statuses`：文件抽取狀態清單（`pending`／`extracting`／`ready`／`failed`）；`extensions`：檔名副檔名清單（不含點、不分大小寫，只收英數字；依檔名字尾判斷，不看 mime）。只屬文件，指定時不列 note。
+- note 專屬與文件專屬篩選同時指定時沒有符合的項目（空頁、`total: 0`）。
+- 全部篩選都在 SQL 內、LIMIT 之前套用，`total` 與 `items` 用同一組條件；空字串、空清單、白名單外的值或超過 200 字回 400 `invalid_request`（該 kind 這次沒列也照樣驗證）。
+
 concept／episode 只屬 dev：在 lore／personal 查詢 `vault="*"` 回空、指定 dev 的 key 為 404。
 
 **兩段式確認**（⚠ 標記的端點）：不帶 `confirm_token` → 只規劃，回 `{executed: false, plan, confirm_token, expires_at}`；以**完全相同的參數**加上 token 再送一次 → `{executed: true, plan, …}`。token＝base64url(payload)．HMAC-SHA256，payload 綁定操作名、全部請求參數（含 space、reason）、規劃內容的 sha256 與到期時間（5 分鐘）；祕密每個服務程序隨機產生（重啟後舊 token 失效）。簽章不符、格式錯誤、參數或操作不符 → 400 `invalid_confirm_token`；過期 → 400 `confirm_token_expired`。執行時在同一個寫入交易內重新規劃並比對 digest，不符 → 409 `plan_changed`：`error.plan` 附目前規劃，另附綁定新規劃的 `error.confirm_token`／`error.expires_at`（同一操作、同一組參數）；**仍需使用者看過新規劃再確認一次**，以新 token 重送才執行，服務端不會自動執行。舊 token 綁的是舊規劃的 digest，只要資料維持新狀態，重送一律 409、不執行（token 無狀態：資料若恢復成舊規劃的樣子，舊 token 才又相符）。儲存層筆數核對失敗的 409 `plan_changed`（第二道防線）不附 plan／token。指紋除規劃本身外另含：note 的 `updated`、文件的 status／updated／supersedes、vault 內 note／文件最大的 `updated`。執行後目標已不存在，重送同一 token 得 404。
 
-MCP 為各機器本地 stdio 殼（`python -m lore_vault.mcp`，A15）：服務連線失敗、逾時或 502／503／504、Cloudflare 521–524／530 時，`recall`／`get`／`list`／`vault_resolve` 改讀本地快照、只走 lexical 並標 `degraded`；`write`／`update` 直接失敗不排佇列；401／403／其他 4xx 與 500 直接報錯不降級。降級查詢同樣以殼的目前 space 過濾（快照保留 `vaults.space`）。
+MCP 有兩種入口，共用同一份工具定義（名稱、參數、說明、回傳；`mcp.server.build_server` 只註冊一次）：
 
-殼持有「目前 space」：每個殼行程一份、只在記憶體、不持久化，新行程一律 `dev`。其他工具沒有 space 參數，殼在每個 `/v1/*` 請求自動注入目前 space（唯一出口 `Shell._send`）。
+- **HTTP 端點 `/mcp`**（D12，`mcp.http`）：服務內建的 Streamable HTTP（JSON 回應、有 `Mcp-Session-Id` session；也接受 2026-07-28 無 session 的單次請求），客戶端 `claude mcp add --transport http <服務>/mcp --header "Authorization: Bearer <token>"` 直連。認證與 `/v1/*` 相同（外層 `BearerAuthMiddleware`）；工具在服務行程內經 **in-process ASGI** 轉發到同一個 app 的 `/v1/*`，並沿用呼叫端這次請求的 `Authorization`（或 UI cookie＋`X-Lore-Vault-UI`），principal 判定與直接打 `/v1/*` 相同，拿不到呼叫端 header 時不以服務 token 代打（內層 401）。差異：`vault_resolve` 不收 `cwd`（`cwd_not_supported`），改收 `remote_url`（`git remote get-url origin` 的輸出，以 `binding.normalize_remote` 正規化，與 cwd 解析同 key）或 `key`；`upload` 只收 `filename`＋`content_base64`（`path` 回 `path_not_supported`；base64 先以長度擋 `documents.max_file_bytes`，`/mcp` body 上限＝該值的 base64 長度＋1MB）；沒有快照降級。DNS rebinding 保護關閉（經 tunnel／反向代理時 Host 不是 localhost；保護靠 bearer）
+- **本地 stdio 殼**（`python -m lore_vault.mcp`，A15），完整客戶端：服務連線失敗、逾時或 502／503／504、Cloudflare 521–524／530 時，`recall`／`get`／`list`／`vault_resolve` 改讀本地快照、只走 lexical 並標 `degraded`；`write`／`update` 直接失敗不排佇列；401／403／其他 4xx 與 500 直接報錯不降級。降級查詢同樣以殼的目前 space 過濾（快照保留 `vaults.space`）。
+
+殼持有「目前 space」：stdio 每個殼行程一份；HTTP 端點依 MCP session（`Mcp-Session-Id`）各一份（最多記 1024 個，淘汰最久沒用的）。只在記憶體、不持久化，新行程／新 session 一律 `dev`。HTTP 沒有 session 的連線（stateless、2026-07-28 單次請求）只能用 `dev`：`space(action="set")` 回 `session_required`，不寫進共用狀態（避免改到別的 agent 的 space）。其他工具沒有 space 參數，殼在每個 `/v1/*` 請求自動注入目前 space（唯一出口 `Shell._send`）。
 
 目標是讓 agent 用最少的上下文拿到足夠決策的資訊。工具數量刻意壓低（目前 10 個；`ask` 依 D11 加入）。
 
 | 工具 | 回傳 | 說明 |
 |---|---|---|
 | `space(action, value?)` | `{space, spaces}` | `action="get"` 查詢、`"set"` 切換（`value` 為 `dev`／`lore`／`personal`）；純殼端狀態，不打服務；非法值回工具錯誤 `invalid_space`、狀態不變 |
-| `vault_resolve(cwd?, create?, display?, space?, key?)` | vault key、display、space、note 數、binding（dev 由 cwd 推算時） | dev：key 省略時 MCP 殼以 `lore_vault.binding` 從 cwd 算 key，服務端做別名解析；lore／personal：沒有 repo，必須帶 `key`（`<space>/名稱`，缺少回 `key_required`），傳了 `cwd` 會忽略並回 `cwd_ignored: true`。`space` 省略用目前 space，顯式傳入只影響這一次。`create=True` 才建 vault（HTTP `POST /v1/vaults`）；取代 pm-bind 的手動步驟 |
+| `vault_resolve(cwd?, create?, display?, space?, key?, remote_url?)` | vault key、display、space、note 數、binding（dev 由 cwd／remote_url 推算時；`source` 為 `git-remote`／`folder`／`remote_url`） | dev：key 省略時由 `remote_url`（兩種入口皆可）或 cwd（只限 stdio 殼，HTTP 回 `cwd_not_supported`；兩者都沒給時 HTTP 回 `remote_url_required`）以 `lore_vault.binding` 算 key，服務端做別名解析；lore／personal：沒有 repo，必須帶 `key`（`<space>/名稱`，缺少回 `key_required`），傳了 `cwd` 會忽略並回 `cwd_ignored: true`。`space` 省略用目前 space，顯式傳入只影響這一次。`create=True` 才建 vault（HTTP `POST /v1/vaults`）；取代 pm-bind 的手動步驟 |
 | `recall(query, vault, kinds?, limit?, budget?)` | `[{id, kind, vault, title, summary, summary_source, score, updated}]`；note 另帶 `author`；chunk 另帶 `document_id`、`chunk_id`、`locator` | 統一檢索 note 與文件段落（`kinds` 預設 `["note", "chunk"]`；concept 未實作）；note 與 chunk 的 lexical／vector 四路一次 RRF。chunk 的 `title` 為檔名、`summary` 為段落摘錄（`summary_source: "excerpt"`），同樣受 `budget`；**預設不含全文**；`vault` 必填，跨範圍用 `vault="*"` 明示。回應另有 `kinds`（實際查的）、`missing_chunk_embeddings`；降級時 `chunk` 列在 `unsupported_kinds` |
 | `ask(question, vault, kinds?, k?)` | `status`（`answered`／`insufficient`）、`answer.points[{claim, note_ids, unsupported}]`、`dropped_citations`、`sources[{id, vault, title, updated, score, excerpt_truncated}]`、`degraded*`、`model`、`usage`、`latency_ms`、`notice` | D11：以 recall 同一條檢索取前 k 則 note（預設 10、上限 20），片段（標題、LLM 摘要、正文節錄、updated、supersedes）交問答模型（`[ask]`）結構化輸出；引用不在片段內的 note id 機械移除、無有效引用的點標 `unsupported`、`answered` 卻無任何有效引用時降為 `insufficient`（`status_downgraded`）；空輸出／截斷／解析失敗回 `ask_invalid_output`，不回假成功。**本輪只用 note**，文件段落另評估（`chunk` 列在 `unsupported_kinds`）。回答只是片段的整理、信心有限，關鍵事實以 `get` 核對；服務不可達不降級 |
 | `get(vault, ids, budget?)` | 全文 | 可批次；`ids` 可混 note id、`doc:…`（整份文件文字，重疊段已去除）、`chunk:…`（單段，含 `locator` 與 `overlap`＝開頭與前一段重疊的字數，段落起頭為 0）；字數預算依 ids 順序分配，超過時截斷並標示（`truncated`、`body_chars`／`text_chars`）；文件文字依 chunk 順序逐段取、預算用完就停（不先串全文）；note 另帶 `superseded_by`；vault 必填（A5）。範圍外或不存在列在 `missing`，降級時文件 id 列在 `unavailable`。HTTP 另有 `fields: "full"（預設）／"meta"`：meta 只回 metadata（note 無 `body`、文件／chunk 無 `text`，`body_chars`／`text_chars` 照給、`truncated: false`、不佔預算、`used_chars` 為 0），不組裝全文；其他值 400。MCP 工具未開放此參數 |
 | `list(vault, since?, topics?, cursor?, limit?, kinds?)` | 標題清單 | note 與文件合併分頁（`kinds` 預設兩者）；note 項含 `summary`／`summary_source`（規則同 recall：LLM 摘要，缺時首段頂替 `lead`，正文也空 `none`）、`supersedes`、`superseded_by`；文件項含 `status`、`error_code`、`version`、`supersedes`、`superseded_by`、`chunk_count`、`encoding`；指定 `topics` 時只列 note；降級時 `document` 列在 `unsupported_kinds`。摘要受 HTTP `budget`（預設 4000，本頁 note 摘要字數總和，title 不計）限制，在本頁有摘要文字的 note（LLM 摘要或首段頂替；`none` 與文件不佔預算）間**公平分配**：全部放得下就全給；否則依頁序納入 note，每則下限需求為 min(摘要長度, 40)，累加超過 `budget` 的那則起（尾端）`summary: null`、`summary_source: "omitted"`（第一則一律納入，至少截到 `budget`）；納入者以 water-filling 分配——配額 = floor(剩餘預算／剩餘人數)，短摘要全給、用不完的額度留給較長者，零頭依頁序各 +1。超過配額的摘要截短（結尾 `…`，含在配額內）並標 `summary_truncated: true`，不默默截斷；首段頂替同規則（首段本身 160 字上限是呈現規則，不算預算截短）。**項目與分頁不受預算影響**。每個 note 項目帶 `summary_truncated`；回應另有 `budget`、`used_chars`、`truncated`（有省略或截短）、`summaries_omitted`、`summaries_truncated`。要完整內容用 `get` |
 | `write(vault, title, body, topics?, supersedes?, author?)` | id、`author`、`principal`、`links`、`unresolved_links`、疑似重複清單、`dry_run` | 寫入前自動查重，回傳相似 note 讓 agent 決定改用 `update`。`author` 填 agent 自己的角色名（工具描述明寫），不可代填別人。body 的 `[[標題]]` 自動解析進 `links`（見 Note 的 links 規則）。HTTP 另有 `dry_run: true`（**查重預覽**）：同一函式、同一套驗證／vault·space 範圍／supersedes 檢查／查重／連結解析，只在寫入前停下；回 200、無 `id`／`updated`／`author`／`principal`，其餘欄位同正式寫入（`vault`、`links` 為將會存下的值），不喚醒背景 worker。選 `dry_run` 而非獨立端點：範圍與驗證不可能與正式寫入分岔 |
 | `update(id, body?, title?, topics?, author?)` | id、`author`、`updated_by`、`updated_by_principal`、`links`、`unresolved_links` | `author` 記為最後修改者（`updated_by`）；links 合併規則見 Note |
-| `upload(path, vault?)` | `document_id`、`status`、`duplicate`、`version`、`supersedes` | 殼讀本機檔案（只限殼工作目錄與 `mcp.upload_roots`；拒絕 `..` 與 symlink 逃逸）轉送 `POST /v1/documents`；`vault` 省略時只在 dev 用殼工作目錄 binding；服務不可達直接失敗 |
-| `status(vault?)` | 健康狀態、最近更新、管線狀態 | 合併 doctor 摘要與 health alert |
+| `upload(path?, vault?, filename?, content_base64?)` | `document_id`、`status`、`duplicate`、`version`、`supersedes` | `path` 與 `filename`＋`content_base64` 擇一，轉送 `POST /v1/documents`。`path`：只限 stdio 殼讀本機檔案（只限殼工作目錄與 `mcp.upload_roots`；拒絕 `..` 與 symlink 逃逸）；內容上傳：檔名不可含路徑分隔或控制字元，base64 嚴格解碼、超過上限回 `too_large`。`vault` 省略時只在 stdio 的 dev 用殼工作目錄 binding（HTTP 必填）；服務不可達直接失敗 |
+| `status(vault?)` | 健康狀態、最近更新、管線狀態 | 合併 doctor 摘要與 health alert；stdio 殼另附 `shell`（本地快照對帳），HTTP 端點另附 `mcp: {mode, space}` |
 
 刻意**不做**：chat（多輪對話）、model 管理、settings、source 匯入。`ask` 是單次問答、只整理檢索片段（D11）。
 

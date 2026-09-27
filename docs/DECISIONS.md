@@ -201,9 +201,26 @@ Ollama 另裝了 `nomic-embed-text`，PM 未使用。
 
 **狀態**：已實作（note 範圍）；文件段落問答仍待評估。
 
-### D12 對外自架發佈（構想，下一輪）
+### D12 對外自架發佈
 
-艾斯維爾 2026-09-27 提出：`main` 的正式發佈要連同「自架伺服器」一起完成——任何人下載伺服器映像（docker）啟動後，即可建好服務與 MCP Server；可設定轉發通道（如 Cloudflare Tunnel）或直接用可控的對外 IP；再搭配安裝器，讓他人自建同樣的基礎設施。
+艾斯維爾 2026-09-27 提出：`main` 的正式發佈要連同「自架伺服器」一起完成——任何人下載伺服器映像（docker）啟動後，即可建好服務與 MCP Server；可設定轉發通道（如 Cloudflare Tunnel）或直接用可控的對外 IP；再搭配安裝器，讓他人自建同樣的基礎設施。完成後才合併 `main`。
 
-- 目前的遠端安裝器（`feature/remote-installer`）僅供自用，預設指向本專案自己的基礎設施，不發 Release
-- **待裁決**：映像內容與首次啟動流程、轉發通道設定方式、安裝器如何通用化；時程排在下一輪，完成後才合併 `main`
+**已裁決（艾斯維爾 2026-09-27）**：
+
+1. **MCP**：服務內建 Streamable HTTP MCP 端點 `/mcp`（bearer 認證），客戶端用 `claude mcp add --transport http` 直接連；stdio 殼保留為「完整客戶端」。兩者共用同一份工具定義，不分叉。HTTP 模式的差異（容器看不到客戶端檔案系統）：
+   - `vault_resolve` 不能用 `cwd` 推算，改收 `remote_url`（客戶端自己跑 `git remote get-url origin`）或直接給 `key`
+   - `upload` 收檔案內容（檔名＋base64），不收本機路徑
+   - 沒有 degraded 快照（服務不可達時 HTTP MCP 本身就連不上）
+   - 目前 space 依 MCP session 保存；無 session 的客戶端 `space(action="set")` 回 `session_required`，只能用 `dev`，需要 lore／personal 時改用 stdio 殼（維持 A18，艾斯維爾 2026-09-27）
+2. **身分**：仍是單一使用者，principal 名稱可設定（`LORE_VAULT_PRINCIPAL`，預設 `owner`）；多 token 等 A22 的共享再做。遷移 v12／v13 的歷史字面值不動；本機現行部署以 `.env` 設 `LORE_VAULT_PRINCIPAL=UEPBernie` 維持相容，doctor 檢查設定值與既有 note 的 principal 是否一致。
+3. **首次啟動**：env 優先，缺少就自動產生。
+   - API token：`LORE_VAULT_API_TOKEN` 未設時首次啟動產生，存 `/data/secrets/api-token`（0600），log 印一次
+   - UI 管理員：`LORE_VAULT_ADMIN_USER`（預設同 principal）、`LORE_VAULT_ADMIN_PASSWORD`；DB 沒有任何 UI 帳號時才建立；未給密碼就產生一次性密碼，存 `/data/secrets/initial-admin-password`（0600）並在 log 印一次
+   - 備份目錄 `LORE_VAULT_HOST_BACKUP_DIR` 改為選配，預設 `./backups`
+4. **Embedding**：compose 附 Ollama 服務（profile `ollama`，首次啟動自動拉 `bge-m3`，healthcheck 通過後才啟動 lore-vault）；`LORE_VAULT_EMBEDDING_BASE_URL` 未設時維持主機 Ollama，本機現行部署不變。
+
+**預設（敏卡定，可否決）**：
+
+- 轉發：compose profile `tunnel` 掛 cloudflared（`TUNNEL_TOKEN`）；對外 IP 用 `LORE_VAULT_BIND`（預設 `127.0.0.1`）與 `LORE_VAULT_PORT`（預設 `5056`），直綁對外 IP 沒有 TLS，須自接反向代理
+- 安裝器：拿掉作者網域預設，服務位址改必填；Cloudflare Access 改為選配；新增 HTTP 模式（免殼）
+- CI 這一輪不做

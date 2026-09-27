@@ -1,14 +1,18 @@
 /** @vitest-environment happy-dom */
 // 筆記列表：標籤清單走 /v1/topics、摘要預算（budget）與 truncated／summaries_omitted 的呈現、更正鏈標示。
-import { cleanup, fireEvent, screen, waitFor } from '@testing-library/preact';
+import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/preact';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { NoteListItem } from '../lib/types';
 import { json, makeApi, renderWithApp, TEST_LIMITS, type Handler } from '../test/harness';
-import { DEFAULT_PAGE_SIZE } from '../components/Pager';
+import { dayStartIso, DEFAULT_PAGE_SIZE } from '../components/Pager';
 import { LIST_SUMMARY_CHARS, Notes } from './Notes';
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  // happy-dom 的網址在同一檔內跨測試共用：篩選會寫回查詢字串，每個測試後重設
+  window.history.replaceState(null, '', '/ui/notes');
+});
 
 const VAULT = 'github.com/org/lore-vault';
 
@@ -136,5 +140,57 @@ describe('筆記列表', () => {
     renderWithApp(<Notes />, api);
     expect((await screen.findByTestId('topics-error')).textContent).toContain('storage_error');
     expect(await screen.findByText('注入預算')).toBeTruthy();
+  });
+
+  describe('篩選（與記憶層同一套）', () => {
+    const emptyList = () => json({ items: [], next_cursor: null, has_more: false, unsupported_kinds: [], budget: 8000, used_chars: 0, truncated: false, summaries_omitted: 0, total: 0 });
+
+    it('初值取自網址；不合法的值當沒有', async () => {
+      window.history.replaceState(null, '', '/ui/notes?tag=hook&title=%E6%B3%A8%E5%85%A5&author=Minka&author_state=bogus&from=2026-09-01&to=not-a-date');
+      const { api, callsTo } = makeApi({ '/v1/topics': topics, '/v1/list': emptyList });
+      renderWithApp(<Notes />, api);
+      await waitFor(() => expect(callsTo('/v1/list').length).toBeGreaterThan(0));
+      const body = callsTo('/v1/list')[0]!.body;
+      expect(body).toMatchObject({ topics: ['hook'], title: '注入', author: 'Minka', since: dayStartIso('2026-09-01'), offset: 0 });
+      expect(body).not.toHaveProperty('author_state');
+      expect(body).not.toHaveProperty('until');
+      expect((screen.getByRole('textbox', { name: '標題關鍵字' }) as HTMLInputElement).value).toBe('注入');
+    });
+
+    it('標題、作者、作者狀態、日期送進 /v1/list，並寫回網址', async () => {
+      const { api, callsTo } = makeApi({ '/v1/topics': topics, '/v1/list': () => json({ items: [item()], next_cursor: null, has_more: false, unsupported_kinds: [], budget: 8000, used_chars: 3, truncated: false, summaries_omitted: 0, total: 1 }) });
+      renderWithApp(<Notes />, api);
+      await screen.findByText('注入預算');
+      fireEvent.input(screen.getByRole('textbox', { name: '標題關鍵字' }), { target: { value: '  預算 ' } });
+      fireEvent.click(screen.getByRole('button', { name: '套用標題' }));
+      await waitFor(() => expect(callsTo('/v1/list').at(-1)!.body.title).toBe('預算'));
+      fireEvent.input(screen.getByRole('textbox', { name: '作者名稱' }), { target: { value: 'minka' } });
+      fireEvent.click(screen.getByRole('button', { name: '套用作者' }));
+      fireEvent.click(within(screen.getByRole('group', { name: '作者狀態' })).getByRole('button', { name: '已具名' }));
+      fireEvent.input(screen.getByLabelText('起日'), { target: { value: '2026-09-02' } });
+      await waitFor(() =>
+        expect(callsTo('/v1/list').at(-1)!.body).toMatchObject({ title: '預算', author: 'minka', author_state: 'named', since: dayStartIso('2026-09-02'), offset: 0 }),
+      );
+      const q = new URLSearchParams(window.location.search);
+      expect(Object.fromEntries(q)).toEqual({ title: '預算', author: 'minka', author_state: 'named', from: '2026-09-02' });
+      expect(screen.getByTestId('filter-panel').textContent).toContain('標題含「預算」');
+    });
+
+    it('篩選後沒有結果：空狀態可一鍵清除全部篩選', async () => {
+      window.history.replaceState(null, '', '/ui/notes?title=zzz&author_state=missing');
+      const { api, callsTo } = makeApi({ '/v1/topics': topics, '/v1/list': emptyList });
+      renderWithApp(<Notes />, api);
+      const empty = await screen.findByTestId('notes-empty');
+      expect(empty.textContent).toContain('沒有符合篩選條件的筆記');
+      fireEvent.click(within(empty).getByRole('button', { name: '清除篩選' }));
+      await waitFor(() => {
+        const body = callsTo('/v1/list').at(-1)!.body;
+        expect(body).not.toHaveProperty('title');
+        expect(body).not.toHaveProperty('author_state');
+      });
+      expect(window.location.search).toBe('');
+      expect(screen.queryByTestId('filter-clear')).toBeNull();
+      expect((await screen.findByTestId('notes-empty')).textContent).toContain('這裡還沒有筆記');
+    });
   });
 });

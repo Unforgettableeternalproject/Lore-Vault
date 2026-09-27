@@ -290,10 +290,20 @@ def count_since(
     space: str,
     since: str | None,
     until: str | None = None,
+    title: str | None = None,
+    statuses: Sequence[str] | None = None,
+    extensions: Sequence[str] | None = None,
 ) -> int:
     """與 `list_page` 相同篩選條件下的文件總數。"""
     return store.count_documents_since(
-        conn, vault, space=space, since=since, until=until
+        conn,
+        vault,
+        space=space,
+        since=since,
+        until=until,
+        title=title,
+        statuses=statuses,
+        extensions=extensions,
     )
 
 
@@ -307,6 +317,9 @@ def list_page(
     cursor: tuple[str, str] | None,
     until: str | None = None,
     offset: int = 0,
+    title: str | None = None,
+    statuses: Sequence[str] | None = None,
+    extensions: Sequence[str] | None = None,
 ) -> tuple[list[tuple[str, str, dict[str, Any]]], tuple[str, str] | None]:
     """文件的一頁 list 項目：[(updated, id, 項目)]、下一頁 cursor。"""
     docs, next_cursor = store.list_documents_since(
@@ -318,6 +331,9 @@ def list_page(
         limit=limit,
         cursor=cursor,
         offset=offset,
+        title=title,
+        statuses=statuses,
+        extensions=extensions,
     )
     replaced = store.superseded_by(conn, [d.id for d in docs])
     return [

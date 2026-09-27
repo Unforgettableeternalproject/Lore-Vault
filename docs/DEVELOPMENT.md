@@ -89,7 +89,8 @@
 HTTP 服務以 factory 啟動（Dockerfile 也用同一個進入點）：
 
 ```bash
-# token 至少 16 字元、不可含空白；未設定時 create_app 直接拋 ConfigError，服務不會啟動
+# token 至少 16 字元、不可含空白（不合格時 create_app 拋 ConfigError、服務不啟動）。
+# 未設定時（D12）沿用或首次產生 <資料目錄>/secrets/api-token，見下方「首次啟動」
 export LORE_VAULT_API_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
 export LORE_VAULT_DATABASE_PATH=/path/to/lore.db   # 資料目錄在 repo 外
 export LORE_VAULT_API_ENRICH_WORKER=false          # 選用：不在服務內跑背景補算
@@ -129,6 +130,46 @@ uv run uvicorn --factory lore_vault.api.app:create_app --host 127.0.0.1 --port 8
     `started_at`、`finished_at`、`elapsed_ms`、`error`
 - 測試一律用 FastAPI `TestClient`（`tests/api/`），不啟動長駐服務。
 
+### 首次啟動與 principal（D12）
+
+env 優先，缺少就自動產生（`api.bootstrap`；只在正式啟動路徑 `load_settings()` 生效，
+直接建構 `ApiSettings` 的測試不產生、不建帳號）。資料目錄＝資料庫檔所在目錄
+（容器內 `/data/lore.db` → `/data/secrets/`）：
+
+| 環境變數 | 未設時 |
+|---|---|
+| `LORE_VAULT_API_TOKEN` | 讀 `<資料目錄>/secrets/api-token`；檔案不存在才產生（`O_CREAT\|O_EXCL`、0600，POSIX 才 chmod；目錄 0700），**只在產生當次**把 token 印進 log。env 有值時不寫檔 |
+| `LORE_VAULT_PRINCIPAL` | `owner`（`schema.DEFAULT_PRINCIPAL`）。唯一 token 對應的主體；名稱規則同 UI 帳號（1～64 個英數字或 `. _ -`）。本機現行部署設 `UEPBernie` 維持相容；遷移 v12／v13 的歷史字面值不受影響 |
+| `LORE_VAULT_ADMIN_USER` | 同 principal |
+| `LORE_VAULT_ADMIN_PASSWORD` | 產生一次性密碼寫 `<資料目錄>/secrets/initial-admin-password`（0600）並在 log 印一次 |
+
+- UI 管理員只在資料庫**沒有任何** UI 帳號時建立（lifespan，遷移之後）；已有帳號時完全不動
+  （不改密碼、不重寫檔）。一次性密碼登入後用 `cli.admin ui-set-password` 更換
+- doctor `notes.principal_agreement`：既有 note 的 principal（含 `updated_by_principal`）不含設定值時 warn，
+  details 附要補的 `LORE_VAULT_PRINCIPAL=...`；`/v1/status` 由服務填設定值，命令列 doctor 用 `--principal`
+  （未給為 skipped）。`import_on` 匯入的 note 同樣記成設定的 principal
+
+## MCP HTTP 端點（D12）
+
+服務內建 Streamable HTTP MCP 端點 `/mcp`（`mcp.http`，掛在同一個 uvicorn app），工具定義與 stdio 殼完全相同：
+
+```bash
+claude mcp add --transport http lore-vault https://<服務位址>/mcp --header "Authorization: Bearer <token>"
+```
+
+- 認證與 `/v1/*` 相同（同一個 token、同一套 principal）；未認證 401 `unauthorized`＋`WWW-Authenticate: Bearer`
+- 工具在服務行程內經 in-process ASGI（`LoopbackTransport`）打同一個 app 的 `/v1/*`，轉發呼叫端自己的
+  `Authorization`（或 UI cookie＋`X-Lore-Vault-UI`）；不是網路 loopback，不需知道自己的埠。選它而不直呼服務層：
+  space 驗證、錯誤碼、principal、查重與文件上傳都只有 `/v1/*` 一條實作，HTTP 模式不可能與 stdio 分岔
+- `vault_resolve`：傳 `remote_url`（`git remote get-url origin` 的輸出）或 `key`；`cwd` 回 `cwd_not_supported`
+- `upload`：傳 `filename`＋`content_base64`；`path` 回 `path_not_supported`、省略 `vault` 回 `vault_required`
+- 沒有快照降級；`status` 另附 `mcp: {mode: "http", space}`（沒有 `shell`）
+- 目前 space 依 `Mcp-Session-Id` 保存；沒有 session 的連線（2026-07-28 單次請求、stateless）
+  `space(action="set")` 回 `session_required`，只能用 dev
+- 回應為 JSON（`json_response`），不開 SSE 串流；DNS rebinding 保護關閉（經 tunnel 時 Host 不是 localhost）；
+  請求 body 上限＝`documents.max_file_bytes` 的 base64 長度＋1MB
+- 測試：`tests/mcp/test_http_mcp.py`（TestClient 直送 JSON-RPC，另以 SDK client 的 legacy／auto 兩種模式驗證互通）
+
 ## MCP 殼（T-29～T-31）
 
 每台機器跑一個本地 **stdio** MCP 殼，轉發到服務 HTTP（A15）。用本 repo `.venv` 的 Python 啟動
@@ -166,12 +207,12 @@ stdout 是 MCP 協定通道，log 一律寫 stderr（UTF-8）。設定錯誤時�
 
 ### 工具
 
-`space(action, value?)`、`vault_resolve(cwd?, create?, display?, space?, key?)`、
+`space(action, value?)`、`vault_resolve(cwd?, create?, display?, space?, key?, remote_url?)`、
 `recall(query, vault, kinds?, limit?, budget?)`、`ask(question, vault, kinds?, k?)`、
 `get(vault, ids, budget?)`、`list(vault, since?, topics?, cursor?, limit?, kinds?)`、
 `write(vault, title, body, topics?, links?, supersedes?, author?)`、
 `update(vault, id, expected_updated, title?, body?, topics?, links?, supersedes?, author?)`、
-`upload(path, vault?)`、`status(vault?)`（共 10 個）。
+`upload(path?, vault?, filename?, content_base64?)`、`status(vault?)`（共 10 個；與 HTTP 端點同一份定義）。
 
 - **目前 space**（A18）：殼行程持有、只在記憶體，新行程一律 `dev`；`space(action="set", value=...)`
   切換（不打服務）。其他工具沒有 space 參數，殼在每個 `/v1/*` 請求自動注入（`Shell._send`）；
@@ -179,7 +220,9 @@ stdout 是 MCP 協定通道，log 一律寫 stderr（UTF-8）。設定錯誤時�
 - 建 vault 併入 `vault_resolve(create=True)`，沒有獨立工具。dev：`cwd` 省略時用殼的工作目錄
   （Claude Code 啟動殼時的專案目錄）；key 由殼端 `lore_vault.binding` 從 git remote 算。
   lore／personal：沒有 repo，必須帶 `key`（`<space>/名稱`，前綴不符服務端回 `space_key_prefix_required`），
-  `cwd` 被忽略（回應 `cwd_ignored: true`）；不自動建 `<space>/global`
+  `cwd` 被忽略（回應 `cwd_ignored: true`）；不自動建 `<space>/global`。
+  `remote_url`（D12）：與 cwd 同一套正規化（`binding.normalize_remote`），binding `source: "remote_url"`；
+  有 `key` 或 `remote_url` 時 `cwd` 被忽略
 - 成功回服務 JSON 原樣（緊湊、不縮排）；錯誤是工具錯誤，內容 `{"error": {...}, "hint", "http_status"}`。
   409 版本衝突附 `current`，以 `current.updated` 當 `expected_updated` 重試
 - `upload(path, vault?)`（T-67）：殼讀本機檔案，multipart 轉送 `POST /v1/documents`（帶目前 space）。
@@ -190,7 +233,9 @@ stdout 是 MCP 協定通道，log 一律寫 stderr（UTF-8）。設定錯誤時�
   POSIX（容器）不套這組檢查（`/abs/path` 在 Windows 語意下是「有根無磁碟代號」）。殼端先擋大小
   （`documents.max_file_bytes`，同服務端上限）。`vault` 省略時只在 dev 以殼工作目錄的 binding 解析
   （不建 vault，回應 `vault_source: "cwd_binding"`）；lore／personal 必須帶。錯誤碼：
-  `path_not_allowed`、`file_not_found`、`not_a_file`、`too_large`、`read_failed`、`vault_required`
+  `path_not_allowed`、`file_not_found`、`not_a_file`、`too_large`、`read_failed`、`vault_required`。
+  也可改傳 `filename`＋`content_base64`（與 `path` 擇一；HTTP 端點只能用這個）：檔名不可含路徑分隔或
+  控制字元（`invalid_request`），base64 嚴格解碼（`invalid_request`），先以長度擋上限（`too_large`）
 - `recall` 預設同時查 note 與文件段落（`kinds` 預設 `["note", "chunk"]`）；`get` 的 `ids` 可混 note id、
   `doc:…`（整份文件文字）、`chunk:…`（單段）；`list` 預設同時列 note 與文件（`kinds: ["note"|"document"]`）
 
@@ -336,6 +381,9 @@ v11 前的舊墓碑不能復原）與 `document_retry`（`documents.manual_retri
   0 = 不警告（預設）；doctor CLI 對應 `--tombstones-warn-age-days`／`--tombstones-warn-bytes`
 - `notes.attribution`（schema v12，A22）：有 note 缺 `principal`／`updated_by_principal` 為 fail；
   counts 另列未具名（`author` 為 null）筆數
+- `notes.principal_agreement`（D12）：既有 note 的 principal 集合不含 `LORE_VAULT_PRINCIPAL` 為 warn
+  （沒有 note 為 pass；未提供設定值為 skipped，doctor CLI 用 `--principal`）
+  （測試：`tests/api/test_bootstrap.py`，含 `/v1/status` 漏傳設定值會紅）
 - `ui.login_lock`（schema v13，A23）：UI 登入鎖定中為 fail（附鎖定時間，需 `cli.admin ui-unlock --yes`）；
   尚無 UI 帳號為 warn；counts 列目前失敗次數與近 24 小時的失敗／鎖定中嘗試／成功次數。v13 前的庫為 skipped
   （測試：`tests/storage/test_ui_login.py`）
@@ -654,10 +702,11 @@ KEY=VALUE、只用標準庫解析；行程環境變數中同名鍵優先。
 - 登入用 DB 內的 **UI 帳號密碼**（A23，schema v13 `ui_accounts`；不再以 API token 當登入金鑰）。
   `POST /ui/api/login` 成功後發 session cookie：HttpOnly、SameSite=Strict、Path=/、Secure（可設定）、
   Max-Age = 絕對期限。API token 的 Bearer 路徑不變
-- 作者（A22／A23）：session 的 principal = 登入帳號的 username（`UEPBernie`，與 Eternity 帳號一致），
+- 作者（A22／A23）：session 的 principal = 登入帳號的 username（本機為 `UEPBernie`，與 Eternity 帳號一致；
+  首次啟動建立的管理員預設同 `LORE_VAULT_PRINCIPAL`），
   `GET /ui/api/session` 回 `principal` 與 `display_name`；UI 寫入記在該 principal 下，前端在 body 帶
   `author: <display_name>`（`Xavier (Bernie)`）。服務端不強制 author、只記錄，也不代填。
-  Bearer 路徑的 principal 仍由 `api.principals` 對照（唯一的 token → `UEPBernie`）
+  Bearer 路徑的 principal 仍由 `api.principals` 對照（唯一的 token → `LORE_VAULT_PRINCIPAL`，D12）
 - session 只存在服務記憶體（以 sha256(session id) 為鍵）：**服務重啟即全部失效**，重新登入即可。
   期限：絕對 `ui.session_absolute_hours`（預設 12）、閒置 `ui.session_idle_minutes`（預設 60）；
   同時上限 `ui.max_sessions`（預設 32，超過淘汰最舊）

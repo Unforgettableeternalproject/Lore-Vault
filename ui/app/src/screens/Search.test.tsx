@@ -2,8 +2,8 @@
 import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/preact';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { json, makeApi, renderWithApp } from '../test/harness';
-import type { RecallItem, RecallResult } from '../lib/types';
+import { apiError, json, makeApi, renderWithApp } from '../test/harness';
+import type { AskResult, RecallItem, RecallResult } from '../lib/types';
 import { Search } from './Search';
 
 afterEach(cleanup);
@@ -155,5 +155,184 @@ describe('檢索狀態呈現', () => {
     renderWithApp(<Search initialQuery="q" />, api);
     expect((await screen.findByRole('alert')).textContent).toContain('unknown_vault');
     expect(screen.queryByTestId('recall-empty')).toBeNull();
+  });
+});
+
+function askResult(overrides: Partial<AskResult> = {}): AskResult {
+  return {
+    status: 'answered',
+    answer: { points: [] },
+    dropped_citations: [],
+    status_downgraded: false,
+    sources: [],
+    k: 10,
+    kinds: ['note'],
+    unsupported_kinds: [],
+    degraded: false,
+    degraded_reason: null,
+    degraded_detail: null,
+    missing_embeddings: 0,
+    model: 'test-model',
+    usage: null,
+    latency_ms: { retrieval: 90, generation: 2100, total: 2190 },
+    notice: '回答是檢索片段的整理，信心有限。',
+    ...overrides,
+  };
+}
+
+function source(id: string, title: string) {
+  return { id, vault: 'github.com/org/lore-vault', title, updated: '2026-09-26T01:02:03.000Z', score: 0.03, excerpt_truncated: false };
+}
+
+function askFor(question: string) {
+  fireEvent.input(screen.getByRole('textbox', { name: '問題' }), { target: { value: question } });
+  fireEvent.click(screen.getByRole('button', { name: '提問' }));
+}
+
+describe('檢索頁分頁（檢索／問答）', () => {
+  it('點擊與方向鍵切換分頁；分頁狀態寫進網址；非作用中的面板隱藏', () => {
+    const { api } = makeApi({});
+    const { navigate } = renderWithApp(<Search initialQuery="" />, api);
+    const recallTab = screen.getByRole('tab', { name: '檢索' });
+    const askTab = screen.getByRole('tab', { name: '問答' });
+    expect(recallTab.getAttribute('aria-selected')).toBe('true');
+    expect(askTab.getAttribute('tabindex')).toBe('-1');
+    expect(screen.getByRole('tabpanel').id).toBe('lv-search-panel-recall');
+    // 快捷鍵 / 的目標 id 只掛在作用中分頁的輸入框
+    expect(document.getElementById('lv-search-input')?.getAttribute('aria-label')).toBe('檢索查詢');
+
+    fireEvent.click(askTab);
+    expect(askTab.getAttribute('aria-selected')).toBe('true');
+    expect(askTab.getAttribute('tabindex')).toBe('0');
+    expect(screen.getByRole('tabpanel').id).toBe('lv-search-panel-ask');
+    expect(navigate).toHaveBeenLastCalledWith('/ui/search?mode=ask', { replace: true });
+    expect(document.getElementById('lv-search-input')?.getAttribute('aria-label')).toBe('問題');
+    expect(screen.getByTestId('ask-notice').textContent).toContain('信心有限');
+
+    fireEvent.keyDown(askTab, { key: 'ArrowLeft' });
+    expect(recallTab.getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(recallTab);
+    expect(navigate).toHaveBeenLastCalledWith('/ui/search', { replace: true });
+
+    fireEvent.keyDown(recallTab, { key: 'End' });
+    expect(askTab.getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(askTab);
+  });
+
+  it('網址帶 mode=ask 與問題：開在問答分頁並填入問題，但不自動呼叫模型', () => {
+    const { api, calls } = makeApi({});
+    renderWithApp(<Search initialQuery="hook 為什麼只用標準庫" initialMode="ask" />, api);
+    expect(screen.getByRole('tab', { name: '問答' }).getAttribute('aria-selected')).toBe('true');
+    expect((screen.getByRole('textbox', { name: '問題' }) as HTMLInputElement).value).toBe('hook 為什麼只用標準庫');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('成功回答：逐點列出、引用連到筆記、無依據的點有標記、問題寫進網址', async () => {
+    const { api, callsTo } = makeApi({
+      '/v1/ask': () =>
+        json(
+          askResult({
+            answer: {
+              points: [
+                { claim: 'hook 會被系統 Python 直接執行', note_ids: ['n1', 'n2'], unsupported: false },
+                { claim: '也許還有其他原因', note_ids: [], unsupported: true },
+              ],
+            },
+            sources: [source('n1', 'hook 規範'), source('n2', 'PreToolUse 成本')],
+          }),
+        ),
+    });
+    const { navigate } = renderWithApp(<Search initialQuery="" initialMode="ask" />, api);
+    askFor('hook 為什麼只用標準庫？');
+    await screen.findByTestId('ask-result');
+    expect(callsTo('/v1/ask')[0]!.body).toEqual({ space: 'dev', question: 'hook 為什麼只用標準庫？', vault: '*' });
+    expect(navigate).toHaveBeenCalledWith(
+      `/ui/search?${new URLSearchParams({ mode: 'ask', q: 'hook 為什麼只用標準庫？' }).toString()}`,
+      { replace: true },
+    );
+
+    const pts = screen.getAllByTestId('ask-point');
+    expect(pts).toHaveLength(2);
+    const cites = within(pts[0]!).getAllByRole('link');
+    expect(cites.map((a) => a.textContent)).toEqual(['hook 規範', 'PreToolUse 成本']);
+    expect(cites[0]!.getAttribute('href')).toBe('/ui/notes/n1');
+    expect(within(pts[0]!).queryByTestId('ask-unsupported')).toBeNull();
+    expect(within(pts[1]!).getByTestId('ask-unsupported').textContent).toBe('無依據');
+
+    fireEvent.click(cites[1]!);
+    expect(navigate).toHaveBeenLastCalledWith('/ui/notes/n2');
+  });
+
+  it('拒答（片段不足、沒有任何點）：顯示依據不足的空狀態，不當成錯誤', async () => {
+    const { api } = makeApi({
+      '/v1/ask': () => json(askResult({ status: 'insufficient', sources: [source('n1', '無關筆記')] })),
+    });
+    renderWithApp(<Search initialQuery="" initialMode="ask" />, api);
+    askFor('月球上有幾隻貓');
+    const empty = await screen.findByTestId('ask-insufficient');
+    expect(empty.textContent).toContain('不足以回答');
+    expect(screen.queryByTestId('ask-point')).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('部分依據（insufficient 但有點）：標出只能部分回答', async () => {
+    const { api } = makeApi({
+      '/v1/ask': () =>
+        json(
+          askResult({
+            status: 'insufficient',
+            answer: { points: [{ claim: '只提到一部分', note_ids: ['n1'], unsupported: false }] },
+            sources: [source('n1', '片段')],
+          }),
+        ),
+    });
+    renderWithApp(<Search initialQuery="" initialMode="ask" />, api);
+    askFor('q');
+    expect((await screen.findByTestId('ask-partial')).textContent).toContain('部分回答');
+    expect(screen.getAllByTestId('ask-point')).toHaveLength(1);
+  });
+
+  it('429 限流：友善提示稍後再試（帶秒數），可再試一次', async () => {
+    const { api, callsTo } = makeApi({
+      '/v1/ask': (_body, n) =>
+        n === 1
+          ? apiError(429, 'ask_rate_limited', { retry_after: 12 })
+          : json(askResult({ answer: { points: [{ claim: '好了', note_ids: [], unsupported: true }] } })),
+    });
+    renderWithApp(<Search initialQuery="" initialMode="ask" />, api);
+    askFor('q');
+    const banner = await screen.findByTestId('ask-rate-limited');
+    expect(banner.textContent).toContain('稍後再試');
+    expect(banner.textContent).toContain('12 秒');
+    expect(screen.queryByRole('alert')).toBeNull();
+    fireEvent.click(within(banner).getByRole('button', { name: '再試一次' }));
+    await screen.findByTestId('ask-result');
+    expect(callsTo('/v1/ask')).toHaveLength(2);
+    expect(screen.queryByTestId('ask-rate-limited')).toBeNull();
+  });
+
+  it('模型錯誤：顯示白話說明與錯誤碼', async () => {
+    const { api } = makeApi({ '/v1/ask': () => apiError(500, 'ask_provider_error') });
+    renderWithApp(<Search initialQuery="" initialMode="ask" />, api);
+    askFor('q');
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('問答模型服務');
+    expect(alert.textContent).toContain('ask_provider_error');
+  });
+
+  it('載入中：顯示進度並停用送出', async () => {
+    let release: () => void = () => {};
+    const { api } = makeApi({
+      '/v1/ask': () =>
+        new Promise((resolve) => {
+          release = () => resolve(json(askResult()));
+        }),
+    });
+    renderWithApp(<Search initialQuery="" initialMode="ask" />, api);
+    askFor('q');
+    await screen.findByText('檢索並整理回答中…（約數秒）');
+    expect((screen.getByRole('button', { name: '整理中…' }) as HTMLButtonElement).disabled).toBe(true);
+    release();
+    await screen.findByTestId('ask-result');
   });
 });

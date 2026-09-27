@@ -509,7 +509,7 @@ function ScreenView({
   // key 帶 space：切換 space 時畫面重新掛載，不殘留上一個 space 的資料
   switch (screen) {
     case 'search':
-      return <Search key={spaceKey} initialQuery={query.get('q') ?? ''} />;
+      return <Search key={spaceKey} initialQuery={query.get('q') ?? ''} initialMode={query.get('mode')} />;
     case 'notes':
       if (params[0] === 'new') return <NoteNew key={spaceKey} supersedes={query.get('supersedes')} />;
       if (params[0]) return <NoteDetail key={`${spaceKey}:${params[0]}`} id={params[0]} />;

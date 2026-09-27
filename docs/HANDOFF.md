@@ -22,9 +22,15 @@
 2. 觀察期結束：停舊 PM 容器（5055）；停排程 `\PM Cache Sync`（本機）、`PM Cache Sync`／`PM Proxy`（Clockwork-Community）；封存 `~/.claude/pm/`、`pm-kit/`、`pm-cache/`；刪 `~/.claude.json`、`settings.json`、pm skill、weekly-compliance 的 `.bak-precutover`
 3. TestSeperateMemorySystem 另開 PR 移除 spike
 
+## D12 對外自架發佈（`feature/self-host`，已實作、未部署）
+
+- 內容：服務內建 HTTP MCP `/mcp`、principal 可設定（`LORE_VAULT_PRINCIPAL`，預設 `owner`）、首次啟動自動產生 token／管理員（`/data/secrets/`）、compose profile `ollama`／`tunnel` 與 `LORE_VAULT_BIND`／`PORT`、安裝器通用化（HTTP 免殼模式）；指南見 `docs/guides/SELF-HOST.md`
+- **重新部署前**：本機 `.env` 已補 `LORE_VAULT_PRINCIPAL=UEPBernie`（2026-09-27）；缺了新 note 會記成 `owner`，doctor `notes.principal_agreement` 會 warn
+- 未實測：docker 實際啟動、Linux 的 secrets 權限、ollama profile 拉模型閘門、cloudflared 連線、`claude mcp add --transport http` 實連
+- 合併 `main` 前待辦：LICENSE（授權未定）；README（英／繁中）依 Chatroom 格式重寫但仍不追蹤，開頭對話為草稿待艾斯維爾改寫；沒有預建映像（CI 未做），目前是 `up -d --build`
+
 ## 下一輪
 
-- **D12 對外自架發佈**（合併 `main` 的前提）：docker 映像啟動即建好服務與 MCP Server、可設定轉發通道或對外 IP，搭配安裝器通用化
 - 文件段落（chunk）的 ask 評估：需要時由艾斯維爾提供測試語料
 - 召回剩餘弱點：向量端判別力不足的個案（診斷見 D11 紀錄）
 

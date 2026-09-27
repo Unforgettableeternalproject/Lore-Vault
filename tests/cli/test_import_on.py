@@ -354,8 +354,8 @@ def _attribution(conn) -> list[tuple]:
 
 def test_rerun_is_idempotent(fake, tmp_path, conn):
     export, mapping = _prepare(fake, tmp_path)
-    mod.run_import(conn, export, _reviewed(mapping))
-    # 作者契約（A22）：舊 PM 匯入的 note 一律標 legacy、principal 為 UEPBernie
+    mod.run_import(conn, export, _reviewed(mapping), principal="UEPBernie")
+    # 作者契約（A22）：舊 PM 匯入的 note 一律標 legacy、principal 為服務設定值（D12）
     first = _attribution(conn)
     assert len(first) == 6
     assert {r[1:5] for r in first} == {("legacy", "UEPBernie", "legacy", "UEPBernie")}
@@ -395,11 +395,11 @@ def test_rerun_does_not_overwrite_locally_modified_note(fake, tmp_path, conn):
 
 def test_rerun_applies_source_change_when_not_modified_locally(fake, tmp_path, conn):
     export, mapping = _prepare(fake, tmp_path)
-    mod.run_import(conn, export, _reviewed(mapping))
+    mod.run_import(conn, export, _reviewed(mapping), principal="UEPBernie")
     fake.notes["note:g1"]["content"] = "ON 端更新"
     fake.notes["note:g1"]["updated"] = "2026-09-01 00:00:00.123456+00:00"
     export, _ = _prepare(fake, tmp_path)
-    report = mod.run_import(conn, export, mapping)
+    report = mod.run_import(conn, export, mapping, principal="UEPBernie")
     assert report["notes"]["updated_from_source"] == 1
     note = get_note(conn, "global", "note:g1", space="dev")
     assert note.body == "ON 端更新" and note.updated == "2026-09-01T00:00:00.123Z"

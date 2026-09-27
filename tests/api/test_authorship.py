@@ -11,9 +11,13 @@ from __future__ import annotations
 import pytest
 
 from lore_vault.doctor import DoctorContext, default_registry
+from lore_vault.schema import DEFAULT_PRINCIPAL
 from lore_vault.storage.db import connect
 
 from .conftest import create_vault, write_note
+
+# 測試設定未指定 principal：唯一的 token 對應預設值（D12：owner）
+PRINCIPAL = DEFAULT_PRINCIPAL
 
 A = "folder/author-a"
 NOTE_FIELDS = (
@@ -93,11 +97,11 @@ def delete_note(client, note_id: str, vault: str = A) -> None:
 def test_write_records_author_and_credential_principal(client):
     create_vault(client, A)
     written = write_note(client, A, "標題", "內容", author="Minka")
-    assert (written["author"], written["principal"]) == ("Minka", "UEPBernie")
+    assert (written["author"], written["principal"]) == ("Minka", PRINCIPAL)
     item = get_item(client, written["id"])
-    assert item["author"] == "Minka" and item["principal"] == "UEPBernie"
+    assert item["author"] == "Minka" and item["principal"] == PRINCIPAL
     # 建立時最後寫入者就是作者
-    assert (item["updated_by"], item["updated_by_principal"]) == ("Minka", "UEPBernie")
+    assert (item["updated_by"], item["updated_by_principal"]) == ("Minka", PRINCIPAL)
     listed = ok(client.post("/v1/list", json={"vault": A}))["items"][0]
     assert (listed["author"], listed["updated_by"]) == ("Minka", "Minka")
     recalled = ok(
@@ -109,7 +113,7 @@ def test_write_records_author_and_credential_principal(client):
 def test_missing_author_is_not_filled_in(client):
     create_vault(client, A)
     written = write_note(client, A, "無名", "內容")
-    assert written["author"] is None and written["principal"] == "UEPBernie"
+    assert written["author"] is None and written["principal"] == PRINCIPAL
     item = get_item(client, written["id"])
     assert item["author"] is None and item["updated_by"] is None
 
@@ -137,7 +141,7 @@ def test_principal_in_body_is_rejected(client, db_path, path):
         assert field in resp.text
     assert note_count(db_path) == before
     item = get_item(client, note["id"])
-    assert item["body"] == "內容" and item["principal"] == "UEPBernie"
+    assert item["body"] == "內容" and item["principal"] == PRINCIPAL
     assert item["updated"] == note["updated"]
 
 
@@ -178,7 +182,7 @@ def test_update_sets_updated_by_and_keeps_author(client):
         )
     )
     assert (first["author"], first["updated_by"]) == ("Minka", "Novia")
-    assert first["updated_by_principal"] == "UEPBernie"
+    assert first["updated_by_principal"] == PRINCIPAL
     # 沒帶 author 的修改：updated_by 記為 null，不沿用上一位
     second = ok(
         client.post(
@@ -328,3 +332,11 @@ def test_doctor_snapshot_check_goes_red_on_bad_snapshot(client, db_path):
     finally:
         conn.close()
     assert doctor_status(db_path, "tombstones.note_snapshots") == "fail"
+
+
+def test_configured_principal_is_recorded(make_client):
+    """D12：`LORE_VAULT_PRINCIPAL`（ApiSettings.principal）決定 token 對應的主體。"""
+    c = make_client(principal="UEPBernie")
+    create_vault(c, "v")
+    written = write_note(c, "v", "標題", "內容", author="Minka")
+    assert written["principal"] == "UEPBernie"

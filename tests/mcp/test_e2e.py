@@ -6,6 +6,7 @@ import pytest
 
 from lore_vault.binding import folder_key
 from lore_vault.config import Secret
+from lore_vault.schema import DEFAULT_PRINCIPAL
 
 from .conftest import (
     CF_ID,
@@ -58,7 +59,7 @@ async def test_local_full_flow(app, project):
             author="Minka",
         )
         # A22：author 由殼轉送；principal 由服務依憑證判定
-        assert (wrote["author"], wrote["principal"]) == ("Minka", "UEPBernie")
+        assert (wrote["author"], wrote["principal"]) == ("Minka", DEFAULT_PRINCIPAL)
         recalled = await s.ok("recall", vault=vault, query="快照")
         assert [i["id"] for i in recalled["items"]] == [wrote["id"]]
         assert "body" not in recalled["items"][0]

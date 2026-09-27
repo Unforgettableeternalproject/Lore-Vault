@@ -1,4 +1,4 @@
-"""主機端：打包「其他機器安裝 MCP 殼」用的 kit（wheel＋pm skill＋安裝程式＋README）。
+"""服務主機端：打包客戶端連線用的 kit（wheel＋pm skill＋安裝程式＋README）。
 
     uv run python scripts/build_remote_kit.py [--out DIR] [--no-zip] [--force]
 
@@ -9,7 +9,8 @@
 - `install.py`：取自 `integrations/remote/install.py`
 - `README.txt`：版本、wheel sha256 與目標機的執行方式
 
-kit 只供自用機器；不含任何密鑰。工作樹有未提交變更時 commit 標 `-dirty`。
+HTTP 模式只用到 install.py 與 SKILL.md；wheel 給完整殼模式。
+kit 不含任何密鑰與服務位址。工作樹有未提交變更時 commit 標 `-dirty`。
 """
 
 from __future__ import annotations
@@ -83,21 +84,24 @@ def render_readme(name: str, wheel: str, sha256: str) -> str:
     return (
         f"{name}\n"
         f"{'=' * len(name)}\n\n"
-        "Lore Vault MCP 殼的安裝 kit（自用機器）。不含任何密鑰。\n\n"
+        "Lore Vault MCP 客戶端安裝 kit。不含任何密鑰與服務位址。\n\n"
         f"wheel：{wheel}\n"
         f"sha256：{sha256}\n\n"
         "目標機器（人類執行）：\n"
-        "  1. 確認已有 ~/.cloudflared/pm-token.env、Python >= 3.12、uv、\n"
-        "     Claude Code CLI\n"
-        "  2. 建議先完全結束 Claude Code\n"
-        "  3. 在本資料夾執行：python install.py\n"
-        "     先看流程：python install.py --dry-run\n"
-        "     只更新 wheel：python install.py --update\n"
-        "  4. token 會以不回顯方式詢問；Git Bash 請改用 winpty 或 PowerShell\n"
-        "  5. 把最後印出的驗證報告整段貼到聊天室給主機核對\n"
-        "  6. 重開 Claude Code，由主機請本機 agent 驗 status／recall／ask\n\n"
+        "  1. 需要 Python >= 3.12 與 Claude Code CLI；完整殼模式另需 uv\n"
+        "  2. 準備服務位址（如 https://vault.example.com）與服務的 API token；\n"
+        "     服務前面有 Cloudflare Access 時，另備含 CF_ACCESS_CLIENT_ID／\n"
+        "     CF_ACCESS_CLIENT_SECRET 的檔案並加 --cf-access-env <檔案>\n"
+        "  3. 建議先完全結束 Claude Code\n"
+        "  4. 在本資料夾執行：python install.py --base-url <服務位址>\n"
+        "     模式：--mode http（免殼，建議）或 --mode shell（本機 venv＋殼）\n"
+        "     先看流程：python install.py --dry-run --base-url <服務位址>\n"
+        "     只更新 wheel（完整殼）：python install.py --update\n"
+        "  5. token 會以不回顯方式詢問；Git Bash 請改用 winpty 或 PowerShell\n"
+        "  6. 最後印出的驗證報告不含密鑰，可交給服務管理者核對\n"
+        "  7. 重開 Claude Code，請 agent 驗 status／recall\n\n"
         "回退：python install.py --rollback\n"
-        "詳細步驟與實測坑：Lore-Vault repo 的 docs/guides/REMOTE-INSTALL.md\n"
+        "詳細步驟：Lore-Vault repo 的 docs/guides/REMOTE-INSTALL.md\n"
     )
 
 

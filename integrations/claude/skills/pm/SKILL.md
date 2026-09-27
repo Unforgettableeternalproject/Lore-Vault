@@ -14,9 +14,10 @@ argument-hint: "[init|explore|query|note|sync|status] [args...]"
 
 每個 session 先呼叫一次 `vault_resolve()`，之後所有讀寫都帶回傳的 `key`；切換 repo 才重新解析。
 
-- dev space（預設）：省略 `cwd` 時用殼啟動時的工作目錄；不在專案根時傳 `cwd=<專案目錄>`。key 由 git remote 正規化算出（例如 `github.com/unforgettableeternalproject/chatroom`），改名前的舊 key 由服務端別名接起來。
-- 無 git remote 的專案 key 為 `folder/<資料夾名>`，不是跨機器穩定識別；之後新增 remote 時 key 會改變，要請艾斯維爾在 UI 補別名，不另建新 vault。
+- dev space（預設）：省略 `cwd` 時用殼啟動時的工作目錄；不在專案根時傳 `cwd=<專案目錄>`。key 由 git remote 正規化算出（例如 `github.com/<owner>/<repo>`），改名前的舊 key 由服務端別名接起來。
+- 無 git remote 的專案 key 為 `folder/<資料夾名>`，不是跨機器穩定識別；之後新增 remote 時 key 會改變，要請服務管理者在 UI 補別名，不另建新 vault。
 - 回 `unknown_vault` 表示此專案沒有記憶。`query`／`status` 就回報無記憶，不為查詢建 vault；`init` 或確實要保存時才用 `vault_resolve(create=true, display=...)`。
+- **HTTP 連線**（`claude mcp get lore-vault` 顯示 type 為 http，服務端看不到本機檔案系統）：不能用 `cwd` 推算。先跑 `git remote get-url origin`，以 `vault_resolve(remote_url=<輸出>)` 解析；沒有 remote 的專案直接傳 `key="folder/<資料夾名>"`。`vault_resolve()` 回錯誤要求 `remote_url`／`key` 時也照此處理。
 - 跨專案觀察在 vault `global`；只有跨專案知識才明確指定它。跨 vault 查詢必須明示 `vault="*"`，而且只涵蓋目前 space。
 - space：`dev`（開發記憶）、`lore`（世界觀）、`personal`（私人）。新 session 一律 `dev`；只有任務明確需要時才 `space(action="set", value=...)`，lore／personal 的 vault 必須帶 `key="<space>/名稱"`。
 
@@ -29,12 +30,15 @@ argument-hint: "[init|explore|query|note|sync|status] [args...]"
 - 回應有 `truncated`／`omitted` 時表示被預算裁掉；要瀏覽近期寫入用 `list(vault, since?, topics?)`，`has_more=true` 以 `next_cursor` 續頁，未讀完不宣稱完整。
 - `ask(question, vault)` 把 recall 前 10 則 note 交模型整理成逐點回答（附 note_ids）；可參考但不可當唯一事實來源，關鍵事實以 `get` 核對。只涵蓋 note。
 - `recall` 預設一併回已上傳文件的段落（`kind=chunk`），全文用 `get` 取 `doc:…`／`chunk:…`。
+- `upload` 在 HTTP 連線下收檔名＋base64 內容，不收本機路徑；本機殼才可傳路徑。
 
 無關或無結果就查程式碼，不反覆換詞湊答案。檔案搜尋優先 FFF，特殊查詢按工具能力選擇。
 
 ### 降級
 
-回應 `degraded=true`（`degraded_reason: "service_unreachable"`）表示服務不可達、結果來自本地快照：可能過時、只有關鍵字檢索、不含文件。回報時標明降級與快照時間，歸屬不明的結果不採信。
+HTTP 連線沒有本地快照：服務不可達時 MCP 工具直接失敗，照實回報，不改用其他記憶來源湊答案。
+
+本機殼的回應 `degraded=true`（`degraded_reason: "service_unreachable"`）表示服務不可達、結果來自本地快照：可能過時、只有關鍵字檢索、不含文件。回報時標明降級與快照時間，歸屬不明的結果不採信。
 
 `write`／`update` 在服務不可達時直接失敗，不建離線寫入佇列；需要保存的內容先留在對話。只有使用者要求診斷服務才用 `status()`，不自行重啟服務。
 

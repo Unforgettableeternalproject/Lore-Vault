@@ -1,6 +1,9 @@
-// 檢索（T-79）：查詢框、vault 篩選（VaultPicker，與側欄共用）、結果列（類型、摘要來源、vault、更新、分數），
+// 檢索頁：兩個分頁——檢索（recall）與問答（ask，見 Ask.tsx）。分頁狀態反映在網址 `?mode=ask`。
+// 檢索分頁：查詢框、vault 篩選（VaultPicker，與側欄共用）、結果列（類型、摘要來源、vault、更新、分數），
 // 降級／截斷／不支援的種類／缺向量都要明確呈現。「載入其餘結果」＝提高 budget（必要時 limit）重查。
 import { useEffect, useRef, useState } from 'preact/hooks';
+
+import { Ask } from './Ask';
 
 import { Badge, Banner, EmptyState, ErrorState, Loading, SourceTag } from '../components/ui';
 import { VaultPicker } from '../components/VaultPicker';
@@ -25,7 +28,128 @@ export const SEARCH_INPUT_ID = 'lv-search-input';
 
 const KIND_LABEL: Record<string, string> = { note: '筆記', chunk: '文件段落', concept: '記憶概念' };
 
-export function Search({ initialQuery }: { initialQuery: string }) {
+export type SearchMode = 'recall' | 'ask';
+
+const TABS: { id: SearchMode; label: string }[] = [
+  { id: 'recall', label: '檢索' },
+  { id: 'ask', label: '問答' },
+];
+
+function parseMode(value: string | null | undefined): SearchMode {
+  return value === 'ask' ? 'ask' : 'recall';
+}
+
+export function Search({ initialQuery, initialMode }: { initialQuery: string; initialMode?: string | null }) {
+  const { space, navigate } = useApp();
+  const [mode, setMode] = useState<SearchMode>(parseMode(initialMode));
+  // 各分頁最後送出的查詢：切換分頁時寫回網址，回來時不遺失
+  const lastQuery = useRef<Record<SearchMode, string>>({
+    recall: parseMode(initialMode) === 'recall' ? initialQuery.trim() : '',
+    ask: parseMode(initialMode) === 'ask' ? initialQuery.trim() : '',
+  });
+  const tabRefs = useRef<Record<SearchMode, HTMLButtonElement | null>>({ recall: null, ask: null });
+
+  // 網址變了（上一頁、外部連結帶 ?q=）：跟著切分頁
+  useEffect(() => {
+    const next = parseMode(initialMode);
+    if (initialQuery.trim()) lastQuery.current[next] = initialQuery.trim();
+    setMode(next);
+  }, [initialMode, initialQuery]);
+
+  const syncUrl = (m: SearchMode, q: string) =>
+    navigate(routePath('search', [], { mode: m === 'ask' ? 'ask' : undefined, q }), { replace: true });
+
+  const select = (m: SearchMode, focus = false) => {
+    if (focus) tabRefs.current[m]?.focus();
+    if (m === mode) return;
+    setMode(m);
+    syncUrl(m, lastQuery.current[m]);
+  };
+
+  // APG tabs：左右鍵／Home／End 移動並啟用（自動啟用），分頁本身用 roving tabindex
+  const onTabKey = (e: KeyboardEvent) => {
+    const i = TABS.findIndex((t) => t.id === mode);
+    let next: number | null = null;
+    if (e.key === 'ArrowRight') next = (i + 1) % TABS.length;
+    else if (e.key === 'ArrowLeft') next = (i - 1 + TABS.length) % TABS.length;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = TABS.length - 1;
+    if (next === null) return;
+    e.preventDefault();
+    select(TABS[next]!.id, true);
+  };
+
+  const submitted = (m: SearchMode) => (q: string) => {
+    lastQuery.current[m] = q;
+    syncUrl(m, q);
+  };
+
+  return (
+    <section class="lv-screen" aria-labelledby="lv-search-title">
+      <div class="lv-eyebrow">
+        {mode === 'ask' ? 'ASK' : 'RECALL'} · {space.en} SPACE
+      </div>
+      <h1 id="lv-search-title" class="lv-title">
+        檢索
+      </h1>
+      <div class="lv-tabs" role="tablist" aria-label="檢索模式">
+        {TABS.map((t) => (
+          <button
+            key={t.id}
+            ref={(el) => {
+              tabRefs.current[t.id] = el;
+            }}
+            type="button"
+            role="tab"
+            id={`lv-search-tab-${t.id}`}
+            class={'lv-tab' + (mode === t.id ? ' is-on' : '')}
+            aria-selected={mode === t.id}
+            aria-controls={`lv-search-panel-${t.id}`}
+            tabIndex={mode === t.id ? 0 : -1}
+            onClick={() => select(t.id)}
+            onKeyDown={onTabKey}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+      {/* 兩個分頁都保持掛載（切換不丟結果、不重問），非作用中的用 hidden 隱藏 */}
+      <div
+        role="tabpanel"
+        id="lv-search-panel-recall"
+        aria-labelledby="lv-search-tab-recall"
+        hidden={mode !== 'recall'}
+      >
+        <RecallPanel
+          active={mode === 'recall'}
+          initialQuery={parseMode(initialMode) === 'recall' ? initialQuery : ''}
+          inputId={mode === 'recall' ? SEARCH_INPUT_ID : undefined}
+          onSubmitted={submitted('recall')}
+        />
+      </div>
+      <div role="tabpanel" id="lv-search-panel-ask" aria-labelledby="lv-search-tab-ask" hidden={mode !== 'ask'}>
+        <Ask
+          active={mode === 'ask'}
+          initialQuestion={parseMode(initialMode) === 'ask' ? initialQuery : ''}
+          inputId={mode === 'ask' ? SEARCH_INPUT_ID : undefined}
+          onSubmitted={submitted('ask')}
+        />
+      </div>
+    </section>
+  );
+}
+
+function RecallPanel({
+  active,
+  initialQuery,
+  inputId,
+  onSubmitted,
+}: {
+  active: boolean;
+  initialQuery: string;
+  inputId?: string;
+  onSubmitted: (query: string) => void;
+}) {
   const { api, space, vault, vaults, navigate, limits } = useApp();
   const DEFAULT_LIMIT = limits.recall_default_limit;
   const DEFAULT_BUDGET = limits.recall_default_budget;
@@ -84,7 +208,7 @@ export function Search({ initialQuery }: { initialQuery: string }) {
     const q = input.trim();
     if (!q) return;
     setParams({ query: q, vault, limit: DEFAULT_LIMIT, budget: DEFAULT_BUDGET });
-    navigate(routePath('search', [], { q }), { replace: true });
+    onSubmitted(q);
   };
 
   const loadMore = () => {
@@ -109,18 +233,14 @@ export function Search({ initialQuery }: { initialQuery: string }) {
   const atCap = params ? params.budget >= MAX_BUDGET && params.limit >= MAX_LIMIT : false;
 
   return (
-    <section class="lv-screen" aria-labelledby="lv-search-title">
-      <div class="lv-eyebrow">RECALL · {space.en} SPACE</div>
-      <h1 id="lv-search-title" class="lv-title">
-        檢索
-      </h1>
+    <>
       <form class="lv-search" role="search" onSubmit={submit}>
         <span class="lv-search__prompt" aria-hidden="true">
           &gt;
         </span>
         <input
           ref={inputRef}
-          id={SEARCH_INPUT_ID}
+          id={inputId}
           class="lv-search__input"
           type="search"
           name="q"
@@ -140,7 +260,7 @@ export function Search({ initialQuery }: { initialQuery: string }) {
       </form>
 
       <div class="lv-filters">
-        <VaultPicker />
+        {active && <VaultPicker />}
       </div>
 
       {degraded && result && (
@@ -220,7 +340,7 @@ export function Search({ initialQuery }: { initialQuery: string }) {
           )}
         </>
       )}
-    </section>
+    </>
   );
 }
 

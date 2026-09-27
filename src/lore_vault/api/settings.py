@@ -1,7 +1,10 @@
 """HTTP 服務的啟動設定：資料庫路徑、bearer token（A15）、embedder 與 worker 注入點。
 
 `load_settings()` 從環境變數（與可選的設定檔、`.env`）組出設定；
-token 缺少或太短時 `create_app` 拒絕啟動，不會默默以無認證狀態開放。
+token 太短或含空白時 `create_app` 拒絕啟動，不會默默以無認證狀態開放。
+`LORE_VAULT_API_TOKEN` 未設時（D12）改用資料目錄 `secrets/api-token`，
+檔案不存在就產生（`api.bootstrap`）；直接建構 `ApiSettings` 的呼叫端（測試）
+必須自己給 token。
 """
 
 from __future__ import annotations
@@ -18,13 +21,18 @@ from lore_vault.config import (
     Config,
     ConfigError,
     Secret,
+    admin_credentials,
     api_token,
+    configured_principal,
     load_config,
     openai_api_key,
 )
 from lore_vault.enrich.clients import Transport
 from lore_vault.enrich.worker import EnrichWorker
 from lore_vault.recall.embedder import Embedder
+from lore_vault.schema import DEFAULT_PRINCIPAL
+
+from .bootstrap import ensure_api_token, secrets_dir_for
 
 if TYPE_CHECKING:
     from lore_vault.ask.client import Answerer
@@ -74,6 +82,24 @@ class ApiSettings:
     answerer: Answerer | None = None
     # 問答模型的 HTTP transport（預設 urllib）；只在 answerer 為 None 時使用
     llm_transport: Transport | None = None
+    # 唯一憑證對應的 principal（D12，`LORE_VAULT_PRINCIPAL`）
+    principal: str = DEFAULT_PRINCIPAL
+    # 首次啟動建立 UI 管理員（D12）。只有 `load_settings()`（正式啟動路徑）打開；
+    # 直接建構設定的測試預設不建，避免憑空多一個帳號
+    bootstrap_admin: bool = False
+    # 管理員帳號（None = 同 principal）與密碼（None = 產生一次性密碼寫進 secrets_dir）
+    admin_user: str | None = None
+    admin_password: Secret | None = None
+    # 產生的密鑰檔目錄（None = 資料庫所在目錄下的 secrets/）
+    secrets_dir: Path | None = None
+
+    @property
+    def resolved_secrets_dir(self) -> Path:
+        return self.secrets_dir or secrets_dir_for(self.db_path)
+
+    @property
+    def resolved_admin_user(self) -> str:
+        return self.admin_user or self.principal
 
     @property
     def run_worker(self) -> bool:
@@ -117,16 +143,31 @@ def load_settings(
     env_file: str | PathLike[str] | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> ApiSettings:
-    """從環境變數組設定。資料庫路徑取 `database.path`（`LORE_VAULT_DATABASE_PATH`）。"""
+    """從環境變數組設定。資料庫路徑取 `database.path`（`LORE_VAULT_DATABASE_PATH`）。
+
+    token：`LORE_VAULT_API_TOKEN` 優先；未設時讀（或首次產生）資料目錄的
+    `secrets/api-token`（D12）。
+    """
     config = load_config(config_path, env_file=env_file, environ=environ)
-    token = validate_token(api_token(env_file=env_file, environ=environ))
     if not config.database.path:
         raise ConfigError(
             "缺少資料庫路徑：設定 database.path（環境變數 LORE_VAULT_DATABASE_PATH）"
         )
+    db_path = Path(config.database.path)
+    principal = configured_principal(env_file=env_file, environ=environ)
+    secrets_dir = secrets_dir_for(db_path)
+    token = validate_token(
+        ensure_api_token(api_token(env_file=env_file, environ=environ), secrets_dir)
+    )
+    admin_user, admin_password = admin_credentials(env_file=env_file, environ=environ)
     return ApiSettings(
-        db_path=Path(config.database.path),
+        db_path=db_path,
         token=token,
         config=config,
         openai_key=openai_api_key(env_file=env_file, environ=environ),
+        principal=principal,
+        bootstrap_admin=True,
+        admin_user=admin_user,
+        admin_password=admin_password,
+        secrets_dir=secrets_dir,
     )

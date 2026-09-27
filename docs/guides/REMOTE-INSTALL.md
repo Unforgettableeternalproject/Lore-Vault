@@ -1,79 +1,102 @@
-# 其他機器安裝 Lore Vault MCP 殼（agent 操作手冊）
+# 客戶端安裝（Claude Code 連 Lore Vault 服務）
 
-給「主機以外的機器」上的 agent 照做：把舊的 `open-notebook` MCP 換成連遠端服務的 Lore Vault MCP 殼，並換上新版 pm skill。
-依據：2026-09-26 在第二台機器實測成功的流程。設定鍵與 token 來源優先序見 [DEVELOPMENT.md](../DEVELOPMENT.md)「MCP 殼」段。
+把一台機器的 Claude Code 接上已架好的 Lore Vault 服務（架服務見 [SELF-HOST.md](SELF-HOST.md)），並裝上 pm skill。
+以下 `<服務位址>` 指服務的根網址，例如 `https://vault.example.com` 或本機的 `http://127.0.0.1:5056`（不含 `/mcp`）。
 
-## 快速安裝（安裝程式）
+## 兩種模式
 
-自用 kit，把下方「步驟」2～8 包成一支互動式安裝程式，由目標機的**人類**執行；步驟 10 的驗證仍由主機端委託該機 agent。
+| | HTTP 模式（建議） | 完整殼模式 |
+|---|---|---|
+| 連線 | Claude Code 直連服務的 `<服務位址>/mcp`（Streamable HTTP） | 本機 venv 跑 stdio 殼，殼再呼叫服務的 HTTP API |
+| 客戶端需求 | Claude Code CLI | Claude Code CLI、Python ≥ 3.12、uv、kit 內的 wheel |
+| token 存放 | `~/.claude.json`（`claude mcp add --header`） | `~/.lore-vault/mcp.env`，不進 `~/.claude.json` |
+| `vault_resolve` | 由 agent 傳 `remote_url`（`git remote get-url origin`）或 `key` | 殼用工作目錄自動推算 |
+| `upload` | 檔名＋base64 內容 | 本機路徑 |
+| 服務斷線時 | 工具直接失敗 | 唯讀的本地快照（`degraded=true`） |
+| 更新 | 服務端升級即可，客戶端 `/mcp` 重連 | 客戶端要重裝 wheel（`install.py --update`） |
 
-1. **主機**（Lore-Vault repo，`develop` 最新）打包 kit：
+兩種模式的工具定義相同；pm skill 已同時涵蓋兩者的差異。
 
-   ```powershell
+## 最短路徑：只登記 HTTP MCP
+
+```bash
+claude mcp add --transport http -s user lore-vault <服務位址>/mcp \
+  --header "Authorization: Bearer <token>"
+```
+
+- `--header` 可重複，而且會吞掉後面的位置參數，**一定放在名稱與網址之後**
+- 服務前面有 Cloudflare Access 時再加兩個 header：
+  `--header "CF-Access-Client-Id: <id>" --header "CF-Access-Client-Secret: <secret>"`
+- token 會以明文存在 `~/.claude.json`；不要在共用帳號的機器上用
+- 登記時 token 會出現在 `claude mcp add` 的命令列參數，執行期間同機其他使用者可從行程清單看到；多人共用的機器改用完整殼模式
+- pm skill 另外複製 repo 的 `integrations/claude/skills/pm/SKILL.md` 到 `~/.claude/skills/pm/SKILL.md`
+
+要一併備份設定、自檢連線、安裝 skill，用下面的安裝程式。
+
+## 安裝程式
+
+安裝程式只用 Python 標準庫，由目標機的**人類**執行（會以不回顯方式詢問 token）。
+
+1. **服務主機**（Lore-Vault repo）打包 kit：
+
+   ```bash
    uv run python scripts/build_remote_kit.py --out <輸出目錄>
    ```
 
-   產出 `lore-vault-kit-<版本>-<日期>-<commit>/` 與同名 `.zip`：wheel、`SKILL.md`（取自 repo 的
-   `integrations/claude/skills/pm/SKILL.md`）、`install.py`（取自 `integrations/remote/install.py`）、`README.txt`（含 wheel sha256）。
-   未指定 `--out` 時輸出到系統暫存的 `lore-vault-kits/`；同名 kit 已存在要加 `--force`。
-2. **傳到目標機**：zip 經聊天室（`chatroom_send_file`）或其他方式傳過去並解壓。kit 不含任何密鑰。
-3. **目標機人類**在 kit 資料夾執行（先完全結束 Claude Code；PowerShell 5.1／cmd 皆可）：
+   產出 `lore-vault-kit-<版本>-<日期>-<commit>/` 與同名 `.zip`：wheel、`SKILL.md`、`install.py`、`README.txt`（含 wheel sha256）。
+   kit 不含任何密鑰與服務位址。未指定 `--out` 時輸出到系統暫存的 `lore-vault-kits/`；同名 kit 已存在要加 `--force`。
+2. **傳到目標機**並解壓。
+3. **目標機**在 kit 資料夾執行（先完全結束 Claude Code；PowerShell 5.1／cmd／bash 皆可）：
 
-   ```powershell
-   python install.py --dry-run   # 先看會做什麼，不寫檔
-   python install.py             # 逐步確認安裝；token 以不回顯方式輸入
+   ```bash
+   python install.py --base-url <服務位址> --dry-run   # 先看會做什麼，不寫檔
+   python install.py --base-url <服務位址>             # 互動安裝；會詢問模式與 token
    ```
 
-   - 偵測 Python ≥ 3.12、uv、claude CLI、`~/.cloudflared/pm-token.env`（只看兩個鍵在不在）；缺一就停下
-   - 備份 `.bak-precutover`（已存在不覆蓋）→ 建 venv → `uv pip install --reinstall` wheel → 寫 `mcp.toml`
-     → 寫 `mcp.env`（UTF-8 無 BOM）→ `claude mcp remove open-notebook`（有才移除；project scope 不動，只提示）
-     與 `claude mcp add lore-vault -s user -- ...`（list 參數，不用 add-json）→ 顯示差異摘要後覆寫 pm skill → 本機自檢
-   - 本機自檢：用 venv python 經 CF Access＋bearer 打一次 `/v1/status`，失敗分類提示（DNS／連線／TLS／逾時／CF 403／bearer 401／服務錯誤）
+   - **HTTP 模式**：備份 `~/.claude.json` 與 pm skill（`.bak-precutover`，已存在不覆蓋）→ 詢問 token
+     → 直接呼叫一次 `<服務位址>/v1/status` 自檢（失敗就停下，不留下壞掉的條目）
+     → `claude mcp add --transport http -s user lore-vault <服務位址>/mcp --header ...` → 顯示差異摘要後覆寫 pm skill
+   - **完整殼模式**：備份 → 建 venv → `uv pip install --reinstall` wheel → 寫 `mcp.toml` → 寫 `mcp.env`（UTF-8 無 BOM）
+     → `claude mcp add lore-vault -s user -- <venv python> -m lore_vault.mcp ...` → 覆寫 pm skill → 經殼自檢
+   - 兩種模式都會移除舊的 `open-notebook` MCP 條目（user／local scope 才自動移除；project scope 只提示），並先移除既有的 user scope `lore-vault` 再重新登記
+   - 自檢失敗分類：DNS／連線／TLS／逾時／轉址或 403（Cloudflare Access）／401（token）／服務錯誤
    - Git Bash（mintty）無法隱藏輸入：改用 PowerShell、`winpty python install.py`，或先設環境變數 `LORE_VAULT_API_TOKEN`
    - 任一步失敗會停下並說明處理方式；修正後重跑同一指令，已完成的步驟自動略過
-4. **貼報告給主機**：安裝程式最後印出驗證報告（同時存到 `~/.lore-vault/install-report-<時間>.txt`），
-   含機器名、各步驟結果、wheel sha256、status 摘要、`claude mcp list` 的 lore-vault 條目，家目錄遮成 `~`，不含任何密鑰。
-   主機核對 sha256 與 status 後，請目標機人類重開 Claude Code，再請該機 agent 做步驟 10 的驗證。
+4. **驗證報告**：最後印出報告（同時存到 `~/.lore-vault/install-report-<時間>.txt`），含模式、各步驟結果、wheel sha256、status 摘要、
+   `claude mcp list` 的 lore-vault 條目；家目錄遮成 `~`，不含任何密鑰。重開 Claude Code 後照「驗證」一節確認。
 
-其他旗標：
+旗標：
 
 | 旗標 | 用途 |
 |---|---|
-| `--update` | 服務端新版上線後只重裝 wheel＋自檢，不動設定；之後 `/mcp` 重連即可 |
-| `--yes` | 非互動；token 取自環境變數 `LORE_VAULT_API_TOKEN`（有設就覆寫 `mcp.env`，沒設則沿用既有 `mcp.env`），既有 `mcp.toml` 保留 |
+| `--base-url URL` | 服務位址（必填；未給時互動詢問，`--yes` 下必須給，除非完整殼已有 `mcp.toml`） |
+| `--mode http\|shell` | 指定模式；未給時互動詢問（預設 HTTP；已有殼設定時預設殼），`--yes` 下依既有設定 |
+| `--cf-access-env FILE` | 選配：服務前面有 Cloudflare Access 時，含 `CF_ACCESS_CLIENT_ID`／`CF_ACCESS_CLIENT_SECRET` 的檔案；沒給時互動詢問是否使用 |
+| `--update` | 完整殼：只重裝 wheel＋自檢，不動設定；之後 `/mcp` 重連即可。HTTP 模式不需要 |
+| `--yes` | 非互動；token 取自環境變數 `LORE_VAULT_API_TOKEN`（完整殼：有設就覆寫 `mcp.env`，沒設則沿用既有），既有 `mcp.toml` 保留 |
 | `--rollback` | 還原兩份 `.bak-precutover`（`~/.claude.json` 整份回到備份時狀態），之後重開 Claude Code |
-| `--base-url URL` | 覆寫服務位址（會覆寫既有 `mcp.toml`） |
 | `--no-mask` | 報告不把家目錄遮成 `~` |
 
 以下手動步驟保留作為參考與除錯用；安裝程式失敗時可對照單步排查。
 
-## 規則（先讀）
+## 規則（agent 協助安裝時先讀）
 
 - **標「人類」的步驟 agent 不執行**：這些步驟實測會被 agent 端安全分類器擋下。agent 把指令整理好交給人類貼上執行，完成後由 agent 驗證；不要換寫法、換工具或拆步驟繞過。
-- **agent 不讀、不輸出任何密鑰值**：`~/.cloudflared/pm-token.env` 由 MCP 殼自己讀；`LORE_VAULT_API_TOKEN` 由人類親手寫入。agent 只檢查「鍵存在」，驗證一律看殼的 `status`。
-- token 不經聊天室、不寫進 `~/.claude.json`、不進任何 repo。
+- **agent 不讀、不輸出任何密鑰值**：CF Access 憑證檔由殼或安裝程式自己讀；`LORE_VAULT_API_TOKEN` 由人類親手輸入。agent 只檢查「鍵存在」，驗證一律看 `status`。
+- token 不經聊天室、不進任何 repo。完整殼模式下 token 也不寫進 `~/.claude.json`；HTTP 模式則必然存在 `~/.claude.json`。
 - 路徑一律用 `$HOME`／`~`，不寫死使用者名稱。以下指令為 PowerShell。
 
-## 前提
+## 手動安裝：完整殼模式
 
-- Windows、Python ≥ 3.12、`uv`、Claude Code CLI（`claude`）
-- 本機已有 `~/.cloudflared/pm-token.env`（含 `CF_ACCESS_CLIENT_ID`／`CF_ACCESS_CLIENT_SECRET`）
-- 服務端點：`https://pm-api.unforgettableeternalproject.com`（CF Access service token ＋ bearer）
-- 主機已產出 wheel（見步驟 0）
+### 0. 取得 wheel —— 服務主機
 
-## 步驟
-
-### 0. 取得 wheel —— 主機端（agent 或人類）
-
-repo 沒有 git remote，遠端無法 clone。在主機的 Lore-Vault repo（`develop` 最新）：
+在服務主機的 Lore-Vault repo：
 
 ```powershell
 uv build --wheel   # 產出 dist/lore_vault-<版本>-py3-none-any.whl
 ```
 
-經聊天室（`chatroom_send_file`）或其他方式傳到目標機器。
-
-**成功判準**：目標機器上有 `lore_vault-*.whl`，記下其絕對路徑（下稱 `<wheel>`）。
+傳到目標機器。**成功判準**：目標機器上有 `lore_vault-*.whl`，記下其絕對路徑（下稱 `<wheel>`）。
 
 ### 1. 盤點 —— agent（只讀）
 
@@ -82,14 +105,11 @@ uv build --wheel   # 產出 dist/lore_vault-<版本>-py3-none-any.whl
 | 項目 | 怎麼看 |
 |---|---|
 | 現有 MCP | `claude mcp list`；`~/.claude.json` 的 `mcpServers`（只看鍵名與 command，不輸出 env 值） |
-| 舊 `open-notebook` 條目 | 同上，記下 scope（user／project） |
-| pm-proxy | `mcpServers` 或 command 是否引用 `pm-proxy.py` |
-| `pm-token.env` | `Test-Path "$HOME\.cloudflared\pm-token.env"`（**不讀內容**） |
-| hooks 是否引用 spike | `~/.claude/settings.json` 的 hooks 是否出現 `agent_memory_spike` |
+| 舊 `open-notebook` 條目（若曾使用） | 同上，記下 scope（user／project） |
+| CF Access 憑證檔（若服務有 Access） | `Test-Path <檔案>`（**不讀內容**） |
 | pm skill | `~/.claude/skills/pm/SKILL.md` 是否存在、是否仍呼叫 `mcp__open-notebook__*` |
-| pipeline plugin | `~/.claude/plugins/` 下是否有 `claude-codex-pipeline`／`uep-pipeline` 且寫死 `mcp__open-notebook__*` |
 
-**成功判準**：回報上表結果。`pm-token.env` 不存在就停下，請人類先補。hooks 引用 spike、pipeline plugin 寫死舊工具屬另案，只回報、本流程不改。
+**成功判準**：回報上表結果。服務有 Cloudflare Access 但沒有憑證檔就停下，請人類先向服務管理者取得。
 
 ### 2. 備份 —— agent
 
@@ -99,8 +119,6 @@ Copy-Item "$HOME\.claude\skills\pm\SKILL.md" "$HOME\.claude\skills\pm\SKILL.md.b
 ```
 
 已存在 `.bak-precutover` 就不要覆蓋（那是更早的原始狀態），回報後沿用。
-
-**成功判準**：兩個 `.bak-precutover` 檔存在。
 
 ### 3. 建 venv —— agent
 
@@ -112,19 +130,11 @@ uv venv "$HOME\.lore-vault\venv" --python 3.14
 
 ### 4. 安裝 wheel —— 人類
 
-agent 把 `<wheel>` 換成實際路徑後交給人類執行：
-
 ```powershell
 uv pip install --python "$HOME\.lore-vault\venv" "<wheel>"
 ```
 
-**成功判準**（agent 驗證）：
-
-```powershell
-& "$HOME\.lore-vault\venv\Scripts\python.exe" -c "import lore_vault.mcp; print('ok')"
-```
-
-印出 `ok`。
+**成功判準**（agent 驗證）：`& "$HOME\.lore-vault\venv\Scripts\python.exe" -c "import lore_vault.mcp; print('ok')"` 印出 `ok`。
 
 ### 5. 寫 `mcp.toml` —— agent
 
@@ -132,109 +142,77 @@ uv pip install --python "$HOME\.lore-vault\venv" "<wheel>"
 
 ```toml
 [mcp]
-base_url = "https://pm-api.unforgettableeternalproject.com"
-cf_access_env_file = "~/.cloudflared/pm-token.env"
+base_url = "<服務位址>"
 snapshot_dir = "~/.lore-vault/snapshot"
 timeout = 15.0
 ```
 
-**成功判準**：檔案存在、內容如上。
+服務有 Cloudflare Access 時才加一行 `cf_access_env_file = "<憑證檔路徑>"`；**指向不存在的檔案會讓殼拒絕啟動**，沒用 Access 就不要寫。
 
 ### 6. 寫 `mcp.env` —— 人類
-
-值取主機 Lore-Vault repo `.env` 的 `LORE_VAULT_API_TOKEN`，由人類親手貼上：
 
 ```powershell
 notepad "$HOME\.lore-vault\mcp.env"
 ```
 
-內容只有一行：
+內容只有一行 `LORE_VAULT_API_TOKEN=<值>`，用記事本存（UTF-8 無 BOM）。不要在 PowerShell 5.1 用 `>`／`Out-File` 寫（會產生 UTF-16 或 BOM，鍵名讀不到）。
 
-```text
-LORE_VAULT_API_TOKEN=<值>
-```
+**成功判準**（agent 驗證，不輸出值）：`Select-String -Path "$HOME\.lore-vault\mcp.env" -Pattern '^LORE_VAULT_API_TOKEN=.+' -Quiet` 回 `True`。
 
-用記事本存（UTF-8 無 BOM）。不要在 PowerShell 5.1 用 `>`／`Out-File` 寫（會產生 UTF-16 或 BOM，鍵名讀不到）。
-
-**成功判準**（agent 驗證，不輸出值）：
+### 7. 登記 MCP —— 人類
 
 ```powershell
-Select-String -Path "$HOME\.lore-vault\mcp.env" -Pattern '^LORE_VAULT_API_TOKEN=.+' -Quiet
-```
-
-回 `True`。
-
-### 7. 換 MCP 條目 —— 人類
-
-```powershell
-claude mcp remove open-notebook -s user
+claude mcp remove open-notebook -s user   # 只有曾用過舊 PM 才需要
 claude mcp add lore-vault -s user -- "$HOME\.lore-vault\venv\Scripts\python.exe" -m lore_vault.mcp --config "$HOME\.lore-vault\mcp.toml" --env-file "$HOME\.lore-vault\mcp.env"
 ```
 
-- `open-notebook` 的 scope 以步驟 1 盤點為準（不是 user 就改 `-s`）；不存在就跳過 remove。
-- **不要在 PowerShell 5.1 用 `claude mcp add-json`**：原生參數傳遞會吃掉 JSON 雙引號，回 `Invalid configuration: : Invalid input`。一定要用 add-json 時改在 Git Bash 執行。
-- 舊條目若透過 `pm-proxy.py` 轉接，一併移除；pm-proxy 退役。
-
-**成功判準**（agent 驗證）：`claude mcp list` 有 `lore-vault`、沒有 `open-notebook`；`lore-vault` 的 command 是 venv 的 `python.exe` 絕對路徑，args 為 `-m lore_vault.mcp --config <mcp.toml> --env-file <mcp.env>`。
+- **不要在 PowerShell 5.1 用 `claude mcp add-json`**：原生參數傳遞會吃掉 JSON 雙引號，回 `Invalid configuration: : Invalid input`。
+- **成功判準**（agent 驗證）：`claude mcp list` 有 `lore-vault`；command 是 venv 的 `python.exe` 絕對路徑，args 為 `-m lore_vault.mcp --config <mcp.toml> --env-file <mcp.env>`。
 
 ### 8. 換 pm skill —— 人類
 
-新版 pm skill 取自主機的 `~/.claude/skills/pm/SKILL.md`，隨 wheel 一起傳過來（它不含密鑰）。agent 先檢查它是否機器中立：
-
-- `author` 寫的是「依本機 persona 的角色名」，沒有寫死特定角色
-- MEMPAL 段落寫「有 MEMPAL 工具的機器才用」，沒有工具就略過
-- 沒有主機私有路徑
-
-有不符就先回報，不自行改寫。確認後交給人類執行：
+skill 取自 repo 的 `integrations/claude/skills/pm/SKILL.md`（kit 內的 `SKILL.md`）。agent 先確認它機器中立（`author` 寫「依本機 persona 的角色名」、沒有主機私有路徑），有不符就回報，不自行改寫。
 
 ```powershell
-Copy-Item "<傳來的 SKILL.md>" "$HOME\.claude\skills\pm\SKILL.md" -Force
+Copy-Item "<SKILL.md>" "$HOME\.claude\skills\pm\SKILL.md" -Force
 ```
 
-**成功判準**（agent 驗證）：`SKILL.md` 的 `allowed-tools` 為 `mcp__lore-vault__*`，不再出現 `mcp__open-notebook__`。
+**成功判準**：`allowed-tools` 為 `mcp__lore-vault__*`，不再出現 `mcp__open-notebook__`。
 
 ### 9. 重開 Claude Code —— 人類
 
 完全結束 Claude Code 再開，新的 MCP 與 skill 才會載入。
 
-- 重開後 session key 可能改變。若在聊天室協作：重掛指派 watcher、重新 join 房間，或請人類重新指派。
+## 驗證 —— agent
 
-### 10. 驗證 —— agent
-
-在新 session 呼叫 `mcp__lore-vault__status()`，對照：
+在新 session 呼叫 `mcp__lore-vault__status()`：
 
 | 項目 | 預期 |
 |---|---|
 | 整體 | `ok: true` |
-| schema 版本 | 13 |
-| doctor | 約 31 pass／0 fail／0 warn／7 skipped |
-| skipped 項目 | spool、concept_snapshot、spike_home 等主機端功能——遠端正常缺，不算失敗 |
-| `import.on_reconcile` | pass |
+| schema 版本 | 與服務端預期一致 |
+| doctor | 0 fail；spool、concept_snapshot 等只在服務主機存在的項目顯示 skipped，不算失敗 |
 
 再確認：
 
 - `mcp__lore-vault__space(action="get")` 為 `dev`
-- `mcp__lore-vault__vault_resolve()` 後任意 `recall`，回應 `degraded` 為 `false`
-- `$HOME\.lore-vault\snapshot\` 已生成 `snapshot.db` 與 `snapshot.json`（殼啟動後背景拉取，可能要等幾秒）
+- HTTP 模式：先 `git remote get-url origin`，`vault_resolve(remote_url=...)` 後任意 `recall` 有回應
+- 完整殼模式：`vault_resolve()` 後任意 `recall`，回應 `degraded` 為 `false`；`~/.lore-vault/snapshot/` 已生成 `snapshot.db` 與 `snapshot.json`（殼啟動後背景拉取，可能要等幾秒）
 
-**成功判準**：以上全部符合。任一 fail：`401`／`403`／3xx 查 token 與 `pm-token.env`（不讀值，確認檔案與鍵存在）；連線失敗查 `base_url`；schema 不符表示 wheel 過舊，回主機重打。
+任一 fail：`401` 查 token；`403`／3xx 查 Cloudflare Access 憑證；連線失敗查服務位址；schema 不符（完整殼）表示 wheel 過舊，重打 kit 後 `--update`。
 
-## 更新（服務端新版上線後）
+## 更新
 
-1. 主機 `uv build --wheel` 產新 wheel，傳到目標機器 —— agent
-2. `uv pip install --reinstall --python ~/.lore-vault/venv <wheel>` —— 人類（版本號未變時必須 `--reinstall`，否則不會覆蓋）
-3. `/mcp` 重連 `lore-vault` 即生效，不必重開整個 Claude Code —— 人類
-4. 驗 `status`（doctor 無 fail）與新工具可用 —— agent
+- **HTTP 模式**：服務端升級即可，客戶端在 Claude Code 用 `/mcp` 重連。
+- **完整殼模式**：取得新 kit 後 `python install.py --update`（等同 `uv pip install --reinstall --python ~/.lore-vault/venv <wheel>`；版本號未變時必須 `--reinstall`），再 `/mcp` 重連。
 
-## 範圍外（本流程不處理）
+## 範圍外
 
-- **收料**：遠端不掛 hook，不收 episode；目前只由主機收料。
-- **舊架構殘留**：Windows 排程 `PM Cache Sync`、`PM Proxy` 在觀察期結束前不動。之後再停用排程，並封存 `~/.claude/pm/`、`~/.claude/pm-kit/`。
-- hooks 引用 spike、pipeline plugin 寫死 `mcp__open-notebook__*`：只在步驟 1 回報。
+- **收料**：本流程不安裝 hook，不收 episode。
 
 ## 回退
 
-人類執行後重開 Claude Code：
+`python install.py --rollback`，或人類手動執行後重開 Claude Code：
 
 ```powershell
 Copy-Item "$HOME\.claude.json.bak-precutover" "$HOME\.claude.json" -Force

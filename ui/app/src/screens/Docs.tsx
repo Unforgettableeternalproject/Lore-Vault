@@ -1,8 +1,20 @@
 // 文件列表與上傳（T-81）：拖放／選檔（前端先擋大小上限）→ 逐檔上傳進度與結果（新版本／重複／重試），
 // 列表顯示抽取狀態（處理中自動輪詢）、失敗原因與重試、編碼警示、版本與「已被取代」、兩段式刪除。
+// 篩選（與記憶層同一套元件）走 `/v1/list`：更新日期區間、檔名 title、類型 extensions（依檔名
+// 副檔名）、抽取狀態 statuses，條件同步到網址查詢字串（vault 仍由側欄共用狀態決定）。
 import { useEffect, useRef, useState } from 'preact/hooks';
 
 import { Banner, EmptyState, ErrorState, Loading, TwoPhaseDelete } from '../components/ui';
+import {
+  ChipGroup,
+  FilterPanel,
+  queryChoice,
+  queryDate,
+  queryText,
+  screenQuery,
+  TextFilter,
+  useQuerySync,
+} from '../components/Filters';
 import { DateRange, DEFAULT_PAGE_SIZE, Pager, rangeParams, type DateRangeValue } from '../components/Pager';
 import { VaultPicker } from '../components/VaultPicker';
 import { ApiError } from '../lib/api';
@@ -23,6 +35,31 @@ import type { DocumentMeta, DocumentRetryResult, ListResult, UploadResult } from
 
 export const POLL_MS = 2000;
 const ACCEPT = '.md,.markdown,.txt,.pdf,.docx,.pptx,.json,.yaml,.yml,.toml';
+
+/** 類型篩選：選項對應服務端 extensions（依檔名副檔名，與列上「類型」欄一致） */
+const FILE_TYPES = [
+  { id: '', label: '全部類型', exts: [] },
+  { id: 'md', label: 'md', exts: ['md', 'markdown'] },
+  { id: 'txt', label: 'txt', exts: ['txt'] },
+  { id: 'pdf', label: 'pdf', exts: ['pdf'] },
+  { id: 'docx', label: 'docx', exts: ['docx'] },
+  { id: 'pptx', label: 'pptx', exts: ['pptx'] },
+  { id: 'json', label: 'json', exts: ['json'] },
+  { id: 'yaml', label: 'yaml', exts: ['yaml', 'yml'] },
+  { id: 'toml', label: 'toml', exts: ['toml'] },
+] as const;
+type FileType = (typeof FILE_TYPES)[number]['id'];
+const FILE_TYPE_IDS = FILE_TYPES.map((t) => t.id);
+
+/** 抽取狀態篩選：「處理中」＝排隊中＋抽取中（與列表輪詢的判斷一致） */
+const STATUS_FILTERS = [
+  { id: '', label: '全部', statuses: [] },
+  { id: 'processing', label: '處理中', statuses: ['pending', 'extracting'] },
+  { id: 'ready', label: '完成', statuses: ['ready'] },
+  { id: 'failed', label: '失敗', statuses: ['failed'] },
+] as const;
+type StatusFilter = (typeof STATUS_FILTERS)[number]['id'];
+const STATUS_FILTER_IDS = STATUS_FILTERS.map((f) => f.id);
 
 export interface UploadEntry {
   key: number;
@@ -47,7 +84,12 @@ export function Docs() {
   const maxBytes = limits.max_file_bytes;
   const [target, setTarget] = useState(vault !== ALL ? vault : '');
   const [page, setPage] = useState<ListResult<DocumentMeta> | null>(null);
-  const [range, setRange] = useState<DateRangeValue>({ from: '', to: '' });
+  // 篩選初值取自網址（重新整理、從文件返回都保留）
+  const [initial] = useState(() => screenQuery('docs'));
+  const [range, setRange] = useState<DateRangeValue>(() => ({ from: queryDate(initial, 'from'), to: queryDate(initial, 'to') }));
+  const [title, setTitle] = useState(() => queryText(initial, 'title'));
+  const [fileType, setFileType] = useState<FileType>(() => queryChoice(initial, 'type', FILE_TYPE_IDS, ''));
+  const [status, setStatus] = useState<StatusFilter>(() => queryChoice(initial, 'status', STATUS_FILTER_IDS, ''));
   const [pageNo, setPageNo] = useState(1);
   const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE);
   const [error, setError] = useState<unknown>(null);
@@ -65,8 +107,19 @@ export function Docs() {
   useEffect(() => {
     if (vault !== ALL) setTarget(vault);
   }, [vault]);
+  useQuerySync('docs', { title, type: fileType, status, from: range.from, to: range.to });
+  const filtered = Boolean(title || fileType || status || range.from || range.to);
+  const clearFilters = () => {
+    setRange({ from: '', to: '' });
+    setTitle('');
+    setFileType('');
+    setStatus('');
+  };
+  const exts = FILE_TYPES.find((t) => t.id === fileType)?.exts ?? [];
+  const statuses = STATUS_FILTERS.find((f) => f.id === status)?.statuses ?? [];
+
   // 篩選或每頁筆數變了回第一頁
-  useEffect(() => setPageNo(1), [vault, range.from, range.to, pageSize]);
+  useEffect(() => setPageNo(1), [vault, range.from, range.to, title, fileType, status, pageSize]);
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -82,6 +135,9 @@ export function Docs() {
           limit: pageSize,
           offset: (pageNo - 1) * pageSize,
           with_total: true,
+          ...(title ? { title } : {}),
+          ...(exts.length ? { extensions: [...exts] } : {}),
+          ...(statuses.length ? { statuses: [...statuses] } : {}),
           ...rangeParams(range),
         },
         ctrl.signal,
@@ -96,7 +152,7 @@ export function Docs() {
         setLoading(false);
       });
     return () => ctrl.abort();
-  }, [api, space.id, vault, pageNo, pageSize, range.from, range.to, tick]);
+  }, [api, space.id, vault, pageNo, pageSize, range.from, range.to, title, fileType, status, tick]);
 
   // 有處理中的文件就輪詢列表
   const processing = page?.items.some(isProcessing) ?? false;
@@ -206,12 +262,38 @@ export function Docs() {
       <h1 id="lv-docs-title" class="lv-title">
         文件
       </h1>
-      <section class="lv-filter-panel" aria-label="篩選條件" data-testid="filter-panel">
+      <FilterPanel
+        active={filtered}
+        onClear={clearFilters}
+        summary={
+          <>
+            範圍：{vaultName({ vaults }, vault)}
+            {title ? ` · 檔名含「${title}」` : ''}
+            {fileType ? ` · 類型 ${fileType}` : ''}
+            {status ? ` · ${STATUS_FILTERS.find((f) => f.id === status)?.label ?? ''}` : ''}
+            {range.from || range.to ? ` · ${range.from || '最早'}～${range.to || '今天'}` : ''}
+          </>
+        }
+      >
         <div class="lv-filter-panel__row">
           <VaultPicker />
+          <label class="lv-filters__group">
+            <span class="lv-filters__label">類型</span>
+            <select class="lv-input lv-select" value={fileType} aria-label="文件類型" onChange={(e) => setFileType((e.target as HTMLSelectElement).value as FileType)}>
+              {FILE_TYPES.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
+          </label>
           <DateRange value={range} onChange={setRange} />
         </div>
-      </section>
+        <div class="lv-filter-panel__row">
+          <ChipGroup label="狀態" groupLabel="抽取狀態" options={STATUS_FILTERS} value={status} onChange={setStatus} mono={false} />
+          <TextFilter value={title} onApply={setTitle} inputLabel="檔名關鍵字" placeholder="檔名含…（不分大小寫）" submitLabel="套用檔名" testId="filter-title" />
+        </div>
+      </FilterPanel>
 
       <div
         class={'lv-drop' + (dragging ? ' is-dragging' : '')}
@@ -416,11 +498,24 @@ export function Docs() {
               );
             })}
           </div>
-          {items.length === 0 && !loading && (
-            <EmptyState title="這裡還沒有文件" testId="docs-empty">
-              把檔案拖到上方區塊，或按「選擇檔案」上傳。
-            </EmptyState>
-          )}
+          {items.length === 0 && !loading &&
+            (filtered ? (
+              <EmptyState
+                title="沒有符合篩選條件的文件"
+                testId="docs-empty"
+                action={
+                  <button type="button" class="btn-outline" onClick={clearFilters}>
+                    清除篩選
+                  </button>
+                }
+              >
+                調整檔名、類型、狀態、日期或 vault 篩選再試一次。
+              </EmptyState>
+            ) : (
+              <EmptyState title="這裡還沒有文件" testId="docs-empty">
+                把檔案拖到上方區塊，或按「選擇檔案」上傳。
+              </EmptyState>
+            ))}
           {processing && (
             <p class="lv-hint lv-hint--inline" role="status">
               有文件處理中，自動更新列表。
