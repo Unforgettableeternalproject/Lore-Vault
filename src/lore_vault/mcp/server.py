@@ -1,8 +1,11 @@
-"""本地 stdio MCP 殼（A15）：九個工具轉發到服務 HTTP，服務不可達時讀本地快照降級。
+"""本地 stdio MCP 殼（A15）：十個工具轉發到服務 HTTP，服務不可達時讀本地快照降級。
 
-工具刻意只有 `space`、`vault_resolve`、`recall`、`get`、`list`、`write`、`update`、
-`upload`、`status`；建 vault 併入 `vault_resolve(create=True)`，不另開工具。不暴露
-chat／ask／model／settings／source。
+工具刻意只有 `space`、`vault_resolve`、`recall`、`ask`、`get`、`list`、`write`、
+`update`、`upload`、`status`；建 vault 併入 `vault_resolve(create=True)`，不另開工具。
+不暴露 chat／model／settings／source。
+
+`ask`（D11）：薄殼轉發 `POST /v1/ask`，逾時用 `mcp.ask_timeout`（要等模型）。
+問答需要服務端模型，服務不可達時**不降級**（快照沒有模型），直接回工具錯誤。
 
 `upload`（T-67）：殼讀本機檔案、以 multipart 轉送 `POST /v1/documents`。只能讀
 `upload_roots`（殼的工作目錄＋設定 `mcp.upload_roots`）底下的一般檔案：路徑含 `..`
@@ -80,6 +83,7 @@ TOOL_NAMES = (
     "space",
     "vault_resolve",
     "recall",
+    "ask",
     "get",
     "list",
     "write",
@@ -100,6 +104,8 @@ INSTRUCTIONS = (
     "回傳 degraded=true 代表服務不可達、結果來自本地快照（可能過時、只有關鍵字檢索、"
     "不含文件）。文件用 upload 上傳後在背景抽取；recall 會一併回文件段落（kind=chunk，"
     "含檔名與 locator 位置），全文用 get 取 doc:／chunk: id。"
+    "ask 會把 recall 到的 note 交模型整理成逐點回答；那只是片段的整理、信心有限，"
+    "關鍵事實要用 get 核對原 note。"
 )
 
 _HINTS = {
@@ -125,6 +131,13 @@ _HINTS = {
         "請把檔案放進專案目錄，或請使用者加入白名單"
     ),
     "too_large": "單檔上限 25MB（設定 documents.max_file_bytes）",
+    "ask_not_configured": "服務沒有問答模型（缺 OPENAI_API_KEY）；改用 recall + get",
+    "ask_provider_error": "問答模型呼叫失敗；稍後重試，或改用 recall + get",
+    "ask_timeout": "問答模型逾時；稍後重試、降低 k，或改用 recall + get",
+    "ask_rate_limited": "問答模型被限流；等 retry_after 秒後重試，或改用 recall + get",
+    "ask_invalid_output": (
+        "模型輸出不合格（空、截斷或格式錯）；重試一次，仍失敗改用 recall + get"
+    ),
     "unsupported_format": (
         "支援 md、txt（含程式碼等純文字）、json、yaml、toml、pdf、docx、pptx"
     ),
@@ -350,10 +363,17 @@ class Shell:
         return result
 
     async def _send(
-        self, path: str, body: dict[str, Any], *, space: str | None = None
+        self,
+        path: str,
+        body: dict[str, Any],
+        *,
+        space: str | None = None,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         """所有 `/v1/*` 請求的唯一出口：注入 space（預設為目前 space）。"""
-        return await self.client.post(path, {**body, "space": space or self.space})
+        return await self.client.post(
+            path, {**body, "space": space or self.space}, timeout=timeout
+        )
 
     async def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -522,6 +542,26 @@ class Shell:
                     unavailable_kinds=(KIND_CHUNK,),
                 ).to_dict(),
             )
+
+    async def ask(
+        self,
+        question: str,
+        vault: str,
+        kinds: list[str] | None = None,
+        k: int | None = None,
+    ) -> dict[str, Any]:
+        body = _compact(question=question, vault=vault, kinds=kinds, k=k)
+        try:
+            return await self._send("/v1/ask", body, timeout=self.settings.ask_timeout)
+        except ServiceError as exc:
+            raise _from_service_error(exc) from None
+        except ServiceUnreachable as exc:
+            # 快照沒有模型：不降級，明確失敗
+            raise _tool_error(
+                DEGRADED_REASON,
+                f"服務不可達（{exc.detail}），ask 需要服務端模型、無法降級",
+                hint="服務恢復後重試；或改用 recall（可讀本地快照）+ get",
+            ) from None
 
     async def get(
         self, vault: str, ids: list[str], budget: int | None = None
@@ -827,6 +867,23 @@ def build_server(shell: Shell) -> MCPServer:
     ) -> str:
         return _dump(await shell.recall(query, vault, kinds, limit, budget))
 
+    async def ask(
+        question: Annotated[str, Field(description="要問的問題（自然語言）")],
+        vault: VaultArg,
+        kinds: Annotated[
+            list[str] | None,
+            Field(
+                description="檢索種類，預設 ['note']；目前只支援 note，"
+                "文件段落（chunk）的問答另行評估"
+            ),
+        ] = None,
+        k: Annotated[
+            int | None,
+            Field(description="取前幾則 note 當片段，預設 10、上限 20"),
+        ] = None,
+    ) -> str:
+        return _dump(await shell.ask(question, vault, kinds, k))
+
     async def get(
         vault: VaultArg,
         ids: Annotated[
@@ -967,6 +1024,15 @@ def build_server(shell: Shell) -> MCPServer:
             "需要全文時再用 get。degraded=true 表示服務不可達、結果來自本地快照"
             "（不含文件，chunk 列在 unsupported_kinds）。"
         ),
+        "ask": (
+            "用 recall 的同一條檢索取前 k 則 note，交模型整理成逐點回答"
+            "（answer.points，每點附 note_ids）。注意：回答只是檢索片段的整理，"
+            "信心有限——片段沒撈到的不會知道；關鍵事實請以 get 核對原 note 再採用。"
+            "status=insufficient 表示片段不足；unsupported=true 的點沒有有效引用"
+            "（引用了片段外的 id 已移除，見 dropped_citations），不要當成事實。"
+            "degraded=true 表示檢索降級（只走關鍵字）。目前只用 note，不含文件。"
+            "服務不可達時直接失敗（沒有快照降級）。"
+        ),
         "get": (
             "依 id 批次取全文：note id 回 body；doc:… 回整份文件文字；chunk:… 回該段。"
             "字數總和受 budget 限制（依 ids 順序分配），超過的標 truncated；"
@@ -1006,6 +1072,7 @@ def build_server(shell: Shell) -> MCPServer:
         ("space", space),
         ("vault_resolve", vault_resolve),
         ("recall", recall),
+        ("ask", ask),
         ("get", get),
         ("list", list_),
         ("write", write),

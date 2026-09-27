@@ -234,6 +234,25 @@ def ui_login_lock(ctx: DoctorContext) -> CheckResult:
     return _to_result(storage_ui_login.lock_check(db, now=now))
 
 
+def ask_provider(ctx: DoctorContext) -> CheckResult:
+    """D11：`/v1/ask` 的問答模型用戶端是否建立（有沒有 OpenAI key）。
+
+    設定鍵 `ask_configured`（bool，由服務依執行期狀態填）；未提供時 skipped
+    （例如在服務外執行 doctor）。不打網路：模型名與 key 是否被接受要到實際呼叫才知道，
+    錯誤會以 `ask_provider_error` 明確回給呼叫端。沒有 key 只影響 ask，所以是 warn。
+    """
+    configured = ctx.settings.get("ask_configured")
+    if configured is None:
+        raise CheckSkipped("未提供 ask_configured（不在服務內執行）")
+    model = ctx.settings.get("ask_model")
+    if not configured:
+        return CheckResult.warn(
+            "未設定 OPENAI_API_KEY，ask 無法使用（會回 ask_not_configured）",
+            details=[f"ask.model={model}"] if model else (),
+        )
+    return CheckResult.ok(f"ask 模型 {model}" if model else "")
+
+
 def default_registry() -> Registry:
     registry = Registry()
     registry.add(
@@ -473,6 +492,14 @@ def default_registry() -> Registry:
             "concept_snapshot",
             concept_snapshot_path_agreement,
             "client.env 的 LORE_VAULT_CONCEPT_SNAPSHOT 與 MCP 快照路徑指向同一檔",
+        )
+    )
+    registry.add(
+        Check(
+            "ask.provider",
+            "ask",
+            ask_provider,
+            "ask 的問答模型用戶端已建立（有 OpenAI key；缺少為 warn）",
         )
     )
     registry.add(

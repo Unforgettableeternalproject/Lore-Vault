@@ -100,7 +100,7 @@ uv run uvicorn --factory lore_vault.api.app:create_app --host 127.0.0.1 --port 8
   或 UI 的 session cookie ＋ `X-Lore-Vault-UI: 1`（見「UI 開發與建置」）。免認證的只有
   `GET /healthz`（只回 `{"ok": true}`，不碰資料庫）與 `/ui`、`/ui/*`（靜態檔與登入端點）。
 - 端點為 RPC 式、一律 `POST` + JSON body，一對一對應 MCP 工具：
-  `/v1/vault_resolve`、`/v1/recall`、`/v1/get`、`/v1/list`、`/v1/write`、`/v1/update`、
+  `/v1/vault_resolve`、`/v1/recall`、`/v1/ask`、`/v1/get`、`/v1/list`、`/v1/write`、`/v1/update`、
   `/v1/status`，另有 `/v1/vaults`（明確建 vault；`write` 不會自動建）。
   錯誤格式統一為 `{"error": {"code", "message", ...}}`。
 - 作者（A22，schema v12）：`/v1/write`、`/v1/update` 接受 `author`（寫入者自報名，未填存 null、不代填）；
@@ -154,6 +154,7 @@ stdout 是 MCP 協定通道，log 一律寫 stderr（UTF-8）。設定錯誤時�
 | `mcp.cf_access_env_file` | `LORE_VAULT_MCP_CF_ACCESS_ENV_FILE` | 無 | CF Access token 檔（格式同 `~/.cloudflared/pm-token.env`） |
 | `mcp.concept_snapshot_path` | `LORE_VAULT_MCP_CONCEPT_SNAPSHOT_PATH` | `<snapshot_dir>/concepts.json` | PreToolUse 讀的 concept 快照（T-40）；snapshot_dir 也未設＝不拉 |
 | `mcp.upload_roots` | `LORE_VAULT_MCP_UPLOAD_ROOTS` | 無 | `upload` 可讀的**額外**目錄（`os.pathsep` 分隔，Windows 為 `;`）。殼的工作目錄一律可讀——**殼能讀到工作目錄下的任何檔案** |
+| `mcp.ask_timeout` | `LORE_VAULT_MCP_ASK_TIMEOUT` | 90 秒 | `ask` 工具的請求逾時（服務端檢索＋模型呼叫），要比 `ask.timeout` 長 |
 
 密鑰只走環境變數或 `--env-file`，設定檔出現 token／secret 類的鍵會拒絕載入：
 
@@ -166,11 +167,11 @@ stdout 是 MCP 協定通道，log 一律寫 stderr（UTF-8）。設定錯誤時�
 ### 工具
 
 `space(action, value?)`、`vault_resolve(cwd?, create?, display?, space?, key?)`、
-`recall(query, vault, kinds?, limit?, budget?)`、
+`recall(query, vault, kinds?, limit?, budget?)`、`ask(question, vault, kinds?, k?)`、
 `get(vault, ids, budget?)`、`list(vault, since?, topics?, cursor?, limit?, kinds?)`、
 `write(vault, title, body, topics?, links?, supersedes?, author?)`、
 `update(vault, id, expected_updated, title?, body?, topics?, links?, supersedes?, author?)`、
-`upload(path, vault?)`、`status(vault?)`（共 9 個）。
+`upload(path, vault?)`、`status(vault?)`（共 10 個）。
 
 - **目前 space**（A18）：殼行程持有、只在記憶體，新行程一律 `dev`；`space(action="set", value=...)`
   切換（不打服務）。其他工具沒有 space 參數，殼在每個 `/v1/*` 請求自動注入（`Shell._send`）；
@@ -192,6 +193,41 @@ stdout 是 MCP 協定通道，log 一律寫 stderr（UTF-8）。設定錯誤時�
   `path_not_allowed`、`file_not_found`、`not_a_file`、`too_large`、`read_failed`、`vault_required`
 - `recall` 預設同時查 note 與文件段落（`kinds` 預設 `["note", "chunk"]`）；`get` 的 `ids` 可混 note id、
   `doc:…`（整份文件文字）、`chunk:…`（單段）；`list` 預設同時列 note 與文件（`kinds: ["note"|"document"]`）
+
+### ask（D11）
+
+`ask(question, vault, kinds?, k?)` 薄殼轉發 `POST /v1/ask`（殼注入目前 space，逾時用 `mcp.ask_timeout`）。
+服務端流程：`ask.service.prepare` 呼叫與 `/v1/recall` 同一個 `recall()`（hybrid，不另寫檢索）取前 `k` 則 note
+（預設 10、上限 20）→ 以同一個 vault 範圍取全文組片段（標題、LLM 摘要（缺摘要不放）、正文節錄至
+`ask.snippet_max_chars`、updated、supersedes）→ **釋放 DB 連線** → `generate` 呼叫問答模型（`json_schema` strict，
+`{status: "answered"|"insufficient", points: [{claim, note_ids}]}`）→ 機械防呆。
+
+- 引用防呆：note id 不在本次片段清單內（含其他 vault 的真實 note）→ 從該點移除並記 `dropped_citations`
+  （`{point, note_id}`）；某點沒有有效引用 → **保留**並標 `unsupported: true`（不刪：呼叫端看得到模型說了什麼，
+  但知道沒有依據）；`answered` 卻沒有任何一點有有效引用 → 改 `insufficient` 並標 `status_downgraded: true`
+- 沒有任何片段時不呼叫模型，直接回 `insufficient`（`model`、`usage`、`latency_ms.generation` 為 null）
+- 檢索降級（embedder 逾時等）照樣回答，`degraded`／`degraded_reason`／`degraded_detail` 原樣沿用 recall
+- **本輪只用 note**：`kinds` 預設 `["note"]`；帶 `chunk` 列進 `unsupported_kinds`，只要求 chunk 回 400
+  `unsupported_kind`（文件問答另評估）
+- 錯誤碼（刻意不用 502／503／504：MCP 殼把那些當成服務不可達）：`ask_not_configured`（500，缺 `OPENAI_API_KEY`）、
+  `ask_provider_error`（500，連不上、401／403／404、5xx）、`ask_timeout`（500）、`ask_rate_limited`（429，附 `retry_after`）、
+  `ask_invalid_output`（500，空字串、`finish_reason` 非 stop（含 length 截斷）、非 JSON、結構不符）。
+  參數錯誤同 recall（`vault_required`、`space_required`、`unknown_vault`、`invalid_request`：k 超出 1–20、question 空白）
+- 服務不可達時殼**不降級**（快照沒有模型），回工具錯誤 `service_unreachable`
+- doctor `ask.provider`：服務沒有建立問答用戶端（缺 key）為 warn；不打網路，模型名或 key 被拒要到實際呼叫才以
+  `ask_provider_error` 回報
+
+設定（`[ask]`，環境變數 `LORE_VAULT_ASK_<項目>`；key 共用 `OPENAI_API_KEY`）：
+
+| 項目 | 預設 | 說明 |
+|---|---|---|
+| `ask.provider` | `openai` | 目前只支援 openai |
+| `ask.base_url` | `https://api.openai.com/v1` | |
+| `ask.model` | `gpt-6-luna` | D11 實測模型 |
+| `ask.reasoning_effort` | `low` | **必送、不可為空**（D4：不帶 effort 會吃光 token、回空字串） |
+| `ask.max_completion_tokens` | 2000 | 含推理 token；被截斷（`length`）視為失敗 |
+| `ask.timeout` | 60 秒 | 模型呼叫逾時；`mcp.ask_timeout` 要比它長 |
+| `ask.snippet_max_chars` | 6000 | 每則 note 正文節錄上限（字元；超過標 `excerpt_truncated`） |
 
 ### 快照與降級
 

@@ -12,6 +12,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from lore_vault.ask import AskError, AskRateLimited
 from lore_vault.documents.service import UploadRejected
 from lore_vault.notes import InvalidCursor, NoChanges, VersionConflict
 from lore_vault.recall import UnsupportedKind
@@ -199,6 +200,16 @@ def install_error_handlers(app: FastAPI) -> None:
         assert isinstance(exc, RetryRefused)
         return _json(409, exc.reason, exc)
 
+    async def ask_error(request: Request, exc: Exception) -> JSONResponse:
+        # 刻意不用 502／503／504：MCP 殼把那些視為「服務不可達」（mcp.client），
+        # 會誤報成服務掛了。模型失敗一律 500（429 除外），以 code 區分
+        assert isinstance(exc, AskError)
+        extra: dict[str, Any] = {}
+        if isinstance(exc, AskRateLimited):
+            extra["retry_after"] = exc.retry_after
+        return _json(exc.http_status, exc.code, exc, **extra)
+
+    app.add_exception_handler(AskError, ask_error)
     app.add_exception_handler(ConfirmPlanChanged, confirm_plan_changed)
     app.add_exception_handler(AliasConflict, alias_conflict)
     app.add_exception_handler(NotRestorable, with_reason)

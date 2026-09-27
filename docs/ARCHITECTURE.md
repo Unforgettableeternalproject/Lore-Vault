@@ -183,13 +183,14 @@ MCP 為各機器本地 stdio 殼（`python -m lore_vault.mcp`，A15）：服務�
 
 殼持有「目前 space」：每個殼行程一份、只在記憶體、不持久化，新行程一律 `dev`。其他工具沒有 space 參數，殼在每個 `/v1/*` 請求自動注入目前 space（唯一出口 `Shell._send`）。
 
-目標是讓 agent 用最少的上下文拿到足夠決策的資訊。工具數量刻意壓在個位數（目前 9 個）。
+目標是讓 agent 用最少的上下文拿到足夠決策的資訊。工具數量刻意壓低（目前 10 個；`ask` 依 D11 加入）。
 
 | 工具 | 回傳 | 說明 |
 |---|---|---|
 | `space(action, value?)` | `{space, spaces}` | `action="get"` 查詢、`"set"` 切換（`value` 為 `dev`／`lore`／`personal`）；純殼端狀態，不打服務；非法值回工具錯誤 `invalid_space`、狀態不變 |
 | `vault_resolve(cwd?, create?, display?, space?, key?)` | vault key、display、space、note 數、binding（dev 由 cwd 推算時） | dev：key 省略時 MCP 殼以 `lore_vault.binding` 從 cwd 算 key，服務端做別名解析；lore／personal：沒有 repo，必須帶 `key`（`<space>/名稱`，缺少回 `key_required`），傳了 `cwd` 會忽略並回 `cwd_ignored: true`。`space` 省略用目前 space，顯式傳入只影響這一次。`create=True` 才建 vault（HTTP `POST /v1/vaults`）；取代 pm-bind 的手動步驟 |
 | `recall(query, vault, kinds?, limit?, budget?)` | `[{id, kind, vault, title, summary, summary_source, score, updated}]`；note 另帶 `author`；chunk 另帶 `document_id`、`chunk_id`、`locator` | 統一檢索 note 與文件段落（`kinds` 預設 `["note", "chunk"]`；concept 未實作）；note 與 chunk 的 lexical／vector 四路一次 RRF。chunk 的 `title` 為檔名、`summary` 為段落摘錄（`summary_source: "excerpt"`），同樣受 `budget`；**預設不含全文**；`vault` 必填，跨範圍用 `vault="*"` 明示。回應另有 `kinds`（實際查的）、`missing_chunk_embeddings`；降級時 `chunk` 列在 `unsupported_kinds` |
+| `ask(question, vault, kinds?, k?)` | `status`（`answered`／`insufficient`）、`answer.points[{claim, note_ids, unsupported}]`、`dropped_citations`、`sources[{id, vault, title, updated, score, excerpt_truncated}]`、`degraded*`、`model`、`usage`、`latency_ms`、`notice` | D11：以 recall 同一條檢索取前 k 則 note（預設 10、上限 20），片段（標題、LLM 摘要、正文節錄、updated、supersedes）交問答模型（`[ask]`）結構化輸出；引用不在片段內的 note id 機械移除、無有效引用的點標 `unsupported`、`answered` 卻無任何有效引用時降為 `insufficient`（`status_downgraded`）；空輸出／截斷／解析失敗回 `ask_invalid_output`，不回假成功。**本輪只用 note**，文件段落另評估（`chunk` 列在 `unsupported_kinds`）。回答只是片段的整理、信心有限，關鍵事實以 `get` 核對；服務不可達不降級 |
 | `get(vault, ids, budget?)` | 全文 | 可批次；`ids` 可混 note id、`doc:…`（整份文件文字，重疊段已去除）、`chunk:…`（單段，含 `locator` 與 `overlap`＝開頭與前一段重疊的字數，段落起頭為 0）；字數預算依 ids 順序分配，超過時截斷並標示（`truncated`、`body_chars`／`text_chars`）；文件文字依 chunk 順序逐段取、預算用完就停（不先串全文）；note 另帶 `superseded_by`；vault 必填（A5）。範圍外或不存在列在 `missing`，降級時文件 id 列在 `unavailable`。HTTP 另有 `fields: "full"（預設）／"meta"`：meta 只回 metadata（note 無 `body`、文件／chunk 無 `text`，`body_chars`／`text_chars` 照給、`truncated: false`、不佔預算、`used_chars` 為 0），不組裝全文；其他值 400。MCP 工具未開放此參數 |
 | `list(vault, since?, topics?, cursor?, limit?, kinds?)` | 標題清單 | note 與文件合併分頁（`kinds` 預設兩者）；note 項含 `summary`／`summary_source`（規則同 recall：LLM 摘要，缺時首段頂替 `lead`，正文也空 `none`）、`supersedes`、`superseded_by`；文件項含 `status`、`error_code`、`version`、`supersedes`、`superseded_by`、`chunk_count`、`encoding`；指定 `topics` 時只列 note；降級時 `document` 列在 `unsupported_kinds`。摘要受 HTTP `budget`（預設 4000，本頁 note 摘要字數總和，title 不計）限制，在本頁有摘要文字的 note（LLM 摘要或首段頂替；`none` 與文件不佔預算）間**公平分配**：全部放得下就全給；否則依頁序納入 note，每則下限需求為 min(摘要長度, 40)，累加超過 `budget` 的那則起（尾端）`summary: null`、`summary_source: "omitted"`（第一則一律納入，至少截到 `budget`）；納入者以 water-filling 分配——配額 = floor(剩餘預算／剩餘人數)，短摘要全給、用不完的額度留給較長者，零頭依頁序各 +1。超過配額的摘要截短（結尾 `…`，含在配額內）並標 `summary_truncated: true`，不默默截斷；首段頂替同規則（首段本身 160 字上限是呈現規則，不算預算截短）。**項目與分頁不受預算影響**。每個 note 項目帶 `summary_truncated`；回應另有 `budget`、`used_chars`、`truncated`（有省略或截短）、`summaries_omitted`、`summaries_truncated`。要完整內容用 `get` |
 | `write(vault, title, body, topics?, supersedes?, author?)` | id、`author`、`principal`、`links`、`unresolved_links`、疑似重複清單、`dry_run` | 寫入前自動查重，回傳相似 note 讓 agent 決定改用 `update`。`author` 填 agent 自己的角色名（工具描述明寫），不可代填別人。body 的 `[[標題]]` 自動解析進 `links`（見 Note 的 links 規則）。HTTP 另有 `dry_run: true`（**查重預覽**）：同一函式、同一套驗證／vault·space 範圍／supersedes 檢查／查重／連結解析，只在寫入前停下；回 200、無 `id`／`updated`／`author`／`principal`，其餘欄位同正式寫入（`vault`、`links` 為將會存下的值），不喚醒背景 worker。選 `dry_run` 而非獨立端點：範圍與驗證不可能與正式寫入分岔 |
@@ -197,7 +198,7 @@ MCP 為各機器本地 stdio 殼（`python -m lore_vault.mcp`，A15）：服務�
 | `upload(path, vault?)` | `document_id`、`status`、`duplicate`、`version`、`supersedes` | 殼讀本機檔案（只限殼工作目錄與 `mcp.upload_roots`；拒絕 `..` 與 symlink 逃逸）轉送 `POST /v1/documents`；`vault` 省略時只在 dev 用殼工作目錄 binding；服務不可達直接失敗 |
 | `status(vault?)` | 健康狀態、最近更新、管線狀態 | 合併 doctor 摘要與 health alert |
 
-刻意**不做**：chat / ask（把記憶包成對話）、model 管理、settings、source 匯入。
+刻意**不做**：chat（多輪對話）、model 管理、settings、source 匯入。`ask` 是單次問答、只整理檢索片段（D11）。
 
 ## Hook 整合
 

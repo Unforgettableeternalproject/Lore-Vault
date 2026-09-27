@@ -74,6 +74,31 @@ def test_empty_reasoning_effort_is_refused():
         load_config(environ={"LORE_VAULT_SUMMARY_REASONING_EFFORT": "  "})
 
 
+def test_ask_defaults_and_overrides():
+    cfg = load_config(environ={})
+    assert cfg.ask.provider == "openai"
+    assert cfg.ask.model == "gpt-6-luna"
+    assert cfg.ask.reasoning_effort == "low"
+    assert cfg.ask.max_completion_tokens > 0
+    assert cfg.ask.snippet_max_chars == 6000
+    # MCP 殼等 ask 的逾時要涵蓋模型呼叫
+    assert cfg.mcp.ask_timeout > cfg.ask.timeout
+    cfg = load_config(
+        environ={"LORE_VAULT_ASK_MODEL": "m", "LORE_VAULT_ASK_SNIPPET_MAX_CHARS": "99"}
+    )
+    assert cfg.ask.model == "m" and cfg.ask.snippet_max_chars == 99
+
+
+def test_ask_effort_and_positive_values_are_enforced():
+    with pytest.raises(ConfigError, match="ask.reasoning_effort"):
+        load_config(environ={"LORE_VAULT_ASK_REASONING_EFFORT": " "})
+    for name in ("MAX_COMPLETION_TOKENS", "TIMEOUT", "SNIPPET_MAX_CHARS"):
+        with pytest.raises(ConfigError, match="大於 0"):
+            load_config(environ={f"LORE_VAULT_ASK_{name}": "0"})
+    with pytest.raises(ConfigError, match="provider"):
+        load_config(environ={"LORE_VAULT_ASK_PROVIDER": "other"})
+
+
 @pytest.mark.parametrize("key", ["api_key", "openai_api_key", "token", "secret"])
 def test_secret_in_config_file_is_refused_without_echoing_value(tmp_path, key):
     path = tmp_path / "c.toml"

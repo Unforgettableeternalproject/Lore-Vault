@@ -36,6 +36,20 @@ max_completion_tokens = 1000
 timeout = 60.0
 rate_per_minute = 30
 
+[ask]
+# ask()（D11）：recall 取回的 note 片段交模型整理成逐點回答（POST /v1/ask、MCP ask）。
+# key 同樣走 OPENAI_API_KEY；沒有 key 時 ask 回 ask_not_configured，doctor ask.provider 為 warn
+provider = "openai"
+base_url = "https://api.openai.com/v1"
+model = "gpt-6-luna"
+# 必須明確設定：不指定時推理會吃光 max_completion_tokens、回傳空字串（D4）
+reasoning_effort = "low"
+max_completion_tokens = 2000
+# 模型呼叫逾時（秒）；MCP 殼的 mcp.ask_timeout 要比它長
+timeout = 60.0
+# 每則 note 送進模型的正文節錄上限（字元）；k 預設 10、上限 20
+snippet_max_chars = 6000
+
 [worker]
 # 同一版本最多嘗試幾次，超過標記失敗（doctor enrich.failed 會紅）
 max_attempts = 3
@@ -84,6 +98,8 @@ snapshot_max_age_hours = 24.0
 # upload 工具可讀的額外目錄（os.pathsep 分隔，Windows 為 ';'）。殼的工作目錄一律可讀——
 # 殼能讀到工作目錄下的任何檔案；路徑含 '..' 或 symlink 逃出白名單一律拒絕
 # upload_roots = "C:/Users/<you>/Documents/lore;D:/worldbuilding"
+# ask 工具的請求逾時（秒）：涵蓋服務端檢索 + 模型呼叫，要比 ask.timeout 長
+ask_timeout = 90.0
 
 [documents]
 # 文件原始檔（blob，依 sha256 內容定址、去重）目錄；無預設，未設定時不能收文件。

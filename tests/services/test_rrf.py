@@ -7,6 +7,13 @@ import pytest
 from lore_vault.recall.rrf import RRF_K, rrf_fuse
 
 
+def test_default_k_is_20():
+    """k 預設 20（recall-diag：配合逐 token OR，top-10 76.7%→90.0%，見 D11）。"""
+    assert RRF_K == 20
+    fused = rrf_fuse({"lexical": ["a"]})
+    assert fused[0].score == pytest.approx(1 / 21)
+
+
 def test_both_legs_empty():
     assert rrf_fuse({"lexical": [], "vector": []}) == []
     assert rrf_fuse({}) == []
@@ -26,8 +33,9 @@ def test_overlap_beats_single_leg_top():
     # a：lexical 第 1、vector 第 3；b：lexical 第 2、vector 第 1；d 只在 vector
     fused = rrf_fuse({"lexical": ["a", "b", "c"], "vector": ["b", "d", "a"]})
     by_id = {f.id: f for f in fused}
-    assert by_id["b"].score == pytest.approx(1 / 62 + 1 / 61)
-    assert by_id["a"].score == pytest.approx(1 / 61 + 1 / 63)
+    k = RRF_K
+    assert by_id["b"].score == pytest.approx(1 / (k + 2) + 1 / (k + 1))
+    assert by_id["a"].score == pytest.approx(1 / (k + 1) + 1 / (k + 3))
     assert [f.id for f in fused] == ["b", "a", "d", "c"]
     assert by_id["a"].ranks == {"lexical": 1, "vector": 3}
 

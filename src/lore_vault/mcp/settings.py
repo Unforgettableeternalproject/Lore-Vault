@@ -46,6 +46,8 @@ class ShellSettings:
     upload_roots: tuple[Path, ...] = ()
     # `upload` 在殼端先擋的檔案大小上限（服務端另有同一上限）
     max_upload_bytes: int = 25 * 1024 * 1024
+    # `ask` 工具的請求逾時（服務端檢索 + 模型呼叫）
+    ask_timeout: float = 90.0
 
 
 def load_shell_settings(
@@ -79,6 +81,7 @@ def load_shell_settings(
         concept_snapshot_path=concept_path,
         upload_roots=parse_upload_roots(mcp.upload_roots),
         max_upload_bytes=config.documents.max_file_bytes,
+        ask_timeout=mcp.ask_timeout,
     )
 
 

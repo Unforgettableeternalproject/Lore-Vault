@@ -140,10 +140,16 @@ class ServiceClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    async def post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
-        """POST JSON；2xx 回 dict，否則拋 `ServiceUnreachable` 或 `ServiceError`。"""
+    async def post(
+        self, path: str, body: dict[str, Any], *, timeout: float | None = None
+    ) -> dict[str, Any]:
+        """POST JSON；2xx 回 dict，否則拋 `ServiceUnreachable` 或 `ServiceError`。
+
+        `timeout` 覆寫這一次請求的逾時（`ask` 要等模型，比一般請求長）。
+        """
+        extra: dict[str, Any] = {} if timeout is None else {"timeout": timeout}
         try:
-            response = await self._client.post(path, json=body)
+            response = await self._client.post(path, json=body, **extra)
         except httpx2.TransportError as exc:
             raise _unreachable_from_exc(exc) from None
         if response.status_code in UNREACHABLE_STATUSES:

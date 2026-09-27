@@ -17,6 +17,7 @@ ENDPOINTS = [
     ("post", "/v1/vault_resolve", {"key": "folder/a"}),
     ("post", "/v1/vaults", {"key": "folder/a", "display": "a"}),
     ("post", "/v1/recall", {"query": "q", "vault": "folder/a"}),
+    ("post", "/v1/ask", {"question": "q", "vault": "folder/a"}),
     ("post", "/v1/get", {"vault": "folder/a", "ids": ["x"]}),
     ("post", "/v1/list", {"vault": "folder/a"}),
     ("post", "/v1/write", {"vault": "folder/a", "title": "t", "body": "b"}),
@@ -105,6 +106,7 @@ def test_openapi_is_served_behind_auth(anon):
     assert {
         "/v1/vault_resolve",
         "/v1/recall",
+        "/v1/ask",
         "/v1/get",
         "/v1/list",
         "/v1/write",

@@ -13,9 +13,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from lore_vault.ask.client import Answerer, OpenAIAnswerer
 from lore_vault.enrich.clients import (
     EnrichTimeout,
     OllamaEmbedder,
+    ProviderUnavailable,
     ollama_model_loaded,
     urllib_transport,
 )
@@ -126,6 +128,19 @@ def _document_progress(conn: sqlite3.Connection, stats: dict[str, Any]) -> str |
     return progress_line(stats, pending)
 
 
+def default_answerer(settings: ApiSettings) -> Answerer | None:
+    """依 `[ask]` 設定建立問答用戶端；沒有 OpenAI key 時回 None（ask 回
+    `ask_not_configured`，doctor `ask.provider` 為 warn）。"""
+    try:
+        return OpenAIAnswerer(
+            settings.config.ask,
+            settings.openai_key,
+            transport=settings.llm_transport or urllib_transport,
+        )
+    except ProviderUnavailable:
+        return None
+
+
 def default_warmup_embedder(settings: ApiSettings) -> Embedder:
     """暖機用完整的 `embedding.timeout`：冷啟動可能超過 query_timeout，
     用短逾時等於沒暖。"""
@@ -140,6 +155,11 @@ class AppState:
             settings.query_embedder
             if settings.query_embedder is not None
             else default_query_embedder(settings)
+        )
+        self.answerer: Answerer | None = (
+            settings.answerer
+            if settings.answerer is not None
+            else default_answerer(settings)
         )
         self.warmup = EmbeddingWarmup(
             default_warmup_embedder(settings) if settings.run_warmup else None,
