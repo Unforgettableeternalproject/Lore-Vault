@@ -136,6 +136,25 @@ def test_post_episodes_rejected_when_ingest_off_but_reads_still_work(open_client
     assert summary["total"] == 1
 
 
+def test_empty_episode_batch_probes_ingest_switch_without_writing(open_client):
+    """遠端安裝器用空批次探測收料開關（integrations/remote/install.py）：
+    關閉時 403 `episode_ingest_disabled`、開啟時 200 且全為 0，兩者都不寫任何東西。"""
+    bearer, _ = open_client(_config())
+    _error(
+        bearer.post("/v1/episodes", json={"episodes": []}),
+        403,
+        "episode_ingest_disabled",
+    )
+    on_bearer, _ = open_client(_config(episodes=EpisodesConfig(ingest=True)))
+    resp = on_bearer.post("/v1/episodes", json={"episodes": []})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert (body["accepted"], body["duplicates"], body["conflicts"]) == (0, 0, 0)
+    assert body["invalid"] == 0 and body["created_vaults"] == []
+    page = on_bearer.get("/v1/episodes", params={"vault": "*"}).json()
+    assert page["items"] == []
+
+
 def test_ingest_toggle_takes_effect_without_rebuilding_app(open_client, db_path):
     bearer, ui = open_client()
 

@@ -1,4 +1,4 @@
-"""服務主機端：打包客戶端連線用的 kit（wheel＋pm skill＋安裝程式＋README）。
+"""服務主機端：打包客戶端連線用的 kit（wheel＋skill＋安裝程式＋hook＋README）。
 
     uv run python scripts/build_remote_kit.py [--out DIR] [--no-zip] [--force]
 
@@ -7,9 +7,14 @@
   （`uv build --wheel -o <kit>`，不寫進 repo 的 dist/）
 - `SKILL.md`：取自 repo 的 `integrations/claude/skills/pm/SKILL.md`（不從 ~/.claude 撈）
 - `install.py`：取自 `integrations/remote/install.py`
+- `hooks/`：episode hook 的只用標準庫子集（D13），檔案清單直接取 doctor
+  `hooks.stdlib_only` 的掃描結果（`check_hook_imports(...).scanned`），不另列清單；
+  `hooks/spike/` 放 `agent_memory_spike/` 的 hook 與平鋪依賴，`hooks/src/` 放
+  `lore_vault` 允許的子套件——hook 以 `parents[1] / "src"` 找套件，佈局必須如此。
+  `hooks/VERSION.json` 記版本、commit 與每個檔案的 sha256，安裝器據此驗證
 - `README.txt`：版本、wheel sha256 與目標機的執行方式
 
-HTTP 模式只用到 install.py 與 SKILL.md；wheel 給完整殼模式。
+HTTP 模式只用到 install.py、SKILL.md 與 hooks/；wheel 給完整殼模式。
 kit 不含任何密鑰與服務位址。工作樹有未提交變更時 commit 標 `-dirty`。
 """
 
@@ -17,7 +22,9 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import importlib.util
+import json
 import shutil
 import subprocess
 import sys
@@ -31,6 +38,10 @@ from types import ModuleType
 REPO = Path(__file__).resolve().parents[1]
 SKILL_SRC = Path("integrations/claude/skills/pm/SKILL.md")
 INSTALLER_SRC = Path("integrations/remote/install.py")
+SPIKE_SRC = Path("agent_memory_spike")
+PACKAGE_SRC = Path("src/lore_vault")
+HOOKS_KIT_DIR = "hooks"
+HOOKS_MANIFEST = "VERSION.json"
 DEFAULT_OUT = Path(tempfile.gettempdir()) / "lore-vault-kits"
 
 Runner = Callable[[Sequence[str], Path], subprocess.CompletedProcess]
@@ -68,8 +79,19 @@ def git_rev(repo: Path, runner: Runner) -> str:
     if rev.returncode != 0:
         return "nogit"
     sha = rev.stdout.strip()
+    # kit 內容來自這些路徑（wheel、hook、安裝器、skill）
     dirty = runner(
-        ["git", "status", "--porcelain", "--", "src", "pyproject.toml"], repo
+        [
+            "git",
+            "status",
+            "--porcelain",
+            "--",
+            "src",
+            "pyproject.toml",
+            str(SPIKE_SRC),
+            "integrations",
+        ],
+        repo,
     )
     if dirty.returncode == 0 and dirty.stdout.strip():
         sha += "-dirty"
@@ -78,6 +100,51 @@ def git_rev(repo: Path, runner: Runner) -> str:
 
 def kit_name(version: str, date: dt.date, rev: str) -> str:
     return f"lore-vault-kit-{version}-{date:%Y%m%d}-{rev}"
+
+
+def hook_files(repo: Path) -> list[tuple[Path, str]]:
+    """(來源檔, kit 內相對路徑)。清單取自 doctor `hooks.stdlib_only` 的掃描結果：
+    hook 進入點與它們遞迴 import 的同目錄模組、允許的 `lore_vault` 子套件。
+    掃描有違規就停止打包——違規的 hook 在遠端系統 Python 下會 ImportError。"""
+    from lore_vault.doctor.hook_imports import check_hook_imports
+
+    package = repo / PACKAGE_SRC
+    spike = repo / SPIKE_SRC
+    report = check_hook_imports(hooks_dir=package / "hooks", spike_dir=spike)
+    if not report.ok:
+        lines = [f"{v.path}:{v.lineno} {v.module}" for v in report.violations]
+        raise SystemExit("hook 未通過只用標準庫檢查：\n  " + "\n  ".join(lines))
+    src_root = package.parent.resolve()
+    spike_root = spike.resolve()
+    out: list[tuple[Path, str]] = []
+    for path in report.scanned:
+        resolved = path.resolve()
+        if resolved.is_relative_to(spike_root):
+            rel = "spike/" + resolved.relative_to(spike_root).as_posix()
+        elif resolved.is_relative_to(src_root):
+            rel = "src/" + resolved.relative_to(src_root).as_posix()
+        else:
+            raise SystemExit(f"hook 掃描結果在預期目錄外：{path}")
+        out.append((resolved, rel))
+    return sorted(out, key=lambda item: item[1])
+
+
+def copy_hooks(repo: Path, kit: Path, *, version: str, rev: str) -> dict:
+    """把 hook 子集複製到 `<kit>/hooks/`，寫 VERSION.json；回傳 manifest。"""
+    dest = kit / HOOKS_KIT_DIR
+    files: dict[str, str] = {}
+    for src, rel in hook_files(repo):
+        target = dest / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # 以位元組複製：hash 與安裝器驗證的內容一致
+        data = src.read_bytes()
+        target.write_bytes(data)
+        files[rel] = hashlib.sha256(data).hexdigest()
+    manifest = {"version": version, "commit": rev, "files": files}
+    (dest / HOOKS_MANIFEST).write_bytes(
+        (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    )
+    return manifest
 
 
 def render_readme(name: str, wheel: str, sha256: str) -> str:
@@ -99,7 +166,9 @@ def render_readme(name: str, wheel: str, sha256: str) -> str:
         "     只更新 wheel（完整殼）：python install.py --update\n"
         "  5. token 會以不回顯方式詢問；Git Bash 請改用 winpty 或 PowerShell\n"
         "  6. 最後印出的驗證報告不含密鑰，可交給服務管理者核對\n"
-        "  7. 重開 Claude Code，請 agent 驗 status／recall\n\n"
+        "  7. 重開 Claude Code，請 agent 驗 status／recall\n"
+        "  8. 選配：加 --episodes 安裝 episode hook（對話原文會推到服務，\n"
+        "     需服務開啟收料）；--no-episodes 跳過，不加時互動詢問\n\n"
         "回退：python install.py --rollback\n"
         "詳細步驟：Lore-Vault repo 的 docs/guides/REMOTE-INSTALL.md\n"
     )
@@ -120,9 +189,9 @@ def build_kit(
     if problems:
         raise SystemExit("SKILL.md 未通過機器中立檢查：" + "；".join(problems))
 
-    name = kit_name(
-        project_version(repo), today or dt.date.today(), git_rev(repo, runner)
-    )
+    version = project_version(repo)
+    rev = git_rev(repo, runner)
+    name = kit_name(version, today or dt.date.today(), rev)
     kit = out_dir / name
     if kit.exists():
         if not force:
@@ -141,6 +210,7 @@ def build_kit(
 
     shutil.copyfile(repo / SKILL_SRC, kit / "SKILL.md")
     shutil.copyfile(repo / INSTALLER_SRC, kit / "install.py")
+    copy_hooks(repo, kit, version=version, rev=rev)
     sha = installer.sha256_file(wheels[0])
     (kit / "README.txt").write_bytes(
         render_readme(name, wheels[0].name, sha).encode("utf-8")
@@ -149,8 +219,9 @@ def build_kit(
     if make_zip:
         archive = out_dir / f"{name}.zip"
         with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
-            for path in sorted(kit.iterdir()):
-                zf.write(path, f"{name}/{path.name}")
+            for path in sorted(kit.rglob("*")):
+                if path.is_file():
+                    zf.write(path, f"{name}/{path.relative_to(kit).as_posix()}")
     return kit
 
 

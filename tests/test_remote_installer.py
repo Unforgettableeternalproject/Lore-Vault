@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import stat
 import sys
 from pathlib import Path
 
@@ -38,12 +40,26 @@ def _load():
 inst = _load()
 
 
+def _probe(version=(3, 13, 1), venv=False, executable="C:/sys/python.exe") -> dict:
+    return {"version": list(version), "venv": venv, "executable": executable}
+
+
 class FakeRunner:
     """記錄每次呼叫；依 argv 回應。`mcp get` 預設回傳不存在。"""
 
-    def __init__(self, *, existing: dict[str, str] | None = None, status=None):
+    def __init__(
+        self,
+        *,
+        existing: dict[str, str] | None = None,
+        status=None,
+        hook_python: dict[str, dict] | None = None,
+    ):
         self.calls: list[list[str]] = []
         self.existing = dict(existing or {})
+        # hook 用 Python 探測：{執行檔: 探測結果}；未列出的回 exit 1（找不到）
+        self.hook_python = (
+            {"C:/py/python.exe": _probe()} if hook_python is None else hook_python
+        )
         self.status = status or {
             "category": "ok",
             "ok": True,
@@ -81,6 +97,13 @@ class FakeRunner:
             return inst.Result(0)
         if argv[1:3] == ["pip", "install"]:
             return inst.Result(0)
+        if len(argv) > 2 and argv[1] == "-c" and argv[2] == inst.HOOK_PYTHON_PROBE:
+            data = self.hook_python.get(argv[0])
+            if data is None:
+                return inst.Result(1, "", "not found")
+            return inst.Result(
+                0, "noise\n" + inst.HOOK_PYTHON_MARKER + json.dumps(data)
+            )
         if len(argv) > 2 and argv[1] == "-c" and "import lore_vault.mcp" in argv[2]:
             return inst.Result(0, "ok\n")
         if len(argv) > 2 and argv[1] == "-c":
@@ -107,11 +130,37 @@ def _no_input(prompt):
     raise AssertionError(f"不該提問：{prompt}")
 
 
+HOOK_FILES = {
+    "spike/hook_stop.py": b"# stop\n",
+    "spike/hook_pretooluse.py": b"# pre\n",
+    "spike/paths.py": b"# paths\n",
+    "src/lore_vault/__init__.py": b"",
+    "src/lore_vault/hooks/client_env.py": b"# env\n",
+}
+
+
+def make_hooks(kit: Path, files: dict[str, bytes] | None = None, commit="abc1234"):
+    import hashlib
+
+    files = HOOK_FILES if files is None else files
+    hooks = kit / "hooks"
+    for rel, data in files.items():
+        (hooks / rel).parent.mkdir(parents=True, exist_ok=True)
+        (hooks / rel).write_bytes(data)
+    manifest = {
+        "version": "0.1.0",
+        "commit": commit,
+        "files": {rel: hashlib.sha256(d).hexdigest() for rel, d in files.items()},
+    }
+    (hooks / "VERSION.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+
 def make_kit(tmp_path: Path) -> Path:
     kit = tmp_path / "kit"
     kit.mkdir()
     (kit / "lore_vault-0.1.0-py3-none-any.whl").write_bytes(b"fake wheel")
     (kit / "SKILL.md").write_bytes(SKILL.read_bytes())
+    make_hooks(kit)
     return kit
 
 
@@ -147,12 +196,15 @@ def make_installer(tmp_path, runner, *, answers=None, secret=None, **kw):
     kw.pop("no_prompt", None)
     # 服務位址必填；要測「未給位址」的情境時明確傳 base_url=None
     kw.setdefault("base_url", BASE_URL)
+    # hook 用 Python：不依賴跑測試的 venv，只從假 runner 探測 C:/py/python.exe
+    kw.setdefault("python_in_venv", False)
+    kw.setdefault("base_python", None)
     installer = inst.Installer(
         paths=inst.Paths(home),
         kit_dir=kit,
         ui=ui,
         runner=runner,
-        which=lambda name: f"C:/bin/{name}.exe",
+        which=kw.pop("which", lambda name: f"C:/bin/{name}.exe"),
         python_exe="C:/py/python.exe",
         python_version=(3, 14, 0),
         environ=kw.pop("environ", {}),
@@ -343,8 +395,9 @@ def test_full_install_interactive(tmp_path):
         runner,
         home=home,
         base_url=None,
-        # 開始？／服務位址／CF Access？（用建議路徑）／憑證檔路徑（預設）／覆寫 skill？
-        answers=["y", BASE_URL + "/mcp", "y", "", "y"],
+        # episode hook？（預設否）／開始？／服務位址／CF Access？（用建議路徑）／
+        # 憑證檔路徑（預設）／覆寫 skill？
+        answers=["", "y", BASE_URL + "/mcp", "y", "", "y"],
         secret=lambda prompt: FAKE_TOKEN,
     )
     # 測試環境 stdin 不是主控台；這裡模擬在 PowerShell 內執行
@@ -388,6 +441,11 @@ def test_full_install_interactive(tmp_path):
         assert "csec-value" not in blob
     # 報告遮蔽家目錄
     assert str(home) not in report
+    # episode hook 的隱私提示有出現，預設不裝
+    assert "對話原文" in cap.text
+    assert "episode hook：未安裝" in report
+    assert not p.hooks_dir.exists() and not p.client_env.exists()
+    assert not p.settings_json.exists()
 
 
 def test_rerun_is_idempotent_and_keeps_existing(tmp_path):
@@ -434,7 +492,7 @@ def test_yes_without_token_stops_with_resume_hint(tmp_path):
 
 def test_non_console_without_env_token_refuses_prompt(tmp_path):
     installer, _ = make_installer(
-        tmp_path, FakeRunner(), answers=["y", ""], secret=_no_input
+        tmp_path, FakeRunner(), answers=["n", "y", ""], secret=_no_input
     )
     inst_is_console = inst._stdin_is_console
     inst._stdin_is_console = lambda: False
@@ -973,3 +1031,576 @@ def test_http_self_check_connection_refused():
         port = s.getsockname()[1]
     data = inst.http_self_check(f"http://127.0.0.1:{port}", {}, 5)
     assert data["category"] in ("connect", "unreachable")
+
+
+# ── episode hook（D13）──
+
+
+USER_HOOKS = {
+    "SessionStart": [
+        {
+            "matcher": "",
+            "hooks": [{"type": "command", "command": "python persona.py"}],
+        }
+    ],
+    "Stop": [
+        {
+            "matcher": "",
+            "hooks": [{"type": "command", "command": "notify-send done"}],
+        }
+    ],
+}
+
+
+def _user_settings() -> dict:
+    return {"model": "opus", "hooks": json.loads(json.dumps(USER_HOOKS))}
+
+
+def _ours(settings: dict, root: Path) -> list[tuple[str, dict]]:
+    return [
+        (event, hook)
+        for event, hook in inst._iter_hooks(settings.get("hooks", {}))
+        if inst.hook_points_under(hook, root)
+    ]
+
+
+def _episode_installer(tmp_path, *, mode="http", check=None, runner=None, **kw):
+    checks: list[tuple[str, dict]] = []
+
+    def fake_check(url, headers, timeout):
+        checks.append((url, dict(headers)))
+        return check or {"category": "ok"}
+
+    kw.setdefault("environ", {"LORE_VAULT_API_TOKEN": FAKE_TOKEN})
+    installer, cap = make_installer(
+        tmp_path,
+        runner or FakeRunner(),
+        assume_yes=True,
+        mode=mode,
+        episodes=True,
+        http_check=_ok_status,
+        episode_check=fake_check,
+        **kw,
+    )
+    return installer, cap, checks
+
+
+def test_render_client_env_is_read_by_hook_settings(tmp_path):
+    from lore_vault.hooks.client_env import load_client_settings
+
+    snap = tmp_path / "snapshot" / "concepts.json"
+    data = inst.render_client_env(
+        BASE_URL + "/",
+        FAKE_TOKEN,
+        {"CF_ACCESS_CLIENT_ID": "cid", "CF_ACCESS_CLIENT_SECRET": "csec"},
+        snap,
+    )
+    assert not data.startswith(b"\xef\xbb\xbf")
+    path = tmp_path / "client.env"
+    path.write_bytes(data)
+    settings = load_client_settings(path, environ={})
+    assert settings.push_configured, settings.describe()
+    assert settings.url == BASE_URL
+    assert settings.token.reveal() == FAKE_TOKEN
+    assert [s.reveal() for s in settings.cf_access] == ["cid", "csec"]
+    assert settings.concept_snapshot == snap
+    plain = inst.render_client_env(BASE_URL, FAKE_TOKEN)
+    assert b"CF_ACCESS" not in plain and b"CONCEPT_SNAPSHOT" not in plain
+    with pytest.raises(inst.StepFailed):
+        inst.render_client_env(BASE_URL, "bad\ntoken")
+
+
+def test_merge_hooks_keeps_user_hooks_and_is_idempotent(tmp_path):
+    root = tmp_path / ".lore-vault" / "hooks"
+    wanted = [
+        ("Stop", "", inst.hook_entry("C:/sys/python.exe", root / inst.STOP_SCRIPT)),
+        (
+            "PreToolUse",
+            inst.PRETOOLUSE_MATCHER,
+            inst.hook_entry("C:/sys/python.exe", root / inst.PRETOOLUSE_SCRIPT),
+        ),
+    ]
+    original = _user_settings()
+    once = inst.merge_hooks(original, root, wanted)
+    twice = inst.merge_hooks(once, root, wanted)
+    assert once == twice
+    assert original == _user_settings()  # 不改傳入物件
+    assert once["model"] == "opus"
+    assert once["hooks"]["SessionStart"] == USER_HOOKS["SessionStart"]
+    # 使用者原本的 Stop 群組原樣保留，我們的另成一組
+    assert once["hooks"]["Stop"][0] == USER_HOOKS["Stop"][0]
+    assert once["hooks"]["Stop"][1] == {"matcher": "", "hooks": [wanted[0][2]]}
+    assert once["hooks"]["PreToolUse"] == [
+        {"matcher": inst.PRETOOLUSE_MATCHER, "hooks": [wanted[1][2]]}
+    ]
+    assert len(_ours(twice, root)) == 2
+    # Python 路徑變了：舊登記被換掉，不會兩份並存
+    moved = inst.merge_hooks(
+        once,
+        root,
+        [("Stop", "", inst.hook_entry("D:/py/python.exe", root / inst.STOP_SCRIPT))],
+    )
+    ours = _ours(moved, root)
+    assert [(e, h["command"]) for e, h in ours] == [("Stop", "D:/py/python.exe")]
+    assert "PreToolUse" not in moved["hooks"]
+    # 全部移除：回到原狀
+    assert inst.merge_hooks(once, root, []) == _user_settings()
+
+
+def test_remove_hooks_keeps_mixed_group_members(tmp_path):
+    root = tmp_path / "hooks"
+    ours = inst.hook_entry("py", root / inst.STOP_SCRIPT)
+    theirs = {"type": "command", "command": "echo hi"}
+    hooks = {"Stop": [{"matcher": "", "hooks": [theirs, ours]}]}
+    assert inst.remove_hooks_under(hooks, root) == {
+        "Stop": [{"matcher": "", "hooks": [theirs]}]
+    }
+    # 前綴相似的其他目錄不算我們的
+    sibling = inst.hook_entry("py", tmp_path / "hooks2" / "hook_stop.py")
+    assert not inst.hook_points_under(sibling, root)
+
+
+def test_foreign_registration_detects_host_hook(tmp_path):
+    root = tmp_path / ".lore-vault" / "hooks"
+    hooks = {
+        "Stop": [
+            {
+                "matcher": "",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "C:\\py\\python.exe",
+                        "args": ["C:\\repo\\agent_memory_spike\\hook_stop.py"],
+                    }
+                ],
+            }
+        ]
+    }
+    assert inst.foreign_registrations(hooks, root, "hook_stop.py") == ["Stop"]
+    assert inst.foreign_registrations(hooks, root, "hook_pretooluse.py") == []
+    ours = inst.merge_hooks(
+        {}, root, [("Stop", "", inst.hook_entry("py", root / inst.STOP_SCRIPT))]
+    )["hooks"]
+    assert inst.foreign_registrations(ours, root, "hook_stop.py") == []
+
+
+def test_http_mode_installs_stop_hook_only(tmp_path):
+    installer, cap, checks = _episode_installer(tmp_path)
+    p = installer.paths
+    p.settings_json.parent.mkdir(parents=True)
+    original = json.dumps(_user_settings(), indent=4)
+    p.settings_json.write_text(original, encoding="utf-8")
+
+    assert installer.install() == 0
+
+    # hook 檔案照 manifest 複製
+    for rel, data in HOOK_FILES.items():
+        assert (p.hooks_dir / rel).read_bytes() == data
+    assert (p.hooks_dir / "VERSION.json").is_file()
+    # client.env：UTF-8 無 BOM、只有服務位址與 token（HTTP 模式沒有快照鍵）
+    raw = p.client_env.read_bytes()
+    assert not raw.startswith(b"\xef\xbb\xbf")
+    text = raw.decode("utf-8")
+    assert f"LORE_VAULT_URL={BASE_URL}\n" in text
+    assert f"LORE_VAULT_API_TOKEN={FAKE_TOKEN}\n" in text
+    assert "CONCEPT_SNAPSHOT" not in text and "CF_ACCESS" not in text
+    if os.name != "nt":
+        assert stat.S_IMODE(p.client_env.stat().st_mode) == 0o600
+    # settings.json：先備份原檔，只合併 Stop，使用者其他設定保留
+    assert inst.backup_path(p.settings_json).read_text(encoding="utf-8") == original
+    merged = json.loads(p.settings_json.read_text(encoding="utf-8"))
+    assert merged["model"] == "opus"
+    assert merged["hooks"]["SessionStart"] == USER_HOOKS["SessionStart"]
+    ours = _ours(merged, p.hooks_dir)
+    assert [e for e, _ in ours] == ["Stop"]
+    assert ours[0][1] == {
+        "type": "command",
+        "command": "C:/sys/python.exe",
+        "args": [str(p.hooks_dir / "spike" / "hook_stop.py")],
+        "timeout": 10,
+    }
+    # 收料檢查帶 bearer
+    assert checks == [(BASE_URL, {"Authorization": f"Bearer {FAKE_TOKEN}"})]
+    report = next(p.lv_dir.glob("install-report-*.txt")).read_text("utf-8")
+    assert "episode hook：Stop" in report
+    assert "收料：服務已開啟" in report
+    for blob in (cap.text, report):
+        assert FAKE_TOKEN not in blob
+
+
+def test_episode_rerun_is_idempotent_and_keeps_first_backup(tmp_path):
+    installer, _, _ = _episode_installer(tmp_path)
+    p = installer.paths
+    p.settings_json.parent.mkdir(parents=True)
+    p.settings_json.write_text(json.dumps(_user_settings()), encoding="utf-8")
+    assert installer.install() == 0
+    bak = inst.backup_path(p.settings_json)
+    bak.write_text("ORIGINAL", encoding="utf-8")
+    after_first = p.settings_json.read_bytes()
+    env_first = p.client_env.read_bytes()
+
+    again, cap, _ = _episode_installer(tmp_path, home=p.home, kit=installer.kit_dir)
+    assert again.install() == 0
+    assert p.settings_json.read_bytes() == after_first
+    assert bak.read_text(encoding="utf-8") == "ORIGINAL"
+    assert p.client_env.read_bytes() == env_first
+    merged = json.loads(p.settings_json.read_text(encoding="utf-8"))
+    assert len(_ours(merged, p.hooks_dir)) == 1
+    statuses = {r.name: r.status for r in again.records}
+    assert statuses["episode hook 檔案"] == "skip"
+    assert statuses["寫 client.env"] == "skip"
+    assert statuses["登記 hook"] == "skip"
+
+    # 系統 Python 換了：登記更新（仍只有一筆），最早的備份不被覆蓋
+    moved = FakeRunner(hook_python={"C:/py/python.exe": _probe(executable="D:/py.exe")})
+    third, _, _ = _episode_installer(
+        tmp_path, runner=moved, home=p.home, kit=installer.kit_dir
+    )
+    assert third.install() == 0
+    merged = json.loads(p.settings_json.read_text(encoding="utf-8"))
+    assert [h["command"] for _, h in _ours(merged, p.hooks_dir)] == ["D:/py.exe"]
+    assert bak.read_text(encoding="utf-8") == "ORIGINAL"
+
+
+def test_new_kit_replaces_installed_hooks(tmp_path):
+    installer, _, _ = _episode_installer(tmp_path)
+    assert installer.install() == 0
+    p = installer.paths
+    (p.hooks_dir / "spike" / "stale.py").write_text("x", encoding="utf-8")
+    kit2 = tmp_path / "kit2"
+    kit2.mkdir()
+    (kit2 / "SKILL.md").write_bytes(SKILL.read_bytes())
+    make_hooks(kit2, {**HOOK_FILES, "spike/hook_stop.py": b"# v2\n"}, commit="def5678")
+    again, _, _ = _episode_installer(tmp_path, home=p.home, kit=kit2)
+    assert again.install() == 0
+    assert (p.hooks_dir / "spike" / "hook_stop.py").read_bytes() == b"# v2\n"
+    # 整目錄換上：舊版殘留的檔案不留
+    assert not (p.hooks_dir / "spike" / "stale.py").exists()
+    assert not p.hooks_dir.with_name("hooks.new").exists()
+    assert not p.hooks_dir.with_name("hooks.old").exists()
+
+
+def test_shell_mode_registers_pretooluse_with_concept_snapshot(tmp_path):
+    installer, _, checks = _episode_installer(tmp_path, mode="shell")
+    home = installer.paths.home
+    cf = home / ".cloudflared" / "pm-token.env"
+    installer.cf_env_file = cf
+    assert installer.install() == 0
+    p = installer.paths
+    text = p.client_env.read_text(encoding="utf-8")
+    assert f"LORE_VAULT_CONCEPT_SNAPSHOT={p.concept_snapshot.as_posix()}" in text
+    assert "CF_ACCESS_CLIENT_ID=cid-secret-value" in text
+    merged = json.loads(p.settings_json.read_text(encoding="utf-8"))
+    ours = _ours(merged, p.hooks_dir)
+    assert sorted(e for e, _ in ours) == ["PreToolUse", "Stop"]
+    group = merged["hooks"]["PreToolUse"][0]
+    assert group["matcher"] == "Edit|Write|MultiEdit|NotebookEdit"
+    assert checks[0][1]["CF-Access-Client-Id"] == "cid-secret-value"
+    # 安裝前沒有 settings.json：沒有備份可言
+    assert not inst.backup_path(p.settings_json).exists()
+
+
+def test_shell_mode_reuses_kept_token_and_toml(tmp_path):
+    """第二次只加裝 hook：token 取自既有 mcp.env、服務位址取自既有 mcp.toml。"""
+    first, _ = make_installer(
+        tmp_path,
+        FakeRunner(),
+        assume_yes=True,
+        environ={"LORE_VAULT_API_TOKEN": FAKE_TOKEN},
+    )
+    assert first.install() == 0
+    p = first.paths
+    assert not p.client_env.exists()
+    again, cap, checks = _episode_installer(
+        tmp_path,
+        mode="shell",
+        home=p.home,
+        kit=first.kit_dir,
+        environ={},
+        base_url=None,
+    )
+    assert again.install() == 0
+    text = p.client_env.read_text(encoding="utf-8")
+    assert f"LORE_VAULT_URL={BASE_URL}\n" in text
+    assert f"LORE_VAULT_API_TOKEN={FAKE_TOKEN}\n" in text
+    assert checks[0][1]["Authorization"] == f"Bearer {FAKE_TOKEN}"
+    assert FAKE_TOKEN not in cap.text
+
+
+def test_ingest_disabled_is_hint_not_failure(tmp_path):
+    installer, cap, _ = _episode_installer(
+        tmp_path, check={"category": "disabled", "http_status": 403}
+    )
+    assert installer.install() == 0
+    rec = next(r for r in installer.records if r.name == "收料檢查")
+    assert rec.status == "skip"
+    assert "服務未開啟收料（UI 設定頁可開）" in cap.text
+    report = next(installer.paths.lv_dir.glob("install-report-*.txt")).read_text(
+        "utf-8"
+    )
+    assert "UI 設定頁可開" in report
+    # hook 照樣裝好，紀錄會留在本機 spool 等服務開啟
+    assert installer.paths.client_env.exists()
+
+
+def test_ingest_check_auth_failure_marks_install_failed(tmp_path):
+    installer, cap, _ = _episode_installer(
+        tmp_path, check={"category": "bearer", "message": "HTTP 401"}
+    )
+    assert installer.install() == 1
+    assert inst.CATEGORY_HINTS["bearer"] in cap.text
+
+
+def test_no_episodes_touches_nothing(tmp_path):
+    installer, cap = make_installer(
+        tmp_path,
+        FakeRunner(),
+        assume_yes=True,
+        mode="http",
+        episodes=False,
+        http_check=_ok_status,
+        environ={"LORE_VAULT_API_TOKEN": FAKE_TOKEN},
+    )
+    assert installer.install() == 0
+    p = installer.paths
+    assert not p.hooks_dir.exists()
+    assert not p.client_env.exists()
+    assert not p.settings_json.exists()
+    assert "未安裝（加 --episodes 可安裝）" in cap.text
+
+
+def test_yes_defaults_to_no_episodes(tmp_path):
+    runner = FakeRunner()
+    installer, _ = make_installer(
+        tmp_path,
+        runner,
+        assume_yes=True,
+        mode="http",
+        http_check=_ok_status,
+        environ={"LORE_VAULT_API_TOKEN": FAKE_TOKEN},
+    )
+    assert installer.install() == 0
+    assert installer.episodes is False
+    assert not installer.paths.client_env.exists()
+    # 沒選 hook 就不探測 Python
+    assert not any(inst.HOOK_PYTHON_PROBE in c for c in runner.calls)
+
+
+@pytest.mark.parametrize(
+    "found",
+    [
+        {},  # 什麼都找不到
+        {"C:/py/python.exe": _probe(version=(3, 10, 4))},  # 版本太舊
+        {"C:/py/python.exe": _probe(venv=True)},  # venv 不算系統 Python
+    ],
+)
+def test_no_system_python_stops_before_any_write(tmp_path, found):
+    home = make_home(tmp_path)
+    before = _snapshot_tree(home)
+    runner = FakeRunner(hook_python=found)
+    installer, cap, _ = _episode_installer(tmp_path, runner=runner, home=home)
+    with pytest.raises(inst.StepFailed):
+        installer.install()
+    assert "找不到合格的系統 Python" in cap.text
+    assert "--no-episodes" in cap.text
+    assert _snapshot_tree(home) == before
+    assert not any(c[1:3] == ["mcp", "add"] for c in runner.calls)
+
+
+def test_hook_python_prefers_base_over_venv_and_uses_reported_executable(tmp_path):
+    runner = FakeRunner(
+        hook_python={
+            "C:/base/python.exe": _probe(executable="C:/Real/python.exe"),
+            "C:/bin/python.exe": _probe(),
+        }
+    )
+    installer, _, _ = _episode_installer(
+        tmp_path,
+        runner=runner,
+        python_in_venv=True,
+        base_python="C:/base/python.exe",
+    )
+    assert installer.detect_hook_python() == "C:/Real/python.exe"
+    # 安裝器自己的 venv python 不在候選內
+    assert "C:/py/python.exe" not in installer.hook_python_candidates()
+
+
+def test_explicit_hook_python_allows_venv_but_checks_version(tmp_path):
+    runner = FakeRunner(hook_python={"D:/v/python.exe": _probe(venv=True)})
+    installer, _, _ = _episode_installer(
+        tmp_path, runner=runner, hook_python="D:/v/python.exe"
+    )
+    assert installer.detect_hook_python() == "C:/sys/python.exe"
+    runner.hook_python["D:/v/python.exe"] = _probe(version=(3, 11, 0))
+    assert installer.detect_hook_python() is None
+
+
+def test_invalid_settings_json_is_not_overwritten(tmp_path):
+    home = make_home(tmp_path)
+    settings = home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text("{ // 使用者手寫註解\n}", encoding="utf-8")
+    installer, cap, _ = _episode_installer(tmp_path, home=home)
+    with pytest.raises(inst.StepFailed):
+        installer.install()
+    assert settings.read_text(encoding="utf-8") == "{ // 使用者手寫註解\n}"
+    assert "不會覆寫" in cap.text
+
+
+def test_kit_without_hooks_blocks_episode_install(tmp_path):
+    kit = make_kit(tmp_path)
+    import shutil
+
+    shutil.rmtree(kit / "hooks")
+    installer, cap, _ = _episode_installer(tmp_path, kit=kit)
+    with pytest.raises(inst.StepFailed):
+        installer.install()
+    assert "VERSION.json" in cap.text
+
+
+def test_tampered_kit_hook_is_rejected(tmp_path):
+    kit = make_kit(tmp_path)
+    (kit / "hooks" / "spike" / "hook_stop.py").write_bytes(b"# changed\n")
+    with pytest.raises(inst.StepFailed, match="內容不符"):
+        inst.load_hooks_manifest(kit / "hooks")
+
+
+def test_host_with_existing_spike_hooks_is_not_double_registered(tmp_path):
+    home = make_home(tmp_path)
+    settings = home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    host = {
+        "hooks": {
+            "Stop": [
+                {
+                    "matcher": "",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "C:/py/python.exe",
+                            "args": ["C:/repo/agent_memory_spike/hook_stop.py"],
+                        }
+                    ],
+                }
+            ]
+        }
+    }
+    settings.write_text(json.dumps(host), encoding="utf-8")
+    installer, cap, _ = _episode_installer(tmp_path, home=home)
+    assert installer.install() == 0
+    assert json.loads(settings.read_text(encoding="utf-8")) == host
+    assert "不重複登記" in cap.text
+
+
+def test_dry_run_with_episodes_writes_nothing(tmp_path):
+    home = make_home(tmp_path)
+    before = _snapshot_tree(home)
+    installer, cap, checks = _episode_installer(tmp_path, home=home, dry_run=True)
+    assert installer.install() == 0
+    assert _snapshot_tree(home) == before
+    assert checks == []
+    assert "空批次" in cap.text
+
+
+def test_rollback_restores_settings_backup(tmp_path):
+    installer, _, _ = _episode_installer(tmp_path)
+    p = installer.paths
+    p.settings_json.parent.mkdir(parents=True)
+    p.settings_json.write_text(json.dumps(_user_settings()), encoding="utf-8")
+    original = p.settings_json.read_bytes()
+    assert installer.install() == 0
+    assert p.settings_json.read_bytes() != original
+
+    rb, cap = make_installer(
+        tmp_path, FakeRunner(), home=p.home, kit=installer.kit_dir, assume_yes=True
+    )
+    assert rb.rollback() == 0
+    assert p.settings_json.read_bytes() == original
+    assert "settings.json 也會整份還原" in cap.text
+    assert "client.env 含 token" in cap.text
+
+
+def test_rollback_without_backup_strips_only_our_hooks(tmp_path):
+    installer, _, _ = _episode_installer(tmp_path, mode="shell")
+    assert installer.install() == 0
+    p = installer.paths
+    # 安裝後使用者又加了自己的 hook
+    data = json.loads(p.settings_json.read_text(encoding="utf-8"))
+    data["hooks"].setdefault("Stop", []).append(USER_HOOKS["Stop"][0])
+    data["theme"] = "dark"
+    p.settings_json.write_text(json.dumps(data), encoding="utf-8")
+
+    rb, _ = make_installer(
+        tmp_path, FakeRunner(), home=p.home, kit=installer.kit_dir, assume_yes=True
+    )
+    assert rb.rollback() == 0
+    left = json.loads(p.settings_json.read_text(encoding="utf-8"))
+    assert left == {"hooks": {"Stop": USER_HOOKS["Stop"]}, "theme": "dark"}
+
+
+def test_cli_episode_flags():
+    parser = inst.build_parser()
+    assert parser.parse_args([]).episodes is None
+    assert parser.parse_args(["--episodes"]).episodes is True
+    assert parser.parse_args(["--no-episodes"]).episodes is False
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--episodes", "--no-episodes"])
+    args = parser.parse_args(["--hook-python", "C:/py/python.exe"])
+    assert args.hook_python == "C:/py/python.exe"
+
+
+# ── 收料開關檢查實跑（本機假服務，不連外）──
+
+
+def _serve_episodes(code: int, body: dict):
+    import http.server
+    import threading
+
+    seen: list[bytes] = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            seen.append(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
+            data = json.dumps(body).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, seen
+
+
+@pytest.mark.parametrize(
+    "code,body,category",
+    [
+        (200, {"accepted": 0, "duplicates": 0, "results": []}, "ok"),
+        (
+            403,
+            {"error": {"code": "episode_ingest_disabled", "message": "未開啟"}},
+            "disabled",
+        ),
+        (403, {}, "cf_access"),
+        (401, {"error": {"code": "unauthorized", "message": "x"}}, "bearer"),
+        (200, {"unexpected": True}, "service"),
+    ],
+)
+def test_episode_ingest_check_sends_empty_batch(code, body, category):
+    server, seen = _serve_episodes(code, body)
+    try:
+        data = inst.episode_ingest_check(
+            f"http://127.0.0.1:{server.server_port}",
+            {"Authorization": f"Bearer {FAKE_TOKEN}"},
+            5,
+        )
+    finally:
+        server.shutdown()
+    assert data["category"] == category, data
+    # 只送空批次：不會在正式服務寫入假 episode
+    assert [json.loads(b) for b in seen] == [{"episodes": []}]
+    assert FAKE_TOKEN not in json.dumps(data, ensure_ascii=False)

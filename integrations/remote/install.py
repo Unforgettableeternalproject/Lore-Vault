@@ -14,10 +14,20 @@
     python install.py --update    只重裝 wheel（完整殼模式；服務端新版上線後），
                                   之後 /mcp 重連
     python install.py --yes       非互動；token 由環境變數 LORE_VAULT_API_TOKEN 提供
-    python install.py --rollback  還原兩份 .bak-precutover
+    python install.py --rollback  還原 .bak-precutover（~/.claude.json、pm skill、
+                                  ~/.claude/settings.json）
+    python install.py --episodes  一併安裝 episode hook（D13；對話原文會推到服務）
+    python install.py --no-episodes
+                                  不安裝 episode hook（--yes 時的預設）
 
 服務前面有 Cloudflare Access 時加 `--cf-access-env <檔案>`（含 CF_ACCESS_CLIENT_ID／
 CF_ACCESS_CLIENT_SECRET 兩個鍵）；沒有就不需要。
+
+episode hook（兩種模式都適用，與 MCP 傳輸無關）：kit 的 `hooks/` 複製到
+`~/.lore-vault/hooks/`、寫 `~/.lore-vault/client.env`
+（服務位址、token、選配 CF Access）、在 `~/.claude/settings.json` 合併登記
+（以系統 Python 執行）。HTTP 模式只裝 Stop；完整殼另裝 PreToolUse
+（讀殼同步的 concept 快照）。
 流程與實測坑見 repo 的 docs/guides/REMOTE-INSTALL.md。
 token 與 CF Access secret 永不列印、不寫 log、不進報告；
 外部指令一律以 list 參數呼叫，不經 shell。重跑安全：已完成的步驟會略過。
@@ -45,7 +55,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-INSTALLER_VERSION = "2"
+INSTALLER_VERSION = "3"
 MIN_PYTHON = (3, 12)
 
 DEFAULT_TIMEOUT = 15.0
@@ -58,6 +68,32 @@ OLD_MCP_NAME = "open-notebook"
 BACKUP_SUFFIX = ".bak-precutover"
 WHEEL_GLOB = "lore_vault-*.whl"
 SKILL_FILE = "SKILL.md"
+
+# episode hook（D13）
+HOOKS_DIR_NAME = "hooks"
+HOOKS_MANIFEST = "VERSION.json"
+CLIENT_ENV_NAME = "client.env"
+URL_ENV = "LORE_VAULT_URL"
+CONCEPT_SNAPSHOT_ENV = "LORE_VAULT_CONCEPT_SNAPSHOT"
+# 殼把 concept 快照拉到 snapshot_dir 下的這個檔名（lore_vault.mcp.settings）
+CONCEPT_SNAPSHOT_NAME = "concepts.json"
+STOP_SCRIPT = "spike/hook_stop.py"
+PRETOOLUSE_SCRIPT = "spike/hook_pretooluse.py"
+PRETOOLUSE_MATCHER = "Edit|Write|MultiEdit|NotebookEdit"
+HOOK_TIMEOUT = 10
+INGEST_DISABLED_CODE = "episode_ingest_disabled"
+INGEST_DISABLED_HINT = (
+    "服務未開啟收料（UI 設定頁可開）；episode 先存在本機 ~/.lore-vault/spool/，"
+    "開啟後下次推送會自動補上"
+)
+# 印出版本、是否 venv 與實際執行檔；前綴用來從雜訊中挑出這一行
+HOOK_PYTHON_MARKER = "LV_HOOK_PY "
+HOOK_PYTHON_PROBE = (
+    "import json, sys; print("
+    + repr(HOOK_PYTHON_MARKER)
+    + " + json.dumps({'version': list(sys.version_info[:3]),"
+    " 'venv': sys.prefix != sys.base_prefix, 'executable': sys.executable}))"
+)
 
 _TOKEN_LINE = re.compile(r"^" + TOKEN_ENV + r"=.+$", re.MULTILINE)
 
@@ -115,6 +151,22 @@ class Paths:
     @property
     def snapshot_dir(self) -> Path:
         return self.lv_dir / "snapshot"
+
+    @property
+    def concept_snapshot(self) -> Path:
+        return self.snapshot_dir / CONCEPT_SNAPSHOT_NAME
+
+    @property
+    def settings_json(self) -> Path:
+        return self.home / ".claude" / "settings.json"
+
+    @property
+    def hooks_dir(self) -> Path:
+        return self.lv_dir / HOOKS_DIR_NAME
+
+    @property
+    def client_env(self) -> Path:
+        return self.lv_dir / CLIENT_ENV_NAME
 
     @property
     def cf_env(self) -> Path:
@@ -442,6 +494,226 @@ def find_wheel(kit_dir: Path) -> Path:
     return wheels[0]
 
 
+# ── episode hook：純邏輯 ─────────────────────────────────────────────
+
+
+def read_env_token(path: Path) -> str | None:
+    """`mcp.env` 的 token 值（完整殼沿用既有 token 時用）；讀不到回 None。"""
+    try:
+        text = path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(TOKEN_ENV + "="):
+            value = stripped[len(TOKEN_ENV) + 1 :].strip()
+            return value or None
+    return None
+
+
+def render_client_env(
+    base_url: str,
+    token: str,
+    cf: dict[str, str] | None = None,
+    concept_snapshot: Path | None = None,
+) -> bytes:
+    """hook 端 `client.env`（鍵見 lore_vault.hooks.client_env）：UTF-8 無 BOM。
+
+    CF Access 兩個鍵要一起寫（只有一個時 hook 視為設定不完整、不推送）。
+    `concept_snapshot` 只在完整殼模式給：PreToolUse 讀殼同步下來的快照。
+    """
+    validate_token(token)
+    lines = [
+        "# Lore Vault episode hook 設定（install.py 產生；含密鑰，勿外傳）",
+        f"{URL_ENV}={base_url.rstrip('/')}",
+        f"{TOKEN_ENV}={token}",
+    ]
+    if cf:
+        lines += [f"{key}={cf[key]}" for key in CF_KEYS]
+    if concept_snapshot is not None:
+        lines.append(f"{CONCEPT_SNAPSHOT_ENV}={concept_snapshot.as_posix()}")
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def hook_specs(mode: str) -> list[tuple[str, str, str]]:
+    """要登記的 hook：(事件, matcher, kit hooks/ 內的腳本)。
+
+    HTTP 模式只裝 Stop：PreToolUse 每次編輯都跑、只讀本地 concept 快照，而 HTTP 模式
+    沒有殼替它同步快照；讓 hook 自己連網會拖慢每次編輯。完整殼的快照由殼定期拉取。
+    """
+    specs = [("Stop", "", STOP_SCRIPT)]
+    if mode == "shell":
+        specs.append(("PreToolUse", PRETOOLUSE_MATCHER, PRETOOLUSE_SCRIPT))
+    return specs
+
+
+def hook_entry(python: str, script: Path) -> dict:
+    """與服務主機現行登記同一格式：command＝Python 絕對路徑，args＝腳本。"""
+    return {
+        "type": "command",
+        "command": python,
+        "args": [str(script)],
+        "timeout": HOOK_TIMEOUT,
+    }
+
+
+def _norm_path_text(text: str) -> str:
+    text = text.replace("\\", "/")
+    return text.lower() if os.name == "nt" else text
+
+
+def _hook_texts(hook: dict) -> list[str]:
+    texts = [hook.get("command")]
+    args = hook.get("args")
+    if isinstance(args, list):
+        texts += args
+    return [t for t in texts if isinstance(t, str)]
+
+
+def hook_points_under(hook: object, root: Path) -> bool:
+    """這筆 hook 的 command／args 是否指向 `root` 底下（＝本安裝器登記的）。"""
+    if not isinstance(hook, dict):
+        return False
+    prefix = _norm_path_text(str(root)).rstrip("/") + "/"
+    return any(prefix in _norm_path_text(t) for t in _hook_texts(hook))
+
+
+def _iter_hooks(hooks: dict):
+    for event, groups in hooks.items():
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if isinstance(group, dict) and isinstance(group.get("hooks"), list):
+                for hook in group["hooks"]:
+                    yield event, hook
+
+
+def foreign_registrations(hooks: dict, root: Path, script_name: str) -> list[str]:
+    """`root` 以外、同名腳本的既有登記（例如服務主機本機的 repo 路徑）。
+
+    同一個 hook 登記兩份會讓每輪推兩次、注入加倍，所以遇到就不重複登記。
+    """
+    found = []
+    for event, hook in _iter_hooks(hooks):
+        if hook_points_under(hook, root):
+            continue
+        if isinstance(hook, dict) and any(
+            ("/" + script_name) in ("/" + _norm_path_text(t)) for t in _hook_texts(hook)
+        ):
+            found.append(event)
+    return found
+
+
+def remove_hooks_under(hooks: dict, root: Path) -> dict:
+    """移除指向 `root` 的 hook；只含這些 hook 的 matcher 群組與事件一併移除，
+    使用者其他 hook 原樣保留。回傳新 dict，不改傳入物件。"""
+    result: dict = {}
+    for event, groups in hooks.items():
+        if not isinstance(groups, list):
+            result[event] = groups
+            continue
+        kept_groups = []
+        for group in groups:
+            if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+                kept_groups.append(group)
+                continue
+            kept = [h for h in group["hooks"] if not hook_points_under(h, root)]
+            if len(kept) == len(group["hooks"]):
+                kept_groups.append(group)
+            elif kept:
+                kept_groups.append({**group, "hooks": kept})
+        if kept_groups or not groups:
+            result[event] = kept_groups
+    return result
+
+
+def merge_hooks(
+    settings: dict, root: Path, wanted: list[tuple[str, str, dict]]
+) -> dict:
+    """先移除本安裝器先前的登記再附加 `wanted`。
+
+    重跑不會重複，Python 路徑變了也會更新。"""
+    hooks = settings.get("hooks", {})
+    if not isinstance(hooks, dict):
+        raise StepFailed(
+            "~/.claude/settings.json 的 hooks 不是物件", "手動修正該檔後重跑"
+        )
+    merged = remove_hooks_under(hooks, root)
+    for event, matcher, entry in wanted:
+        groups = merged.setdefault(event, [])
+        if not isinstance(groups, list):
+            raise StepFailed(
+                f"~/.claude/settings.json 的 hooks.{event} 不是陣列",
+                "手動修正該檔後重跑",
+            )
+        groups.append({"matcher": matcher, "hooks": [entry]})
+    out = dict(settings)
+    if merged:
+        out["hooks"] = merged
+    else:
+        out.pop("hooks", None)
+    return out
+
+
+def load_settings_json(path: Path) -> dict:
+    """讀 `~/.claude/settings.json`；不存在回 {}；解析失敗就停，絕不覆寫。"""
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise StepFailed(
+            f"讀不懂 {path}（{type(exc).__name__}），不會覆寫",
+            "修正成合法 JSON 後重跑，或加 --no-episodes 跳過 hook",
+        ) from None
+    if not isinstance(data, dict):
+        raise StepFailed(f"{path} 不是 JSON 物件，不會覆寫", "手動修正後重跑")
+    return data
+
+
+def dump_settings_json(data: dict) -> bytes:
+    return (json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+
+
+def load_hooks_manifest(hooks_dir: Path) -> dict:
+    """讀 kit／已安裝 hooks 的 VERSION.json 並逐檔驗 sha256。"""
+    path = hooks_dir / HOOKS_MANIFEST
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise StepFailed(
+            f"讀不到 {path}（{type(exc).__name__}）",
+            "向主機重取含 hooks/ 的 kit，或加 --no-episodes 跳過",
+        ) from None
+    files = manifest.get("files") if isinstance(manifest, dict) else None
+    if not isinstance(files, dict) or not files:
+        raise StepFailed(f"{path} 格式不符", "向主機重取 kit")
+    for rel, digest in files.items():
+        parts = Path(rel).parts
+        if Path(rel).is_absolute() or ".." in parts:
+            raise StepFailed(f"{path} 含不合法路徑：{rel}", "向主機重取 kit")
+        target = hooks_dir / rel
+        if not target.is_file() or sha256_file(target) != digest:
+            raise StepFailed(
+                f"hook 檔案缺漏或內容不符：{rel}", "向主機重取 kit（不要手改 hooks/）"
+            )
+    for script in (STOP_SCRIPT, PRETOOLUSE_SCRIPT):
+        if script not in files:
+            raise StepFailed(f"kit 的 hooks/ 缺 {script}", "向主機重取 kit")
+    return manifest
+
+
+def parse_hook_python_probe(stdout: str) -> dict | None:
+    for line in stdout.splitlines():
+        if line.startswith(HOOK_PYTHON_MARKER):
+            try:
+                data = json.loads(line[len(HOOK_PYTHON_MARKER) :])
+            except ValueError:
+                return None
+            return data if isinstance(data, dict) else None
+    return None
+
+
 # ── 本機自檢（在 venv python 內執行，只印一行整理過的 JSON）──────────
 
 SELF_CHECK_CODE = r"""
@@ -653,6 +925,67 @@ def http_self_check(
     }
 
 
+def _error_code(raw: bytes) -> str | None:
+    try:
+        body = json.loads(raw.decode("utf-8", errors="replace"))
+    except ValueError:
+        return None
+    if isinstance(body, dict) and isinstance(body.get("error"), dict):
+        code = body["error"].get("code")
+        return code if isinstance(code, str) else None
+    return None
+
+
+def episode_ingest_check(
+    base_url: str, headers: dict[str, str], timeout: float = DEFAULT_TIMEOUT
+) -> dict:
+    """服務收料開關檢查：送**空批次** `POST /v1/episodes {"episodes": []}`。
+
+    服務先看開關（關閉＝403 `episode_ingest_disabled`），開啟時空批次回 200、
+    各項計數為 0；兩種情況都不寫任何資料，不會在正式服務留下假 episode。
+    category：ok／disabled，其餘同 `http_self_check` 的分類。
+    """
+    req = urllib.request.Request(
+        base_url.rstrip("/") + "/v1/episodes",
+        data=json.dumps({"episodes": []}).encode("utf-8"),
+        method="POST",
+        headers={**headers, "Content-Type": "application/json"},
+    )
+    opener = urllib.request.build_opener(_NoRedirect())
+    try:
+        with opener.open(req, timeout=timeout) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+        body = exc.read() or b""
+        code = _error_code(body)
+        if status == 403 and code == INGEST_DISABLED_CODE:
+            return {"category": "disabled", "http_status": status}
+        message = _error_message(body) or f"HTTP {status}"
+        if 300 <= status < 400 or status == 403:
+            cat = "cf_access"
+        elif status == 401:
+            cat = "bearer"
+        elif status in (502, 503, 504, 530):
+            cat = "unreachable"
+        else:
+            cat = "service"
+        return {"category": cat, "message": message, "http_status": status}
+    except urllib.error.URLError as exc:
+        detail = f"{type(exc.reason).__name__}: {exc.reason}"
+        return {"category": _classify_unreachable(detail), "message": detail}
+    except (TimeoutError, OSError) as exc:
+        detail = f"{type(exc).__name__}: {exc}"
+        return {"category": _classify_unreachable(detail), "message": detail}
+    try:
+        body = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        body = None
+    if isinstance(body, dict) and "accepted" in body:
+        return {"category": "ok"}
+    return {"category": "service", "message": "回應格式不符（base_url 指到別的服務？）"}
+
+
 # ── 互動與輸出 ──────────────────────────────────────────────────────
 
 
@@ -795,6 +1128,22 @@ class Installer:
     cf_decided: bool = False
     # HTTP 模式的請求 header（含 token；只在記憶體）
     http_headers: dict[str, str] | None = None
+    # 本次取得的 token（只在記憶體；寫 client.env 用）
+    token: str | None = None
+    # episode hook：True 安裝、False 不裝、None＝互動時詢問（--yes 時不裝）
+    episodes: bool | None = None
+    # 指定 hook 用的 Python（--hook-python）；None＝自動找系統 Python
+    hook_python: str | None = None
+    # 執行本安裝器的 Python 是否在 venv 裡（venv 的 Python 不當 hook 用）
+    python_in_venv: bool = sys.prefix != sys.base_prefix
+    # venv 背後的基底 Python（Windows 有 sys._base_executable）
+    base_python: str | None = getattr(sys, "_base_executable", None)
+    episode_check: Callable[[str, dict[str, str], float], dict] = episode_ingest_check
+    hook_python_resolved: str | None = None
+    hook_python_version: str = ""
+    hooks_manifest: dict | None = None
+    hook_events: list[str] = field(default_factory=list)
+    episode_status: dict | None = None
 
     # ── 共用 ──
 
@@ -823,10 +1172,20 @@ class Installer:
             text = text.replace(variant, "~")
         return text
 
-    def write_bytes(self, path: Path, data: bytes) -> None:
+    def write_bytes(self, path: Path, data: bytes, *, private: bool = False) -> None:
+        """原子寫入。`private`：含密鑰的檔案，POSIX 上建立時就是 0600
+        （Windows 沿用家目錄的 ACL）。"""
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(path.name + ".tmp")
-        tmp.write_bytes(data)
+        if private:
+            tmp.unlink(missing_ok=True)
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+            if os.name != "nt":
+                os.chmod(tmp, 0o600)
+        else:
+            tmp.write_bytes(data)
         os.replace(tmp, path)
 
     # ── 步驟 ──
@@ -916,7 +1275,7 @@ class Installer:
                 f"5. 覆寫 {p.skill}（先顯示差異摘要）",
                 "6. 產生驗證報告（不含密鑰）",
             ]
-            return lines
+            return lines + self._episode_plan()
         lines.append(f"wheel：{self.wheel.name if self.wheel else '？'}")
         if full:
             lines.append("模式：完整殼（本機 venv＋stdio 殼）")
@@ -933,6 +1292,7 @@ class Installer:
                 "8. 本機自檢：經殼（bearer＋CF Access，若有）呼叫一次 status",
                 "9. 產生驗證報告（不含密鑰）",
             ]
+            lines += self._episode_plan()
         else:
             lines += [
                 "1. uv pip install --reinstall 重裝 wheel（venv 必須已存在）",
@@ -940,6 +1300,18 @@ class Installer:
                 "3. 產生驗證報告；之後在 Claude Code 用 /mcp 重連 lore-vault",
             ]
         return lines
+
+    def _episode_plan(self) -> list[str]:
+        if not self.episodes:
+            return ["＋ episode hook：不安裝（加 --episodes 可安裝）"]
+        p = self.paths
+        events = "、".join(event for event, _, _ in hook_specs(self.mode))
+        return [
+            f"＋ episode hook：複製到 {p.hooks_dir}、寫 {p.client_env}（含 token）",
+            f"  合併登記 {events} 到 {p.settings_json}（先備份 {BACKUP_SUFFIX}，"
+            "不動其他 hook）",
+            "  以空批次檢查服務收料開關（不寫入任何資料）",
+        ]
 
     def step_backup(self) -> None:
         for path in (self.paths.claude_json, self.paths.skill):
@@ -1101,7 +1473,7 @@ class Installer:
             return
         token = self._ask_token(env_token)
         validate_token(token)
-        self.write_bytes(path, render_mcp_env(token))
+        self.write_bytes(path, render_mcp_env(token), private=True)
         if not env_file_has_token(path):
             raise StepFailed("寫入後讀不到 token 行", "重跑此程式")
         self.record("寫 mcp.env", "ok", "UTF-8 無 BOM")
@@ -1131,6 +1503,7 @@ class Installer:
                 "不會顯示）："
             )
         validate_token(token)
+        self.token = token
         return token
 
     # ── HTTP 模式 ──
@@ -1278,6 +1651,285 @@ class Installer:
                 detail += f"（{data['message']}）"
             self.record("本機自檢", "fail", detail)
 
+    # ── episode hook（D13）──
+
+    def resolve_episodes(self) -> bool:
+        """決定是否安裝 episode hook：旗標優先；--yes／dry-run 預設不裝；互動時詢問。
+
+        預設不裝的理由：episode 是對話原文，D13 的服務端收料也預設關閉——
+        兩端都要明確選擇，才不會意外把對話集中到服務。
+        """
+        if self.episodes is None:
+            if self.ui.assume_yes:
+                self.episodes = False
+            else:
+                self.ui.say("  episode hook（選配）：")
+                self.ui.say(
+                    "    每輪對話結束時把該輪 episode 推到服務，供夜間管線蒸餾。"
+                )
+                self.ui.say(
+                    "    隱私：episode 是對話原文（你的輸入與 agent 回覆），"
+                    "可能含機敏內容；"
+                )
+                self.ui.say(
+                    "    本機也會留一份（~/.lore-vault/episodes/ 與 spool/）。"
+                    "服務端要開啟收料才會收下。"
+                )
+                self.episodes = self.ui.confirm("安裝 episode hook？", default=False)
+        return self.episodes
+
+    def hook_python_candidates(self) -> list[str]:
+        if self.hook_python:
+            return [self.hook_python]
+        candidates: list[str] = []
+        if not self.python_in_venv:
+            candidates.append(self.python_exe)
+        if self.base_python:
+            candidates.append(self.base_python)
+        for name in ("python3", "python"):
+            found = self.which(name)
+            if found:
+                candidates.append(found)
+        unique: list[str] = []
+        for c in candidates:
+            if c not in unique:
+                unique.append(c)
+        return unique
+
+    def detect_hook_python(self) -> str | None:
+        """找 hook 用的系統 Python：≥ MIN_PYTHON、不是 venv。
+
+        `--hook-python` 指定時只驗版本。
+
+        hook 由 Claude Code 直接以這支 Python 執行，只用標準庫；逐一實跑探測，
+        不信任路徑名稱（Windows 的 WindowsApps 捷徑可能只是商店導向）。
+        """
+        explicit = self.hook_python is not None
+        for candidate in self.hook_python_candidates():
+            r = self.runner([candidate, "-c", HOOK_PYTHON_PROBE])
+            data = parse_hook_python_probe(r.stdout) if r.returncode == 0 else None
+            if not data:
+                continue
+            version = tuple(data.get("version") or ())
+            if version[:2] < MIN_PYTHON:
+                continue
+            if data.get("venv") and not explicit:
+                continue
+            self.hook_python_resolved = str(data.get("executable") or candidate)
+            self.hook_python_version = ".".join(str(v) for v in version)
+            return self.hook_python_resolved
+        return None
+
+    def _episode_problems(self) -> list[str]:
+        """prepare 階段（任何寫入之前）：kit 有 hooks/、找得到系統 Python。"""
+        problems: list[str] = []
+        kit_hooks = self.kit_dir / HOOKS_DIR_NAME
+        try:
+            self.hooks_manifest = load_hooks_manifest(kit_hooks)
+            self.ui.say(
+                f"  [OK]   episode hook：{len(self.hooks_manifest['files'])} 個檔案"
+                f"（{self.hooks_manifest.get('version')}，"
+                f"{self.hooks_manifest.get('commit')}）"
+            )
+        except StepFailed as exc:
+            self.ui.say(f"  [FAIL] episode hook：{exc.message}")
+            problems.append(exc.message)
+        try:
+            load_settings_json(self.paths.settings_json)
+        except StepFailed as exc:
+            self.ui.say(f"  [FAIL] {exc.message}")
+            problems.append(exc.message)
+        python = self.detect_hook_python()
+        if python:
+            self.ui.say(
+                f"  [OK]   hook 用系統 Python {self.hook_python_version}："
+                f"{self.mask(python)}"
+            )
+        else:
+            self.ui.say("  [FAIL] hook 用系統 Python：找不到")
+            problems.append(
+                "找不到合格的系統 Python"
+                f"（≥ {MIN_PYTHON[0]}.{MIN_PYTHON[1]}、不是 venv）給 episode hook 用："
+                "hook 由 Claude Code 直接呼叫系統 Python。安裝 Python 後重跑、"
+                "以 --hook-python <路徑> 指定，或加 --no-episodes 跳過"
+            )
+        return problems
+
+    def _toml_value(self, key: str) -> str | None:
+        """完整殼保留既有 mcp.toml 時，服務位址與 CF 檔只存在那裡。"""
+        try:
+            import tomllib
+
+            data = tomllib.loads(self.paths.mcp_toml.read_text(encoding="utf-8"))
+        except (OSError, ValueError, ImportError):
+            return None
+        value = (data.get("mcp") or {}).get(key)
+        return value if isinstance(value, str) and value else None
+
+    def _hook_connection(self) -> tuple[str, str, dict[str, str] | None]:
+        """(服務位址, token, CF Access 值或 None)。token 優先用本次輸入的，
+        完整殼沿用既有 mcp.env 時從檔案讀（不列印）。"""
+        raw_url = self.base_url or self._toml_value("base_url")
+        if not raw_url:
+            raise StepFailed("不知道服務位址", "加上 --base-url <服務位址> 後重跑")
+        base_url = normalize_base_url(raw_url)
+        token = self.token or read_env_token(self.paths.mcp_env)
+        if not token:
+            raise StepFailed(
+                "取不到 token，無法寫 client.env",
+                f"設定環境變數 {TOKEN_ENV} 或互動輸入後重跑",
+            )
+        self.ui.add_secret(token)
+        cf_file = self.cf_env_file
+        if cf_file is None and self.mode == "shell":
+            configured = self._toml_value("cf_access_env_file")
+            cf_file = Path(configured).expanduser() if configured else None
+        cf = None
+        if cf_file is not None:
+            cf = read_cf_values(cf_file)
+            for value in cf.values():
+                self.ui.add_secret(value)
+            if len(cf) != len(CF_KEYS):
+                raise StepFailed("CF Access 憑證檔的值不完整", "補齊兩個鍵的值後重跑")
+        return base_url, token, cf
+
+    def step_hook_files(self) -> None:
+        """kit 的 hooks/ → ~/.lore-vault/hooks/：先寫到暫存目錄驗證，再整目錄換上。"""
+        src = self.kit_dir / HOOKS_DIR_NAME
+        manifest = self.hooks_manifest or load_hooks_manifest(src)
+        dest = self.paths.hooks_dir
+        label = f"{manifest.get('version')}（{manifest.get('commit')}）"
+        if self.dry_run:
+            self.record("episode hook 檔案", "dry", f"會複製到 {dest}，版本 {label}")
+            return
+        try:
+            installed = load_hooks_manifest(dest)
+        except StepFailed:
+            installed = None
+        if installed == manifest:
+            self.record("episode hook 檔案", "skip", f"已是 {label}")
+            return
+        staging = dest.with_name(dest.name + ".new")
+        old = dest.with_name(dest.name + ".old")
+        for leftover in (staging, old):
+            if leftover.exists():
+                shutil.rmtree(leftover)
+        for rel in manifest["files"]:
+            target = staging / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src / rel, target)
+        shutil.copyfile(src / HOOKS_MANIFEST, staging / HOOKS_MANIFEST)
+        load_hooks_manifest(staging)
+        if dest.exists():
+            os.replace(dest, old)
+        os.replace(staging, dest)
+        shutil.rmtree(old, ignore_errors=True)
+        self.record(
+            "episode hook 檔案", "ok", f"{len(manifest['files'])} 個檔案，版本 {label}"
+        )
+
+    def step_client_env(self) -> None:
+        path = self.paths.client_env
+        concept = self.paths.concept_snapshot if self.mode == "shell" else None
+        extra = "；PreToolUse 讀殼的 concept 快照" if concept else ""
+        if self.dry_run:
+            self.record(
+                "寫 client.env", "dry", f"會寫入 {path}（服務位址、token{extra}）"
+            )
+            return
+        base_url, token, cf = self._hook_connection()
+        data = render_client_env(base_url, token, cf, concept)
+        detail = "UTF-8 無 BOM" + ("；CF Access" if cf else "") + extra
+        if path.is_file() and path.read_bytes() == data:
+            self.record("寫 client.env", "skip", "內容相同")
+            return
+        self.write_bytes(path, data, private=True)
+        self.record("寫 client.env", "ok", detail)
+
+    def step_register_hooks(self) -> None:
+        """合併登記到 ~/.claude/settings.json。
+
+        只動本安裝器的 hook，其他 hook 原樣保留。"""
+        path = self.paths.settings_json
+        root = self.paths.hooks_dir
+        python = self.hook_python_resolved or "<系統 Python>"
+        current = load_settings_json(path)
+        hooks = current.get("hooks", {})
+        hooks = hooks if isinstance(hooks, dict) else {}
+        wanted: list[tuple[str, str, dict]] = []
+        skipped: list[str] = []
+        for event, matcher, script in hook_specs(self.mode):
+            if foreign_registrations(hooks, root, Path(script).name):
+                skipped.append(event)
+                continue
+            wanted.append((event, matcher, hook_entry(python, root / script)))
+        self.hook_events = [event for event, _, _ in wanted]
+        new = merge_hooks(current, root, wanted)
+        events = "、".join(self.hook_events) or "（無）"
+        if skipped:
+            self.record(
+                "登記 hook",
+                "skip",
+                "已有其他位置的 " + "、".join(skipped) + " hook 登記"
+                "（可能是服務主機本機），不重複登記",
+            )
+        if new == current:
+            self.record("登記 hook", "skip", f"已登記（{events}）")
+            return
+        if self.dry_run:
+            self.record("登記 hook", "dry", f"會合併登記 {events} 到 {path}")
+            return
+        bak = backup_path(path)
+        if path.exists() and not bak.exists():
+            shutil.copy2(path, bak)
+            self.record("備份 settings.json", "ok", str(bak))
+        self.write_bytes(path, dump_settings_json(new))
+        self.record("登記 hook", "ok", f"{events}（{self.mask(python)}）")
+
+    def step_episode_check(self) -> None:
+        if self.dry_run:
+            self.record(
+                "收料檢查",
+                "dry",
+                "會送空批次 POST /v1/episodes 檢查收料開關（不寫入任何資料）",
+            )
+            return
+        base_url, token, cf = self._hook_connection()
+        headers = {"Authorization": f"Bearer {token}"}
+        if cf:
+            headers.update(cf_headers(cf))
+        data = self.episode_check(base_url, headers, DEFAULT_TIMEOUT)
+        self.episode_status = data
+        cat = data.get("category") or "internal"
+        if cat == "ok":
+            self.record("收料檢查", "ok", "服務已開啟收料；每輪結束時推送")
+        elif cat == "disabled":
+            # 不是失敗：hook 照裝，紀錄留在本機 spool，服務開啟後自動補推
+            self.record("收料檢查", "skip", INGEST_DISABLED_HINT)
+        else:
+            detail = CATEGORY_HINTS.get(cat, "")
+            if data.get("message"):
+                detail += f"（{data['message']}）"
+            self.record("收料檢查", "fail", detail)
+
+    def step_episodes_skipped(self) -> None:
+        self.record("episode hook", "skip", "未安裝（加 --episodes 可安裝）")
+
+    def _episode_steps(self) -> list[tuple[str, Callable[[], None]]]:
+        if not self.episodes:
+            return [("episode hook", self.step_episodes_skipped)]
+        return [
+            ("episode hook 檔案", self.step_hook_files),
+            ("寫 client.env", self.step_client_env),
+            ("登記 hook", self.step_register_hooks),
+            ("收料檢查", self.step_episode_check),
+        ]
+
+    def _episode_ok(self) -> bool:
+        if self.dry_run or self.episode_status is None:
+            return True
+        return self.episode_status.get("category") in ("ok", "disabled")
+
     def _status_line(self, data: dict) -> str:
         doctor = data.get("doctor") or {}
         counts = "／".join(
@@ -1343,6 +1995,27 @@ class Installer:
                     )
             else:
                 lines.append(f"status：失敗（{cat}）{CATEGORY_HINTS.get(cat, '')}")
+        if self.episodes is not None and mode == "install":
+            if not self.episodes:
+                lines.append("episode hook：未安裝")
+            else:
+                manifest = self.hooks_manifest or {}
+                lines.append(
+                    "episode hook："
+                    + ("、".join(self.hook_events) or "未登記")
+                    + f"；hook 版本 {manifest.get('version')}"
+                    + f"（{manifest.get('commit')}）"
+                    + f"；系統 Python {self.hook_python_version or '?'}"
+                )
+                cat = (self.episode_status or {}).get("category")
+                if cat == "ok":
+                    lines.append("收料：服務已開啟")
+                elif cat == "disabled":
+                    lines.append("收料：" + INGEST_DISABLED_HINT)
+                elif cat:
+                    lines.append(
+                        f"收料：檢查失敗（{cat}）{CATEGORY_HINTS.get(cat, '')}"
+                    )
         if self.mcp_entry:
             lines.append(f"claude mcp list：{self.mcp_entry}")
         elif not self.dry_run:
@@ -1398,11 +2071,15 @@ class Installer:
         total = 3
         if full:
             self.resolve_mode()
+            self.resolve_episodes()
         else:
             self.mode = "shell"
         self.ui.header(1, total, "偵測環境")
         env = self.detect()
         problems = self.show_env(env)
+        if full and self.episodes:
+            # 任何寫入之前就確認 hook 裝得起來，避免 MCP 裝好了才卡在 hook
+            problems += self._episode_problems()
         if not full:
             # --update 不需要 claude CLI 與 CF 檔也能重裝，只有 Python 與 uv 是必要
             problems = [
@@ -1444,11 +2121,12 @@ class Installer:
             ("登記 MCP", self.step_mcp_register),
             ("pm skill", self.step_skill),
             ("本機自檢", self.step_self_check),
+            *self._episode_steps(),
         ]
         self._run_steps(steps)
         self.collect_mcp_entry()
         self.emit_report("install")
-        return 0 if self._self_check_ok() else 1
+        return 0 if self._self_check_ok() and self._episode_ok() else 1
 
     def install_http(self) -> int:
         steps = [
@@ -1457,11 +2135,12 @@ class Installer:
             ("自檢", self.step_http_check),
             ("登記 MCP", self.step_mcp_register),
             ("pm skill", self.step_skill),
+            *self._episode_steps(),
         ]
         self._run_steps(steps)
         self.collect_mcp_entry()
         self.emit_report("install")
-        return 0 if self._self_check_ok() else 1
+        return 0 if self._self_check_ok() and self._episode_ok() else 1
 
     def update(self) -> int:
         if not self.prepare(full=False):
@@ -1491,22 +2170,42 @@ class Installer:
                 raise
 
     def rollback(self) -> int:
+        settings = self.paths.settings_json
         pairs = [
-            (backup_path(p), p) for p in (self.paths.claude_json, self.paths.skill)
+            (backup_path(p), p)
+            for p in (self.paths.claude_json, self.paths.skill, settings)
         ]
         found = [(b, p) for b, p in pairs if b.exists()]
-        if not found:
+        # 安裝前沒有 settings.json（因此沒有備份）時，改為只移除本安裝器登記的 hook
+        strip_hooks = False
+        if not backup_path(settings).exists() and settings.exists():
+            current = load_settings_json(settings)
+            hooks = current.get("hooks")
+            strip_hooks = isinstance(hooks, dict) and any(
+                hook_points_under(h, self.paths.hooks_dir)
+                for _, h in _iter_hooks(hooks)
+            )
+        if not found and not strip_hooks:
             self.ui.say(f"找不到任何 {BACKUP_SUFFIX} 備份，無法還原。")
             return 1
         for bak, dest in found:
             self.ui.say(f"  {bak} → {dest}")
+        if strip_hooks:
+            self.ui.say(f"  {settings}：移除指向 {self.paths.hooks_dir} 的 hook")
         self.ui.say(
             "注意：~/.claude.json 會整份還原到備份時的狀態，"
             "備份之後新增的其他 MCP 條目或設定也會一併消失。"
         )
+        if any(dest == settings for _, dest in found):
+            self.ui.say(
+                "注意：~/.claude/settings.json 也會整份還原，"
+                "備份之後新增的其他 hook 或設定會一併消失。"
+            )
         if self.dry_run:
             for _, dest in found:
                 self.record(f"還原 {dest.name}", "dry")
+            if strip_hooks:
+                self.record("移除 episode hook 登記", "dry")
             return 0
         # --yes 代表已同意還原；互動時仍預設否
         if not self.ui.assume_yes and not self.ui.confirm("確定還原？", default=False):
@@ -1515,9 +2214,18 @@ class Installer:
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(bak, dest)
             self.record(f"還原 {dest.name}", "ok")
+        if strip_hooks:
+            current = load_settings_json(settings)
+            self.write_bytes(
+                settings,
+                dump_settings_json(merge_hooks(current, self.paths.hooks_dir, [])),
+            )
+            self.record("移除 episode hook 登記", "ok", str(settings))
         self.ui.say(
             "已還原。請完全結束並重開 Claude Code。"
-            "~/.lore-vault/ 可留著，不影響舊設定。"
+            "~/.lore-vault/ 可留著，不影響舊設定；"
+            "其中 client.env 含 token，"
+            "不再使用 episode hook 可刪除 client.env 與 hooks/。"
         )
         return 0
 
@@ -1555,6 +2263,24 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="選配：服務前面有 Cloudflare Access 時，含 CF_ACCESS_CLIENT_ID／"
         "CF_ACCESS_CLIENT_SECRET 的檔案",
+    )
+    episodes = parser.add_mutually_exclusive_group()
+    episodes.add_argument(
+        "--episodes",
+        dest="episodes",
+        action="store_true",
+        default=None,
+        help="安裝 episode hook（對話原文推到服務；--yes 時預設不裝）",
+    )
+    episodes.add_argument(
+        "--no-episodes",
+        dest="episodes",
+        action="store_false",
+        help="不安裝 episode hook（不詢問）",
+    )
+    parser.add_argument(
+        "--hook-python",
+        help="episode hook 用的 Python 路徑（預設自動找系統 Python ≥ 3.12）",
     )
     parser.add_argument(
         "--kit-dir", type=Path, help="kit 資料夾（預設為 install.py 所在目錄）"
@@ -1601,6 +2327,8 @@ def main(
         mode=args.mode or ("shell" if args.update else "auto"),
         cf_env_file=args.cf_access_env.expanduser() if args.cf_access_env else None,
         environ=dict(os.environ if environ is None else environ),
+        episodes=args.episodes,
+        hook_python=args.hook_python,
     )
     ui.say("Lore Vault MCP 安裝程式" + ("（dry-run）" if args.dry_run else ""))
     try:
