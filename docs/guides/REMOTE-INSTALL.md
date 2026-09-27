@@ -175,6 +175,13 @@ Copy-Item "<傳來的 SKILL.md>" "$HOME\.claude\skills\pm\SKILL.md" -Force
 
 **成功判準**：以上全部符合。任一 fail：`401`／`403`／3xx 查 token 與 `pm-token.env`（不讀值，確認檔案與鍵存在）；連線失敗查 `base_url`；schema 不符表示 wheel 過舊，回主機重打。
 
+## 更新（服務端新版上線後）
+
+1. 主機 `uv build --wheel` 產新 wheel，傳到目標機器 —— agent
+2. `uv pip install --reinstall --python ~/.lore-vault/venv <wheel>` —— 人類（版本號未變時必須 `--reinstall`，否則不會覆蓋）
+3. `/mcp` 重連 `lore-vault` 即生效，不必重開整個 Claude Code —— 人類
+4. 驗 `status`（doctor 無 fail）與新工具可用 —— agent
+
 ## 範圍外（本流程不處理）
 
 - **收料**：遠端不掛 hook，不收 episode；目前只由主機收料。
