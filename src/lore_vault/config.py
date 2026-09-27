@@ -183,6 +183,9 @@ class McpConfig:
     # `ask` 工具的請求逾時（秒）：要涵蓋服務端檢索 + 模型呼叫（ask.timeout），
     # 所以比一般請求的 timeout 長
     ask_timeout: float = 90.0
+    # HTTP 端點（/mcp）的 `download` 以 base64 回傳原始檔的大小上限（位元組）。
+    # 內容會進 agent 的上下文，刻意設小；超過時請改用 stdio 殼（寫本機檔）或 UI
+    http_download_max_bytes: int = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -419,6 +422,7 @@ def _validate(config: Config) -> None:
         "mcp.timeout": config.mcp.timeout,
         "mcp.snapshot_max_age_hours": config.mcp.snapshot_max_age_hours,
         "mcp.ask_timeout": config.mcp.ask_timeout,
+        "mcp.http_download_max_bytes": config.mcp.http_download_max_bytes,
         "documents.max_file_bytes": config.documents.max_file_bytes,
         "documents.max_chars": config.documents.max_chars,
         "documents.chunk_max_tokens": config.documents.chunk_max_tokens,

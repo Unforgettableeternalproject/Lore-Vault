@@ -98,6 +98,10 @@ snapshot_max_age_hours = 24.0
 # upload 工具可讀的額外目錄（os.pathsep 分隔，Windows 為 ';'）。殼的工作目錄一律可讀——
 # 殼能讀到工作目錄下的任何檔案；路徑含 '..' 或 symlink 逃出白名單一律拒絕
 # upload_roots = "C:/Users/<you>/Documents/lore;D:/worldbuilding"
+# （download 工具寫本機檔也限在同一份白名單內；既有檔預設不覆寫）
+# 服務內建 HTTP MCP（/mcp）的 download 以 base64 回傳原始檔的上限（位元組）；
+# 內容會進 agent 上下文，超過時改用 stdio 殼或 UI 下載
+http_download_max_bytes = 1048576
 # ask 工具的請求逾時（秒）：涵蓋服務端檢索 + 模型呼叫，要比 ask.timeout 長
 ask_timeout = 90.0
 

@@ -163,6 +163,8 @@ claude mcp add --transport http lore-vault https://<服務位址>/mcp --header "
   space 驗證、錯誤碼、principal、查重與文件上傳都只有 `/v1/*` 一條實作，HTTP 模式不可能與 stdio 分岔
 - `vault_resolve`：傳 `remote_url`（`git remote get-url origin` 的輸出）或 `key`；`cwd` 回 `cwd_not_supported`
 - `upload`：傳 `filename`＋`content_base64`；`path` 回 `path_not_supported`、省略 `vault` 回 `vault_required`
+- `download`：不收 `path`，回 `content_base64`；上限 `mcp.http_download_max_bytes`（預設 1MB，內容會進 agent 上下文），
+  超過回 `too_large` 並提示改用 stdio 殼或 UI
 - 沒有快照降級；`status` 另附 `mcp: {mode: "http", space}`（沒有 `shell`）
 - 目前 space 依 `Mcp-Session-Id` 保存；沒有 session 的連線（2026-07-28 單次請求、stateless）
   `space(action="set")` 回 `session_required`，只能用 dev
@@ -196,6 +198,7 @@ stdout 是 MCP 協定通道，log 一律寫 stderr（UTF-8）。設定錯誤時�
 | `mcp.concept_snapshot_path` | `LORE_VAULT_MCP_CONCEPT_SNAPSHOT_PATH` | `<snapshot_dir>/concepts.json` | PreToolUse 讀的 concept 快照（T-40）；snapshot_dir 也未設＝不拉 |
 | `mcp.upload_roots` | `LORE_VAULT_MCP_UPLOAD_ROOTS` | 無 | `upload` 可讀的**額外**目錄（`os.pathsep` 分隔，Windows 為 `;`）。殼的工作目錄一律可讀——**殼能讀到工作目錄下的任何檔案** |
 | `mcp.ask_timeout` | `LORE_VAULT_MCP_ASK_TIMEOUT` | 90 秒 | `ask` 工具的請求逾時（服務端檢索＋模型呼叫），要比 `ask.timeout` 長 |
+| `mcp.http_download_max_bytes` | `LORE_VAULT_MCP_HTTP_DOWNLOAD_MAX_BYTES` | 1048576 | 服務端設定：HTTP 端點 `/mcp` 的 `download` 以 base64 回傳的上限（位元組）。stdio 殼的 `download` 上限為 `documents.max_file_bytes` |
 
 密鑰只走環境變數或 `--env-file`，設定檔出現 token／secret 類的鍵會拒絕載入：
 
@@ -212,7 +215,8 @@ stdout 是 MCP 協定通道，log 一律寫 stderr（UTF-8）。設定錯誤時�
 `get(vault, ids, budget?)`、`list(vault, since?, topics?, cursor?, limit?, kinds?)`、
 `write(vault, title, body, topics?, links?, supersedes?, author?)`、
 `update(vault, id, expected_updated, title?, body?, topics?, links?, supersedes?, author?)`、
-`upload(path?, vault?, filename?, content_base64?)`、`status(vault?)`（共 10 個；與 HTTP 端點同一份定義）。
+`upload(path?, vault?, filename?, content_base64?)`、`download(vault, id, path?, overwrite?)`、
+`delete(vault, id, reason?, confirm_token?)`、`undelete(id)`、`status(vault?)`（共 13 個；與 HTTP 端點同一份定義）。
 
 - **目前 space**（A18）：殼行程持有、只在記憶體，新行程一律 `dev`；`space(action="set", value=...)`
   切換（不打服務）。其他工具沒有 space 參數，殼在每個 `/v1/*` 請求自動注入（`Shell._send`）；
@@ -236,6 +240,17 @@ stdout 是 MCP 協定通道，log 一律寫 stderr（UTF-8）。設定錯誤時�
   `path_not_allowed`、`file_not_found`、`not_a_file`、`too_large`、`read_failed`、`vault_required`。
   也可改傳 `filename`＋`content_base64`（與 `path` 擇一；HTTP 端點只能用這個）：檔名不可含路徑分隔或
   控制字元（`invalid_request`），base64 嚴格解碼（`invalid_request`），先以長度擋上限（`too_large`）
+- `delete(vault, id, reason?, confirm_token?)`／`undelete(id)`：依 id 前綴分派（`doc:` → 文件、`chunk:` 拒絕、
+  其餘 → note），直接轉 `/v1/{note,document}_{delete,undelete}`，刪除邏輯與兩段式確認全在服務端
+  （見 docs/ARCHITECTURE.md「兩段式確認」）。第一步回 `next_step` 提醒 agent 先取得使用者同意；
+  space 也綁在 token 內，兩步之間切換 space 會得 `invalid_confirm_token`。vault 刪除不開放給 MCP。
+  服務不可達時直接失敗（快照沒有簽章祕密與 blob）
+- `download(vault, id, path?, overwrite?)`：轉 `POST /v1/document_download`，寫檔前比對 sha256。本機寫入規則
+  在 `mcp/download.py`：與 `upload` 同一份白名單（殼工作目錄＋`mcp.upload_roots`）與路徑形式檢查，目標與父目錄
+  都以 realpath 比對；`path` 是既有目錄時寫進該目錄、省略時寫到殼工作目錄（檔名取服務給的原檔名，含分隔、
+  `:`、控制字元、Windows 保留名時改用 `document-<id>`）；父目錄不存在不自動建（`parent_not_found`）；既有檔
+  預設拒絕（`file_exists`，以 `open("xb")` 獨占建立），`overwrite=true` 才寫暫存檔再 `os.replace`。
+  錯誤碼另有 `not_a_file`、`too_large`、`hash_mismatch`、`blob_missing`、`blob_corrupt`、`write_failed`
 - `recall` 預設同時查 note 與文件段落（`kinds` 預設 `["note", "chunk"]`）；`get` 的 `ids` 可混 note id、
   `doc:…`（整份文件文字）、`chunk:…`（單段）；`list` 預設同時列 note 與文件（`kinds: ["note"|"document"]`）
 
@@ -324,7 +339,10 @@ token 放在 repo 外的 env 檔，不寫進 `.claude.json`：
 `mcp.toml` 至少設 `[mcp] snapshot_dir`，遠端再設 `base_url`。
 其他機器的完整安裝流程見 [guides/REMOTE-INSTALL.md](guides/REMOTE-INSTALL.md)。
 
-## 管理指令：刪除、換 space 與 blob 清理（不提供 MCP 工具）
+## 管理指令：刪除、換 space 與 blob 清理
+
+單則 note／單份文件的刪除與還原另有 MCP `delete`／`undelete`（轉 HTTP 管理端點）；刪 vault、換 space、
+blob 清理與墓碑清除不提供 MCP 工具。
 
 `python -m lore_vault.cli.admin [--db PATH] [--config FILE] <子指令>`；`--db` 缺省走 `database.path`
 （容器內即 `/data/lore.db`）。不遷移資料庫，schema 版本不符或 DB 檔不存在直接失敗（不建空檔）。
@@ -645,6 +663,10 @@ KEY=VALUE、只用標準庫解析；行程環境變數中同名鍵優先。
   ready 後補 chunk 向量（`embedding.*` 設定，含 keep_alive、每分鐘上限）；
   向量失敗以文件為單位記嘗試，達上限不再自動補（lexical 仍可命中）。每輪有動作印一行
   `文件本輪：抽取 完成 …／失敗 …／重試 …／放棄 …；向量 …。剩餘 待抽取 …、缺向量 chunk …`
+- 下載（`POST /v1/document_download`，body `{space, vault, id, max_bytes?}`）：回原始位元組與
+  `Content-Disposition`／`X-Lore-Vault-Sha256`；範圍同 get（範圍外、墓碑中 404）；`max_bytes` 依 metadata 先擋（413，
+  不讀 blob）；blob 遺失／雜湊不符 500 `blob_missing`／`blob_corrupt`。不另加 doctor 檢查：唯讀資料流，
+  blob 完整性已由 `documents.blob_exists` 對帳，讀取時 `BlobStore.read` 再驗一次（測試 `tests/api/test_document_download.py`）
 - recall／get／list：見 docs/ARCHITECTURE.md「MCP 介面」。快照（`GET /v1/snapshot`）明確排除文件表
   （`storage.snapshot.SNAPSHOT_EXCLUDED_TABLES`，產生時核對為空，否則拒絕產生）
 - 設定 `[documents]`：`blob_dir`、`max_file_bytes`（25MB）、`max_chars`（1000 萬）、`min_chars`（50，只套 pdf）、

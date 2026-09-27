@@ -114,6 +114,7 @@ def test_openapi_is_served_behind_auth(anon):
         "/v1/status",
         "/v1/vaults",
         "/v1/documents",
+        "/v1/document_download",
         "/v1/snapshot",
         "/v1/episodes",
         "/v1/concepts",

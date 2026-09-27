@@ -1,6 +1,6 @@
 """MCP 工具（A15／D12）：本地 stdio 殼與服務內建的 HTTP 端點 `/mcp` 共用這一份。
 
-十個工具一律轉發到服務 `/v1/*`：stdio 殼經網路打服務（不可達時讀本地快照降級）；
+十三個工具一律轉發到服務 `/v1/*`：stdio 殼經網路打服務（不可達時讀本地快照降級）；
 HTTP 端點（`mcp.http`）在服務行程內經 in-process ASGI 轉發到同一個 app，
 沿用呼叫端自己的認證 header（同一套 principal 判定）。
 
@@ -12,8 +12,19 @@ HTTP 端點（`mcp.http`）在服務行程內經 in-process ASGI 轉發到同一
 - HTTP 沒有快照降級；目前 space 依 MCP session（`mcp-session-id`）各自保存
 
 工具刻意只有 `space`、`vault_resolve`、`recall`、`ask`、`get`、`list`、`write`、
-`update`、`upload`、`status`；建 vault 併入 `vault_resolve(create=True)`，不另開工具。
-不暴露 chat／model／settings／source。
+`update`、`upload`、`download`、`delete`、`undelete`、`status`；建 vault 併入
+`vault_resolve(create=True)`，不另開工具。不暴露 chat／model／settings／source，
+也不開放刪 vault（只留給 UI 與管理指令）。
+
+`delete`／`undelete`：依 id 前綴分派（`doc:` → 文件、`chunk:` 拒絕、其餘 → note），
+直接轉 `/v1/{note,document}_{delete,undelete}`，殼不另寫刪除邏輯。刪除沿用服務端的
+兩段式確認（不帶 `confirm_token` 只規劃）；工具說明要求 agent 取得使用者同意後才送
+第二步。服務不可達時三個工具都直接失敗（快照沒有 blob 與簽章祕密）。
+
+`download`：轉 `POST /v1/document_download`（驗 sha256）。stdio 寫到 `upload_roots`
+白名單內的本機路徑（規則見 `mcp.download`，既有檔預設不覆寫）；HTTP 回
+`content_base64`，上限 `mcp.http_download_max_bytes`（殼帶 `max_bytes` 讓服務先擋，
+殼端收的時候再擋一次）。
 
 `ask`（D11）：薄殼轉發 `POST /v1/ask`，逾時用 `mcp.ask_timeout`（要等模型）。
 問答需要服務端模型，服務不可達時**不降級**（快照沒有模型），直接回工具錯誤。
@@ -43,6 +54,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import json
 import logging
 import os
@@ -54,6 +66,7 @@ from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
+from urllib.parse import unquote
 
 import anyio
 import httpx2
@@ -87,7 +100,18 @@ from lore_vault.storage.notes import count_notes
 from lore_vault.storage.timeutil import format_utc, parse_utc
 from lore_vault.storage.vaults import ALL_VAULTS, get_vault, validate_space
 
-from .client import ServiceClient, ServiceError, ServiceUnreachable
+from .client import (
+    DownloadTooLarge,
+    ServiceClient,
+    ServiceError,
+    ServiceUnreachable,
+)
+from .download import (
+    DownloadPathError,
+    resolve_download_path,
+    safe_filename,
+    write_download,
+)
 from .settings import ShellSettings
 from .snapshot import pull_concepts, pull_snapshot
 from .upload import UploadPathError, read_upload
@@ -104,6 +128,9 @@ TOOL_NAMES = (
     "write",
     "update",
     "upload",
+    "download",
+    "delete",
+    "undelete",
     "status",
 )
 SPACE_ACTIONS = ("get", "set")
@@ -120,6 +147,19 @@ SESSION_HEADER = "mcp-session-id"
 MAX_SESSION_SPACES = 1024
 # 上傳檔名上限（字元）
 MAX_UPLOAD_FILENAME = 255
+# 服務的文件／chunk id 前綴（其餘 id 一律視為 note）
+DOCUMENT_PREFIX = "doc:"
+CHUNK_PREFIX = "chunk:"
+KIND_NOTE = "note"
+KIND_DOCUMENT = "document"
+# 下載回應的 header（`api.routes.document_download`）
+SHA256_HEADER = "x-lore-vault-sha256"
+# delete 第一步（規劃）附給 agent 的下一步指示
+DELETE_NEXT_STEP = (
+    "尚未刪除。把 plan 給使用者看、取得明確同意後，才以相同的 vault／id／reason "
+    "加上 confirm_token 再呼叫一次 delete；不要自動連打兩步。token 5 分鐘內有效，"
+    "期間不要切換 space"
+)
 
 # 目前這次工具呼叫所屬的 MCP session 與要轉發的 header（`Shell.request_scope` 設定）
 _session_var: ContextVar[str | None] = ContextVar("lore_mcp_session", default=None)
@@ -145,6 +185,10 @@ INSTRUCTIONS = (
     "含檔名與 locator 位置），全文用 get 取 doc:／chunk: id。"
     "ask 會把 recall 到的 note 交模型整理成逐點回答；那只是片段的整理、信心有限，"
     "可參考但不可當作唯一事實來源，關鍵事實要用 get 核對原 note。"
+    "刪除用 delete，兩步式：不帶 confirm_token 只回規劃與 token（不會刪）；必須先把"
+    "規劃給使用者看、取得明確同意，才帶 token 再呼叫一次——不要自動連打兩步。"
+    "刪除會留墓碑，可用 undelete 以原 id 還原。文件原始檔用 download 寫到本機"
+    "（只限殼工作目錄或 mcp.upload_roots 之下，既有檔不覆寫除非 overwrite=true）。"
 )
 
 HTTP_INSTRUCTIONS = (
@@ -162,6 +206,10 @@ HTTP_INSTRUCTIONS = (
     "（kind=chunk），全文用 get 取 doc:／chunk: id。HTTP 端點沒有離線快照：服務連不上"
     "時工具直接失敗。ask 會把 recall 到的 note 交模型整理成逐點回答；那只是片段的整理、"
     "信心有限，關鍵事實要用 get 核對原 note。"
+    "刪除用 delete，兩步式：不帶 confirm_token 只回規劃與 token（不會刪）；必須先把"
+    "規劃給使用者看、取得明確同意，才帶 token 再呼叫一次——不要自動連打兩步。"
+    "刪除會留墓碑，可用 undelete 以原 id 還原。download 在 HTTP 端點以 "
+    "content_base64 回傳原始檔（有大小上限，超過請改用本地 stdio 殼或 UI 下載）。"
 )
 
 _HINTS = {
@@ -212,6 +260,38 @@ _HINTS = {
     "unsupported_format": (
         "支援 md、txt（含程式碼等純文字）、json、yaml、toml、pdf、docx、pptx"
     ),
+    "invalid_confirm_token": (
+        "confirm_token 必須搭配規劃時完全相同的 vault／id／reason（與同一個 space）"
+        "原樣送回；不確定就不帶 token 重新規劃，給使用者確認後再送"
+    ),
+    "confirm_token_expired": "token 已過期（5 分鐘）：重新規劃並再次取得使用者同意",
+    "plan_changed": (
+        "規劃後資料已變動、這次未刪除：把錯誤附的新 plan 給使用者看，同意後才以"
+        "附帶的新 confirm_token 重送"
+    ),
+    "not_restorable": (
+        "墓碑無法還原（見 reason：vault 已刪除、原始檔遺失、同內容已重新上傳等）"
+    ),
+    "not_found": (
+        "id 不在目前 space／vault 內；確認 id，或先用 space(action='set') 切換"
+    ),
+    "file_exists": "目的檔已存在：換一個 path，或確認後以 overwrite=true 覆寫",
+    "parent_not_found": "目的目錄不存在；下載不會自動建目錄",
+    "blob_missing": (
+        "服務端原始檔遺失；請使用者執行 doctor 檢查 documents.blob_exists"
+    ),
+    "blob_corrupt": (
+        "服務端原始檔雜湊不符；請使用者執行 doctor 檢查 documents.blob_exists"
+    ),
+    "hash_mismatch": "收到的內容與服務宣告的 sha256 不符，未寫入；重試一次",
+}
+
+DOWNLOAD_TOO_LARGE_HINTS = {
+    MODE_HTTP: (
+        "HTTP 端點以 base64 回傳、有大小上限（mcp.http_download_max_bytes）："
+        "改用本地 stdio 殼的 download（直接寫本機檔），或請使用者從 UI 下載"
+    ),
+    MODE_STDIO: "超過殼端上限（documents.max_file_bytes）；請使用者從 UI 下載",
 }
 
 
@@ -343,6 +423,21 @@ def _decode_upload(
             hint=_HINTS["too_large"],
         )
     return name, data
+
+
+def _disposition_filename(value: str | None) -> str | None:
+    """`Content-Disposition` 的檔名：優先 RFC 5987 的 `filename*=UTF-8''…`。"""
+    if not value:
+        return None
+    for part in value.split(";"):
+        key, _, raw = part.strip().partition("=")
+        if key.lower() == "filename*" and raw.lower().startswith("utf-8''"):
+            return unquote(raw[len("utf-8''") :])
+    for part in value.split(";"):
+        key, _, raw = part.strip().partition("=")
+        if key.lower() == "filename":
+            return raw.strip('"')
+    return None
 
 
 def _vault_payload(conn: sqlite3.Connection, key: str, space: str) -> dict[str, Any]:
@@ -972,6 +1067,154 @@ class Shell:
             result["path"] = source_path
         return result
 
+    # ── 刪除／還原／下載 ──
+
+    @staticmethod
+    def _item_kind(item_id: str, action: str) -> str:
+        """依 id 前綴分派：`doc:` → 文件；`chunk:` 拒絕（段落不能單獨操作）；
+        其餘 → note。"""
+        if not isinstance(item_id, str) or not item_id.strip():
+            raise _tool_error("invalid_request", "id 不可為空")
+        if item_id.startswith(CHUNK_PREFIX):
+            raise _tool_error(
+                "invalid_request",
+                f"chunk id 不能單獨{action}；請改用所屬文件的 doc: id",
+            )
+        return KIND_DOCUMENT if item_id.startswith(DOCUMENT_PREFIX) else KIND_NOTE
+
+    async def delete(
+        self,
+        vault: str,
+        id: str,
+        reason: str | None = None,
+        confirm_token: str | None = None,
+    ) -> dict[str, Any]:
+        """兩步式刪除（轉 `/v1/note_delete`／`/v1/document_delete`）：
+        不帶 token 只規劃。
+
+        刪除邏輯全在服務端；殼只分派與附下一步指示。服務不可達時直接失敗（不降級）。
+        """
+        kind = self._item_kind(id, "刪除")
+        path = "/v1/document_delete" if kind == KIND_DOCUMENT else "/v1/note_delete"
+        body = _compact(vault=vault, id=id, reason=reason, confirm_token=confirm_token)
+        try:
+            result = await self._post(path, body)
+        except ServiceUnreachable as exc:
+            raise self._write_unreachable(exc) from None
+        result["kind"] = kind
+        if not result.get("executed"):
+            result["next_step"] = DELETE_NEXT_STEP
+        else:
+            result["undelete_hint"] = "墓碑已寫入；需要還原時用 undelete(id=...)"
+        return result
+
+    async def undelete(self, id: str) -> dict[str, Any]:
+        """以墓碑還原（轉 `/v1/note_undelete`／`/v1/document_undelete`），
+        範圍為目前 space。"""
+        kind = self._item_kind(id, "還原")
+        path = "/v1/document_undelete" if kind == KIND_DOCUMENT else "/v1/note_undelete"
+        try:
+            result = await self._post(path, {"id": id})
+        except ServiceUnreachable as exc:
+            raise self._write_unreachable(exc) from None
+        result["kind"] = kind
+        return result
+
+    async def download(
+        self,
+        vault: str,
+        id: str,
+        path: str | None = None,
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        """取回文件原始檔（`/v1/document_download`）。stdio：寫到白名單內的本機路徑；
+        HTTP：回 `content_base64`（上限 `download_max_bytes`）。"""
+        if self._item_kind(id, "下載") != KIND_DOCUMENT:
+            raise _tool_error(
+                "invalid_request",
+                "download 只接受文件 id（doc:…）；note 全文用 get",
+            )
+        if self.http and path is not None:
+            raise _tool_error(
+                "path_not_supported",
+                "HTTP 端點不能寫你的檔案系統；省略 path，內容以 content_base64 回傳",
+                hint=DOWNLOAD_TOO_LARGE_HINTS[MODE_HTTP],
+            )
+        if not self.http and path is not None:
+            # 先擋不允許的路徑，不為注定寫不了的請求下載內容
+            self._download_target(path, "placeholder")
+        limit = self.settings.download_max_bytes
+        try:
+            data, headers = await self.client.post_download(
+                "/v1/document_download",
+                {"vault": vault, "id": id, "max_bytes": limit, "space": self.space},
+                max_bytes=limit,
+            )
+        except ServiceError as exc:
+            if exc.code == "too_large":
+                raise _tool_error(
+                    "too_large",
+                    exc.message,
+                    hint=DOWNLOAD_TOO_LARGE_HINTS[self.mode],
+                    http_status=exc.status,
+                    limit_bytes=limit,
+                ) from None
+            raise _from_service_error(exc) from None
+        except DownloadTooLarge as exc:
+            raise _tool_error(
+                "too_large",
+                str(exc),
+                hint=DOWNLOAD_TOO_LARGE_HINTS[self.mode],
+                limit_bytes=limit,
+            ) from None
+        except ServiceUnreachable as exc:
+            raise _tool_error(
+                DEGRADED_REASON,
+                f"服務不可達（{exc.detail}），download 需要服務端原始檔、無法降級",
+                hint="服務恢復後重試",
+            ) from None
+        sha = hashlib.sha256(data).hexdigest()
+        expected = headers.get(SHA256_HEADER)
+        if expected != sha:
+            raise _tool_error(
+                "hash_mismatch",
+                f"內容 sha256 {sha} 與服務宣告的 {expected!r} 不符，未寫入",
+                hint=_HINTS["hash_mismatch"],
+            )
+        filename = _disposition_filename(headers.get("content-disposition"))
+        meta: dict[str, Any] = {
+            "document_id": id,
+            "filename": filename,
+            "mime": headers.get("content-type"),
+            "size_bytes": len(data),
+            "sha256": sha,
+        }
+        if self.http:
+            meta["content_base64"] = base64.b64encode(data).decode("ascii")
+            return meta
+        target = self._download_target(path, safe_filename(filename, id))
+        try:
+            overwritten = write_download(target, data, overwrite=overwrite)
+        except DownloadPathError as exc:
+            raise _tool_error(exc.code, str(exc), hint=_HINTS.get(exc.code)) from None
+        meta["path"] = str(target)
+        meta["overwritten"] = overwritten
+        return meta
+
+    def _download_target(self, path: str | None, filename: str) -> Path:
+        try:
+            return resolve_download_path(
+                path, self.upload_roots(), cwd=self._cwd(), filename=filename
+            )
+        except DownloadPathError as exc:
+            hint = _HINTS.get(exc.code)
+            if exc.code == "path_not_allowed":
+                hint = (
+                    "只能寫到殼工作目錄或設定 mcp.upload_roots 底下；"
+                    "換一個目錄，或請使用者加入白名單"
+                )
+            raise _tool_error(exc.code, str(exc), hint=hint) from None
+
     def local_status(self) -> dict[str, Any]:
         """殼端可獨立判斷的狀態：快照對帳（不需要服務）。"""
         settings: dict[str, Any] = {
@@ -1037,7 +1280,7 @@ def _dump(result: dict[str, Any]) -> str:
 
 
 def build_server(shell: Shell) -> MCPServer:
-    """註冊十個工具。stdio 與 HTTP 共用同一份定義；只有 instructions 與 lifespan
+    """註冊十三個工具。stdio 與 HTTP 共用同一份定義；只有 instructions 與 lifespan
     依 `shell.mode` 不同（HTTP 沒有快照背景工作）。"""
 
     @asynccontextmanager
@@ -1303,6 +1546,60 @@ def build_server(shell: Shell) -> MCPServer:
         with shell.request_scope(ctx):
             return _dump(await shell.upload(path, vault, filename, content_base64))
 
+    async def download(
+        vault: Annotated[
+            str,
+            Field(description="vault key（文件所在的 vault；'*' 為目前 space 全部）"),
+        ],
+        id: Annotated[str, Field(description="文件 id（doc:…）")],
+        path: Annotated[
+            str | None,
+            Field(
+                description="只限本地 stdio 殼：寫入的本機路徑（檔案或既有目錄；絕對，"
+                "或相對於殼的工作目錄），必須在殼工作目錄或 mcp.upload_roots 之下，"
+                "不可含 '..'；省略時以原檔名寫到殼工作目錄。HTTP 端點不接受"
+            ),
+        ] = None,
+        overwrite: Annotated[
+            bool,
+            Field(description="目的檔已存在時是否覆寫；預設 false（已存在就回錯誤）"),
+        ] = False,
+        ctx: Context | None = None,
+    ) -> str:
+        with shell.request_scope(ctx):
+            return _dump(await shell.download(vault, id, path, overwrite))
+
+    async def delete(
+        vault: Annotated[str, Field(description="vault key（單一 vault，不可 '*'）")],
+        id: Annotated[
+            str,
+            Field(description="要刪的 note id，或文件 id（doc:…）；chunk id 不接受"),
+        ],
+        reason: Annotated[
+            str | None, Field(description="刪除原因（記在墓碑）；省略用預設")
+        ] = None,
+        confirm_token: Annotated[
+            str | None,
+            Field(
+                description="第二步才帶：第一步回傳的 confirm_token。只有在使用者看過"
+                "規劃並明確同意後才可帶上；其餘參數必須與第一步完全相同"
+            ),
+        ] = None,
+        ctx: Context | None = None,
+    ) -> str:
+        with shell.request_scope(ctx):
+            return _dump(await shell.delete(vault, id, reason, confirm_token))
+
+    async def undelete(
+        id: Annotated[
+            str,
+            Field(description="已刪除的 note id 或文件 id（doc:…），同刪除時的 id"),
+        ],
+        ctx: Context | None = None,
+    ) -> str:
+        with shell.request_scope(ctx):
+            return _dump(await shell.undelete(id))
+
     async def status(
         vault: Annotated[
             str | None, Field(description="另附該 vault 的筆數與最近更新")
@@ -1377,6 +1674,31 @@ def build_server(shell: Shell) -> MCPServer:
             "mcp.upload_roots 之下的檔案），或 filename + content_base64（HTTP 端點"
             "只能用這個）。服務不可達時直接失敗。"
         ),
+        "download": (
+            "取回已上傳文件的原始檔（上傳時的位元組，服務端驗過 sha256）。"
+            "本地 stdio 殼：寫到本機 path（只限殼工作目錄或 mcp.upload_roots 之下；"
+            "目的檔已存在時預設拒絕，要覆寫須 overwrite=true），回寫入的 path、"
+            "filename、mime、size_bytes、sha256。HTTP 端點：不收 path，回 "
+            "content_base64 與同樣的 metadata；超過大小上限（預設 1MB）回 too_large，"
+            "請改用 stdio 殼或 UI 下載。只看得到目前 space；已刪除（墓碑中）的文件要先 "
+            "undelete。服務不可達時直接失敗。"
+        ),
+        "delete": (
+            "刪除一則 note 或一份文件（id 以 doc: 開頭為文件，其餘為 note）。兩步式："
+            "(1) 不帶 confirm_token → 只回 plan 與 confirm_token（唯讀，不會刪）；"
+            "(2) 把 plan 給使用者看、取得明確同意後，才以完全相同的參數加上 "
+            "confirm_token 再呼叫一次才真正刪除。不要自動連打兩步；"
+            "token 5 分鐘內有效，資料在兩步之間變動會回 plan_changed"
+            "（附新 plan 與新 token，仍需使用者再確認）。"
+            "刪除會寫墓碑，可用 undelete 還原；文件的原始檔不會被刪。不能刪整個 vault。"
+        ),
+        "undelete": (
+            "從墓碑還原先前刪除的 note 或文件（同一個 id，範圍為目前 space）。"
+            "note 以原內容還原（v12 前的舊墓碑沒有內容快照，只移除墓碑，"
+            "見 restored）；文件以仍在的原始檔重建並重新排入抽取（status 回 "
+            "pending）。vault 已刪除、原始檔遺失或同內容已重新上傳時回 "
+            "not_restorable。"
+        ),
         "status": (
             "服務健康狀態（doctor 對帳、補算積壓、schema 版本）。本地 stdio 殼另附"
             "本地快照狀態（shell），服務不可達時仍回傳殼端狀態並標 degraded；"
@@ -1393,6 +1715,9 @@ def build_server(shell: Shell) -> MCPServer:
         ("write", write),
         ("update", update),
         ("upload", upload),
+        ("download", download),
+        ("delete", delete),
+        ("undelete", undelete),
         ("status", status),
     ):
         # 非結構化輸出：只回一份緊湊 JSON 文字，不重複送 structuredContent
