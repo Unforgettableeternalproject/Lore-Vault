@@ -28,7 +28,9 @@
 - **重新部署前**：本機 `.env` 已補 `LORE_VAULT_PRINCIPAL=UEPBernie`（2026-09-27）；缺了新 note 會記成 `owner`，doctor `notes.principal_agreement` 會 warn
 - 部署驗證：健康、doctor 0 fail、`notes.principal_agreement` pass（UEPBernie）、`/mcp` 未帶 token 回 401；部署前備份 `lore-20260927T110517066Z.db`
 - 同輪 UI：檢索頁 Ask 分頁、筆記／文件篩選對齊記憶層（`/v1/list` 新參數）
-- 未實測：Linux 的 secrets 權限、ollama profile 拉模型閘門、cloudflared 連線、`claude mcp add --transport http` 實連
+- 同輪 MCP：`delete`（兩步式 confirm_token）／`undelete`／`download`（新端點 `/v1/document_download`；HTTP 模式 base64 上限 `mcp.http_download_max_bytes` 1 MiB），12:07 備份後部署
+- 自架實測（隔離 compose 專案）：首次啟動、env 優先、ollama profile、HTTP MCP、tunnel 無 token 不影響服務皆 PASS；安裝器兩種模式實連成功，實測抓到的自檢誤報與 `--rollback --yes` 已修
+- 未實測：`LORE_VAULT_BIND`（Docker Desktop 限制）、CF Access 路徑、tunnel 實連；原列：Linux 的 secrets 權限、ollama profile 拉模型閘門、cloudflared 連線、`claude mcp add --transport http` 實連
 - 合併 `main` 前待辦：LICENSE（授權未定）；README（英／繁中）依 Chatroom 格式重寫但仍不追蹤，開頭對話為草稿待艾斯維爾改寫；沒有預建映像（CI 未做），目前是 `up -d --build`
 
 ## 下一輪
