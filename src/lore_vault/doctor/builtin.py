@@ -136,6 +136,13 @@ def enrich_backlog(ctx: DoctorContext) -> CheckResult:
     return _to_result(rec)
 
 
+def enrich_queue_time(ctx: DoctorContext) -> CheckResult:
+    try:
+        return _to_result(storage_enrichment.queue_time_integrity(ctx.require("db")))
+    except storage_enrichment.MissingEnrichmentTable as exc:
+        raise CheckSkipped(str(exc)) from None
+
+
 # ── 匯入對帳（資源 "db"；設定 "import_source"：來源名稱，預設 open-notebook）──
 
 DEFAULT_IMPORT_SOURCE = "open-notebook"
@@ -410,6 +417,11 @@ def default_registry() -> Registry:
             "enrich.backlog",
             enrich_backlog,
             "待補算積壓；最舊一筆等太久為 warn（worker 可能沒在跑）",
+        ),
+        (
+            "enrich.queue_time",
+            enrich_queue_time,
+            "每則 note 都有補算入列時間（缺少會讓積壓等待時間少算）",
         ),
     ):
         registry.add(Check(name, "enrich", func, description))

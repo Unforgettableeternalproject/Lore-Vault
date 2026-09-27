@@ -19,7 +19,7 @@ from . import fts
 from .db import transaction
 from .errors import DuplicateRecord, NotFound, VaultRequired
 from .filters import contains_clause, filter_text
-from .timeutil import next_after, normalize_utc
+from .timeutil import next_after, normalize_utc, utc_now
 from .vaults import resolve_read, resolve_write, vault_clause
 
 # update_note_if 允許改動的欄位
@@ -107,8 +107,8 @@ def insert_note(
             """
             INSERT INTO notes (id, vault, title, summary, body, topics, links,
                                supersedes, created, updated, author, principal,
-                               updated_by, updated_by_principal)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                               updated_by, updated_by_principal, enqueued)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 stored.id,
@@ -125,6 +125,8 @@ def insert_note(
                 stored.principal,
                 stored.updated_by,
                 stored.updated_by_principal,
+                # 補算入列時間一律用牆鐘：匯入與還原保留舊 `updated`，不能拿它當入列時間
+                utc_now(),
             ),
         )
         seq = cursor.lastrowid
@@ -392,7 +394,7 @@ def update_note_if(
             """
             UPDATE notes SET title = ?, summary = ?, body = ?, topics = ?, links = ?,
                              supersedes = ?, updated = ?, updated_by = ?,
-                             updated_by_principal = ?
+                             updated_by_principal = ?, enqueued = ?
             WHERE seq = ? AND updated = ?
             """,
             (
@@ -405,6 +407,8 @@ def update_note_if(
                 updated.updated,
                 updated.updated_by,
                 updated.updated_by_principal,
+                # 新版本重新入列（不用 `now`：匯入更新傳的是來源的舊時間）
+                utc_now(),
                 row["seq"],
                 expected_updated,
             ),

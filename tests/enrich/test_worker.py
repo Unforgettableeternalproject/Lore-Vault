@@ -389,7 +389,11 @@ def test_batch_limit(conn, add_note, clock, http):
 
 def test_backlog_warns_only_when_oldest_waits_too_long(conn, add_note, clock):
     assert doctor(conn, now=clock())["enrich.backlog"].status is Status.PASS
-    add_note("n-1", ts="2026-09-01T00:00:00.000Z")  # clock 在 09-02：已等 1 天
+    add_note("n-1")
+    # 入列時間是寫入當下的牆鐘；改成 09-01 模擬已等 1 天（clock 在 09-02）
+    conn.execute(
+        "UPDATE notes SET enqueued = '2026-09-01T00:00:00.000Z' WHERE id = 'n-1'"
+    )
     fresh = doctor(conn, now=clock(), enrich_backlog_max_age=10**6)["enrich.backlog"]
     assert fresh.status is Status.PASS
     assert fresh.counts["summary_pending"] == 1
@@ -399,6 +403,43 @@ def test_backlog_warns_only_when_oldest_waits_too_long(conn, add_note, clock):
     assert stale.counts["oldest_age_seconds"] == 86400
 
 
+def test_backlog_age_uses_enqueue_time_not_old_updated(conn, add_note):
+    """舊 PM 匯入的 note 保留一年前的 `updated`；入列時間要是寫入當下，
+    否則 backlog 會回報一年的等待時間並 warn。"""
+    from datetime import UTC, datetime
+
+    note = add_note("n-old", ts="2025-09-01T00:00:00.000Z")
+    result = doctor(conn, now=datetime.now(UTC), enrich_backlog_max_age=3600)
+    backlog = result["enrich.backlog"]
+    assert backlog.counts["summary_pending"] == 1
+    assert backlog.counts["oldest_age_seconds"] < 60
+    assert backlog.status is Status.PASS
+    # 以舊時間（`now=`，匯入更新的寫法）更新：新版本仍以牆鐘重新入列
+    updated = update_note_if(
+        conn,
+        VAULT,
+        "n-old",
+        note.updated,
+        {"body": "新內文"},
+        space="dev",
+        now="2025-09-02T00:00:00.000Z",
+    )
+    assert updated is not None and updated.updated.startswith("2025-09-02")
+    again = doctor(conn, now=datetime.now(UTC), enrich_backlog_max_age=3600)
+    assert again["enrich.backlog"].counts["oldest_age_seconds"] < 60
+    assert again["enrich.queue_time"].status is Status.PASS
+
+
+def test_queue_time_check_fails_when_enqueued_missing(conn, add_note):
+    """寫入路徑漏填 enqueued 時 min() 會默默略過；doctor 必須紅。"""
+    add_note("n-1")
+    assert doctor(conn)["enrich.queue_time"].status is Status.PASS
+    conn.execute("UPDATE notes SET enqueued = NULL WHERE id = 'n-1'")
+    result = doctor(conn)["enrich.queue_time"]
+    assert result.status is Status.FAIL
+    assert result.counts["missing_enqueued"] == 1
+
+
 def test_enrich_checks_skip_on_unmigrated_db(tmp_path):
     raw = sqlite3.connect(tmp_path / "v1.db", isolation_level=None)
     try:
@@ -406,6 +447,7 @@ def test_enrich_checks_skip_on_unmigrated_db(tmp_path):
         results = doctor(raw)
         assert results["enrich.failed"].status is Status.SKIPPED
         assert results["enrich.backlog"].status is Status.SKIPPED
+        assert results["enrich.queue_time"].status is Status.SKIPPED
     finally:
         raw.close()
 

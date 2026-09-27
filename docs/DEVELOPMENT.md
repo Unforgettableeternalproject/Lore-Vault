@@ -114,6 +114,10 @@ uv run uvicorn --factory lore_vault.api.app:create_app --host 127.0.0.1 --port 8
   關閉路徑：SIGTERM 經 tini 轉給 uvicorn → lifespan 結束 → worker `stop()`，
   等執行緒結束最多 5 秒（進行中的模型呼叫無法中斷；compose `stop_grace_period` 需大於此值）。
   `/v1/status` 的 `ok` 同時反映 doctor 與 worker 是否起得來（`fatal_error`）。
+- 補算對帳（doctor 分類 `enrich`）：`enrich.failed`（超過重試上限，fail）、`enrich.backlog`（最舊一筆
+  等超過 1 小時為 warn；等待時間從 `notes.enqueued` 起算——服務寫入目前版本的牆鐘時間，schema v14，
+  匯入或還原的舊 note 不會因保留原始 `updated` 而顯示極大值）、`enrich.queue_time`（有 note 缺
+  `enqueued` 為 fail：寫入路徑漏填時 backlog 的 min() 會默默略過；測試 `tests/enrich/test_worker.py`）
 - recall 與 write 查重的 embedding 用短逾時 `embedding.query_timeout`（預設 3 秒），
   逾時即降級為只走 lexical 並標 `degraded`；背景補算仍用 `embedding.timeout`。
 - 冷啟動：Ollama 載入 bge-m3 約 2 秒，實際閒置卸載後常超過 `query_timeout`。三道處理：

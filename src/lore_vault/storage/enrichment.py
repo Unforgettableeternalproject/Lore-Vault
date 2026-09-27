@@ -6,6 +6,8 @@
   不覆蓋新版本。
 - 寫回 summary **不推進 `updated`**：summary 是衍生資料，`updated` 是樂觀鎖版本
   與列表排序鍵，背景寫入推版本會讓 agent 手上的 `expected_updated` 無故失效。
+- 入列時間是 `notes.enqueued`（schema v14）：服務寫入目前版本的牆鐘時間。不用
+  `updated`——舊 PM 匯入與取消刪除保留原始 `updated`，會算出極大的等待時間。
 """
 
 from __future__ import annotations
@@ -219,8 +221,12 @@ def _has_table(conn: sqlite3.Connection) -> bool:
     )
 
 
+def _has_enqueued(conn: sqlite3.Connection) -> bool:
+    return any(row[1] == "enqueued" for row in conn.execute("PRAGMA table_info(notes)"))
+
+
 class MissingEnrichmentTable(LookupError):
-    """資料庫尚未遷移到含 `note_enrichment` 的版本。"""
+    """資料庫尚未遷移到含 `note_enrichment`（或 `notes.enqueued`）的版本。"""
 
 
 def failed_enrichments(conn: sqlite3.Connection) -> Reconciliation:
@@ -263,16 +269,19 @@ def enrichment_backlog(
     """尚待補算（未標記失敗）的項目數與最舊等待時間。
 
     有積壓本身是正常的（write 不等 LLM）；最舊一筆等超過 `max_age_seconds`
-    代表 worker 沒在跑或跟不上，記 warn。以 note 的 `updated` 當入列時間。
+    代表 worker 沒在跑或跟不上，記 warn。入列時間取 `notes.enqueued`
+    （NULL 會被 min() 略過，由 `queue_time_integrity` 另行對帳）。
     """
     if not _has_table(conn):
         raise MissingEnrichmentTable("缺少 note_enrichment 表（schema 未遷移）")
+    if not _has_enqueued(conn):
+        raise MissingEnrichmentTable("缺少 notes.enqueued 欄（schema 未遷移到 v14）")
     counts: dict[str, int] = {}
     oldest: str | None = None
     for kind in KINDS:
         row = conn.execute(
             f"""
-            SELECT count(*), min(n.updated) FROM notes n
+            SELECT count(*), min(n.enqueued) FROM notes n
             LEFT JOIN note_enrichment e ON e.note_seq = n.seq AND e.kind = ?
             WHERE {_missing_clause(kind)}
               AND NOT (e.note_seq IS NOT NULL AND e.status = 'failed'
@@ -297,3 +306,25 @@ def enrichment_backlog(
             counts,
         )
     return Reconciliation("pass", f"{total} 項待補算，最舊等 {age} 秒", counts)
+
+
+def queue_time_integrity(conn: sqlite3.Connection) -> Reconciliation:
+    """每則 note 都要有入列時間（`notes.enqueued`）。
+
+    非零為 fail：某條寫入路徑漏填時，`enrichment_backlog` 的 min() 會默默略過這些
+    note，積壓等待時間就少算、worker 停擺也看不出來。
+    """
+    if not _has_enqueued(conn):
+        raise MissingEnrichmentTable("缺少 notes.enqueued 欄（schema 未遷移到 v14）")
+    rows = conn.execute(
+        "SELECT vault, id FROM notes WHERE enqueued IS NULL ORDER BY seq"
+    ).fetchall()
+    counts = {"missing_enqueued": len(rows)}
+    if not rows:
+        return Reconciliation("pass", "每則 note 都有補算入列時間", counts)
+    return Reconciliation(
+        "fail",
+        f"{len(rows)} 則 note 缺補算入列時間（有寫入路徑漏填 enqueued）",
+        counts,
+        tuple(f"{r[0]}/{r[1]}" for r in rows[:MAX_DETAILS]),
+    )

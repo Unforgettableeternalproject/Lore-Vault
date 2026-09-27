@@ -71,6 +71,7 @@
 | `principal` | 服務依憑證判定的主體（A22）：**不可由請求指定**（body 帶了 422）。Bearer 依 `api.principals` 的「憑證 → principal」對照，目前唯一的 token 對應 `LORE_VAULT_PRINCIPAL`（D12，預設 `owner`；本機現行部署設 `UEPBernie` 與 Eternity 帳號及 v13 遷移結果一致），日後一 token 一 principal；UI session 的 principal 是登入帳號的 username（A23；首次啟動建立的管理員預設同 principal）。doctor `notes.principal_agreement` 在既有 note 的 principal 不含設定值時 warn（漏設 env 的提醒）。DB 欄位可為 NULL、無 DEFAULT，儲存層 `insert_note` 拒收缺 principal，doctor `notes.attribution` 對帳 |
 | `updated_by`, `updated_by_principal` | 最後一次寫入（建立或修改）者的自報名與 principal；建立時同 `author`／`principal`。`update` 的 `author` 參數寫進這裡（未填也記 null，不沿用上一位），原 `author` 不變 |
 | `created`, `updated` | |
+| `enqueued` | 內部欄位（schema v14，不對外回傳）：服務寫入目前版本的牆鐘時間（新增、更新、取消刪除都重設），當作背景補算的入列時間。不用 `updated`——舊 PM 匯入與還原保留原始 `updated`，doctor `enrich.backlog` 會算出極大的等待時間。v14 遷移回填：當下待補算的 note 為遷移時間（真正的入列時間已無從得知；原生 note 若真的卡住，等待時間在升級當下歸零一次），其餘沿用 `updated`。doctor `enrich.queue_time`：有 note 缺值為 fail |
 
 links 合併規則（呼叫端明傳的 links 不驗存在性，維持舊行為）：
 - `write`：links = 明傳值（在前）∪ body 解析出的 id，去重保序
