@@ -211,6 +211,7 @@ Ollama 另裝了 `nomic-embed-text`，PM 未使用。
    - `vault_resolve` 不能用 `cwd` 推算，改收 `remote_url`（客戶端自己跑 `git remote get-url origin`）或直接給 `key`
    - `upload` 收檔案內容（檔名＋base64），不收本機路徑
    - 沒有 degraded 快照（服務不可達時 HTTP MCP 本身就連不上）
+   - 目前 space 依 MCP session 保存；無 session 的客戶端 `space(action="set")` 回 `session_required`，只能用 `dev`，需要 lore／personal 時改用 stdio 殼（維持 A18，艾斯維爾 2026-09-27）
 2. **身分**：仍是單一使用者，principal 名稱可設定（`LORE_VAULT_PRINCIPAL`，預設 `owner`）；多 token 等 A22 的共享再做。遷移 v12／v13 的歷史字面值不動；本機現行部署以 `.env` 設 `LORE_VAULT_PRINCIPAL=UEPBernie` 維持相容，doctor 檢查設定值與既有 note 的 principal 是否一致。
 3. **首次啟動**：env 優先，缺少就自動產生。
    - API token：`LORE_VAULT_API_TOKEN` 未設時首次啟動產生，存 `/data/secrets/api-token`（0600），log 印一次
