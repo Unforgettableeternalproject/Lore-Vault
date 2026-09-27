@@ -22,7 +22,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from lore_vault.config import Secret
 
-from .principals import Principals, set_principal
+from .principals import AUTH_UI, Principals, set_principal
 from .ui_auth import UiAuth, has_ui_header, read_cookie
 
 PUBLIC_PATHS = frozenset({"/healthz"})
@@ -111,7 +111,12 @@ class BearerAuthMiddleware:
             )
             if info is not None:
                 if has_ui_header(scope):
-                    set_principal(scope, info.principal)
+                    set_principal(
+                        scope,
+                        info.principal,
+                        method=AUTH_UI,
+                        display=info.display_name,
+                    )
                     await self.app(scope, receive, send)
                     return
                 response = JSONResponse(CSRF_BODY, status_code=403)

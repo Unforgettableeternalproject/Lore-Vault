@@ -21,6 +21,7 @@ interface Submission {
 // 問答專屬錯誤碼（服務端 ask_*）；其餘錯誤沿用共用的 describeError
 const ASK_ERROR_TEXT: Record<string, string> = {
   ask_not_configured: '服務沒有設定問答模型，暫時無法使用問答',
+  ask_disabled: '問答已由管理者在設定頁關閉；可到「連線設定」重新開啟',
   ask_provider_error: '問答模型服務連不上或回應異常',
   ask_timeout: '問答模型逾時沒有回應',
   ask_invalid_output: '問答模型回傳的內容無法解析',
@@ -258,7 +259,7 @@ function AskErrorView({ error, onRetry }: { error: unknown; onRetry: () => void 
     return (
       <div class="zone-state zone-state--error" role="alert">
         {ASK_ERROR_TEXT[error.code]}（{error.code}）
-        {error.code !== 'ask_not_configured' && (
+        {error.code !== 'ask_not_configured' && error.code !== 'ask_disabled' && (
           <button type="button" onClick={onRetry}>
             重試
           </button>

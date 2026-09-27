@@ -1,7 +1,7 @@
 """spike 接入端點（階段 8）：episode 收料、主機管線讀寫 concept、注入 side-car。
 
 - `POST /v1/episodes`：客戶端 spool 推送；逐筆結果，冪等；vault 不存在時自動建立
-  （只限這條路徑，notes write 仍不自動建）
+  （只限這條路徑，notes write 仍不自動建）。由 `episodes.ingest` 控制，預設關閉（D13）
 - `GET /v1/episodes`：主機管線分頁讀取（vault 必填，跨 vault 明示 `"*"`）
 - `GET /v1/concepts/export`：與 spike `concepts.json` 同格式（PreToolUse scorer 的快照）
 - `POST /v1/concepts`：主機管線批次 upsert／刪除（整批成功或整批不寫）；未帶 vault 的
@@ -60,7 +60,7 @@ from lore_vault.storage.vaults import (
     resolve_write,
 )
 
-from .errors import error_body
+from .errors import EpisodeIngestDisabled, error_body
 from .state import AppState
 
 router = APIRouter(prefix="/v1")
@@ -156,7 +156,15 @@ def post_episodes(request: Request, req: EpisodeBatch) -> dict[str, Any]:
 
     收料不可拒收：含 NUL 等禁用控制字元（舊客戶端沒有先清理）時換成可見形式再寫入，
     該筆結果標 `sanitized: true` 與替換數 `sanitized_chars`。清理是冪等的，新客戶端
-    送來已清理的同一輪會得到 duplicate。"""
+    送來已清理的同一輪會得到 duplicate。
+
+    收料開關（`episodes.ingest`，D13，預設關閉）：關閉時整批 403
+    `episode_ingest_disabled`、不寫任何東西。讀取（GET、episode_summary）不受影響。"""
+    if not _state(request).runtime.current().episodes.ingest:
+        raise EpisodeIngestDisabled(
+            "服務未開啟 episode 收料（設定 episodes.ingest）；"
+            "紀錄留在客戶端本機，開啟後會自動補推"
+        )
     _check_batch("episodes", req.episodes, EPISODE_BATCH_MAX)
     results: list[dict[str, Any]] = []
     created_vaults: list[str] = []
@@ -229,7 +237,9 @@ def get_episodes(
     cursor: str | None = None,
     limit: int = Query(EPISODE_PAGE_DEFAULT, ge=1, le=EPISODE_PAGE_MAX),
 ) -> dict[str, Any]:
-    """依 (started_at, seq) 由舊到新分頁；每筆是 Episode dict 另加凍結的 `vault`。"""
+    """依 (started_at, seq) 由舊到新分頁；每筆是 Episode dict 另加凍結的 `vault`。
+
+    不受收料開關影響：已收進來的資料照常可讀（主機管線 `--pull-episodes` 要能拉完）。"""
     decoded = _decode_episode_cursor(cursor) if cursor is not None else None
     with _state(request).connection() as conn:
         rows, next_cursor = records.list_episode_rows(

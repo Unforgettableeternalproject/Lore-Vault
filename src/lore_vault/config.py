@@ -112,6 +112,8 @@ class SummaryConfig:
 class AskConfig:
     """`ask()`（D11）：recall 的 note 片段交 LLM 整理成逐點回答。"""
 
+    # 關閉時 `/v1/ask` 回 503 `ask_disabled`（執行期可由 UI 設定頁覆寫，D13）
+    enabled: bool = True
     provider: str = "openai"
     base_url: str = "https://api.openai.com/v1"
     model: str = "gpt-6-luna"
@@ -217,6 +219,17 @@ class DocumentsConfig:
 
 
 @dataclass(frozen=True)
+class EpisodesConfig:
+    """episode 收料（D13）。"""
+
+    # 服務是否接受 `POST /v1/episodes`。預設關閉：自架者不會意外把對話原文集中到
+    # 服務上；本機部署以 `LORE_VAULT_EPISODES_INGEST=true` 打開。關閉時回 403
+    # `episode_ingest_disabled`，客戶端 spool 留在本機、拉長退避（見 hooks.spool）。
+    # 執行期可由 UI 設定頁覆寫（`runtime_settings`）
+    ingest: bool = False
+
+
+@dataclass(frozen=True)
 class UiConfig:
     """使用者 UI（A21）：靜態檔位置與本地身分驗證（session cookie、帳號密碼登入）。
 
@@ -255,6 +268,7 @@ class Config:
     mcp: McpConfig = field(default_factory=McpConfig)
     documents: DocumentsConfig = field(default_factory=DocumentsConfig)
     ui: UiConfig = field(default_factory=UiConfig)
+    episodes: EpisodesConfig = field(default_factory=EpisodesConfig)
 
 
 _SECTIONS: dict[str, type] = {
@@ -268,6 +282,7 @@ _SECTIONS: dict[str, type] = {
     "mcp": McpConfig,
     "documents": DocumentsConfig,
     "ui": UiConfig,
+    "episodes": EpisodesConfig,
 }
 
 # 布林設定可接受的寫法（環境變數是字串；TOML 可直接寫 true／false）
@@ -390,6 +405,11 @@ def load_config(
     config = Config(**sections)
     _validate(config)
     return config
+
+
+def validate_config(config: Config) -> None:
+    """跨欄位與範圍規則（載入時與套用執行期覆寫後都跑）。違反拋 `ConfigError`。"""
+    _validate(config)
 
 
 def _validate(config: Config) -> None:

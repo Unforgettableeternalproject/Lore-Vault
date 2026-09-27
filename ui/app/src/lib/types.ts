@@ -465,3 +465,55 @@ export interface AskResult {
   latency_ms: { retrieval: number; generation: number | null; total: number };
   notice: string;
 }
+
+// ── 執行期服務設定（GET /v1/settings；只允許 UI session）──
+
+export type SettingType = 'bool' | 'int' | 'float';
+export type SettingValue = boolean | number;
+
+export interface SettingItem {
+  key: string;
+  type: SettingType;
+  /** 分類代號（對應 categories 的 id） */
+  category: string;
+  label: string;
+  description: string;
+  min: number | null;
+  max: number | null;
+  unit: string | null;
+  /** 目前生效的值 */
+  value: SettingValue;
+  /** 設定檔／環境變數的值（還原預設後會回到它） */
+  default: SettingValue;
+  source: 'default' | 'override';
+  override: { updated: string; updated_by: string } | null;
+}
+
+export interface SettingsAuditEntry {
+  seq: number;
+  at: string;
+  key: string;
+  action: 'set' | 'reset';
+  old_value: SettingValue;
+  new_value: SettingValue;
+  principal: string;
+  display: string | null;
+}
+
+export interface SettingsResult {
+  categories: { id: string; label: string }[];
+  items: SettingItem[];
+  /** 資料庫裡不合法、執行期被略過的覆寫（健康檢查會標紅） */
+  invalid_overrides: { key: string; reason: string; updated: string }[];
+  /** 最近的修改紀錄（新到舊） */
+  audit: SettingsAuditEntry[];
+  /** 修改／還原回應才有：這次寫入的紀錄 */
+  changed?: SettingsAuditEntry[];
+}
+
+/** `invalid_setting` 錯誤的逐項明細 */
+export interface SettingError {
+  key: string;
+  code: string;
+  message: string;
+}

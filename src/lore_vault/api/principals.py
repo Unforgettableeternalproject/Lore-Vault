@@ -25,6 +25,11 @@ from lore_vault.config import Secret
 from lore_vault.schema import DEFAULT_PRINCIPAL
 
 SCOPE_KEY = "lore_principal"
+# 認證方式（D13：執行期設定只允許 UI session）與 UI 登入者的顯示名稱（稽核用）
+AUTH_METHOD_KEY = "lore_auth_method"
+DISPLAY_KEY = "lore_display_name"
+AUTH_BEARER = "bearer"
+AUTH_UI = "ui"
 
 
 class Principals:
@@ -57,9 +62,28 @@ class Principals:
         return found
 
 
-def set_principal(scope: Scope, principal: str) -> None:
+def set_principal(
+    scope: Scope,
+    principal: str,
+    *,
+    method: str = AUTH_BEARER,
+    display: str | None = None,
+) -> None:
     state = scope.setdefault("state", {})
     state[SCOPE_KEY] = principal
+    state[AUTH_METHOD_KEY] = method
+    state[DISPLAY_KEY] = display
+
+
+def auth_method_of(request: Request) -> str | None:
+    """認證中介層記下的認證方式（`bearer`／`ui`）；未經認證為 None。"""
+    method = request.scope.get("state", {}).get(AUTH_METHOD_KEY)
+    return method if isinstance(method, str) else None
+
+
+def display_of(request: Request) -> str | None:
+    display = request.scope.get("state", {}).get(DISPLAY_KEY)
+    return display if isinstance(display, str) else None
 
 
 def principal_of(request: Request) -> str:

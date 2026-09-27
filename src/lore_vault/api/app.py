@@ -38,6 +38,7 @@ from .manage import router as manage_router
 from .principals import Principals
 from .routes import router
 from .settings import ApiSettings, load_settings, validate_token
+from .settings_admin import router as settings_router
 from .spike import router as spike_router
 from .state import AppState
 from .ui import UiSecurityHeadersMiddleware, static_app
@@ -66,10 +67,9 @@ def _configure_logging() -> None:
 def _purge_login_log(state: AppState, ui_auth: UiAuth) -> None:
     """啟動時清除過期的 UI 登入紀錄（A23；每次登入嘗試也會順手清）。"""
     now = datetime.fromtimestamp(ui_auth.clock(), UTC)
+    retention = state.runtime.current().ui.login_log_retention_days
     with state.connection() as conn:
-        removed = ui_login.purge_log(
-            conn, now=now, retention_days=ui_auth.login_log_retention_days
-        )
+        removed = ui_login.purge_log(conn, now=now, retention_days=retention)
     if removed:
         logging.getLogger("lore_vault.api.ui").info("清除過期登入紀錄 %d 筆", removed)
 
@@ -148,6 +148,7 @@ def create_app(
     app.include_router(router)
     app.include_router(spike_router)
     app.include_router(manage_router)
+    app.include_router(settings_router)
     # /ui/api/* 必須在 /ui 靜態掛載之前註冊（Starlette 依註冊順序比對）
     app.include_router(build_ui_router())
     if ui_static is not None:

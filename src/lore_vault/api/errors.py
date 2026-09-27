@@ -35,6 +35,7 @@ from lore_vault.storage.errors import (
     VaultRequired,
 )
 from lore_vault.storage.manage import AliasConflict, CannotRemoveKey, RetryRefused
+from lore_vault.storage.settings_store import InvalidSettings
 
 CREATE_VAULT_HINT = (
     "以 POST /v1/vaults 建立（key、display；key 由客戶端用 lore_vault.binding 算出），"
@@ -56,6 +57,17 @@ class VaultExists(Exception):
     def __init__(self, message: str, existing: dict[str, Any]) -> None:
         super().__init__(message)
         self.existing = existing
+
+
+class EpisodeIngestDisabled(Exception):
+    """服務關閉 episode 收料（`episodes.ingest = false`，D13）。
+
+    403 + `episode_ingest_disabled`：客戶端 spool 依錯誤碼辨識，檔案留在本機、
+    拉長退避，不當成暫時錯誤頻繁重試，也不移到 rejected。"""
+
+
+class UiSessionRequired(Exception):
+    """只允許以 UI 登入（session cookie）操作的管理端點，收到 bearer 請求。"""
 
 
 class ConfirmTokenInvalid(ValueError):
@@ -214,6 +226,22 @@ def install_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(AliasConflict, alias_conflict)
     app.add_exception_handler(NotRestorable, with_reason)
     app.add_exception_handler(RetryRefused, with_reason)
+
+    async def invalid_settings(request: Request, exc: Exception) -> JSONResponse:
+        assert isinstance(exc, InvalidSettings)
+        return _json(
+            400,
+            "invalid_setting",
+            exc,
+            errors=[
+                {"key": e.key, "code": e.code, "message": str(e)} for e in exc.errors
+            ],
+        )
+
+    # 執行期設定（D13）
+    app.add_exception_handler(InvalidSettings, invalid_settings)
+    simple(EpisodeIngestDisabled, 403, "episode_ingest_disabled")
+    simple(UiSessionRequired, 403, "ui_session_required")
 
     simple(PayloadTooLarge, 413, "too_large")
     simple(DocumentsNotConfigured, 500, "documents_not_configured")

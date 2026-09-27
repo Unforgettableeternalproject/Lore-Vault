@@ -12,6 +12,7 @@ import sqlite3
 from collections.abc import Callable
 
 from .errors import SchemaVersionError
+from .timeutil import utc_now
 
 # FTS5 tokenizer：`_` 算字元，snake_case 識別字保持完整（D1 實測）
 FTS_TOKENIZE = "unicode61 tokenchars '_'"
@@ -563,6 +564,78 @@ def _v13(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+# 補算入列時間（v14）：`notes.enqueued` = 服務寫入目前版本的牆鐘時間（新增、更新、
+# 取消刪除都重設）。補算佇列是推導的（缺 summary／embedding），入列時間原本借用
+# `updated`；舊 PM 匯入與還原的 note 保留原始 `updated`，doctor `enrich.backlog`
+# 因此算出極大的等待時間。STRICT 表 ADD COLUMN 不能給非常數預設，只能 nullable，
+# 由寫入端一律填值、doctor `enrich.queue_time` 對帳 NULL。
+# 回填：遷移前的真實入列時間無從得知——
+# - 目前待補算（缺 summary 或缺 embedding，且不是「目前版本已標記失敗」）→ 遷移當下。
+#   取捨：原生 note 若真的卡了很久，升級當下等待時間歸零一次，worker 仍沒跑時
+#   要再過 backlog 門檻（預設 1 小時）才會 warn；
+#   換來升級後不會因舊匯入 note 瞬間大量 warn
+# - 其餘（已補算完成或已標記失敗，不在佇列內）→ 沿用 `updated`
+def _v14(conn: sqlite3.Connection) -> None:
+    conn.execute("ALTER TABLE notes ADD COLUMN enqueued TEXT")
+    conn.execute("UPDATE notes SET enqueued = updated")
+    conn.execute(
+        """
+        UPDATE notes SET enqueued = ?
+        WHERE seq IN (
+            SELECT n.seq FROM notes n
+            WHERE (n.summary IS NULL
+                   AND NOT EXISTS (
+                       SELECT 1 FROM note_enrichment e
+                       WHERE e.note_seq = n.seq AND e.kind = 'summary'
+                         AND e.status = 'failed' AND e.for_updated = n.updated))
+               OR (NOT EXISTS (
+                       SELECT 1 FROM note_embeddings v WHERE v.note_seq = n.seq)
+                   AND NOT EXISTS (
+                       SELECT 1 FROM note_enrichment e
+                       WHERE e.note_seq = n.seq AND e.kind = 'embedding'
+                         AND e.status = 'failed' AND e.for_updated = n.updated))
+        )
+        """,
+        (utc_now(),),
+    )
+
+
+# 執行期設定（v15，D13；白名單與驗證見 `lore_vault.runtime_settings`）：
+# - settings_overrides：UI 設定頁存的覆寫值（JSON），覆寫設定檔／環境變數的預設值。
+#   刻意不設 CHECK 限定鍵名：白名單在程式裡，doctor `settings.overrides` 對帳
+# - settings_audit：每次修改或還原一列（誰、何時、生效值舊→新）。
+#   與覆寫列在同一交易寫入，
+#   doctor `settings.audit_agreement` 核對「目前覆寫值 = 該鍵最後一筆稽核的新值」
+_V15_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE settings_overrides (
+        key        TEXT PRIMARY KEY CHECK (length(trim(key)) > 0),
+        value      TEXT NOT NULL CHECK (json_valid(value)),
+        updated    TEXT NOT NULL,
+        updated_by TEXT NOT NULL
+    ) STRICT
+    """,
+    """
+    CREATE TABLE settings_audit (
+        seq       INTEGER PRIMARY KEY,
+        at        TEXT NOT NULL,
+        key       TEXT NOT NULL,
+        action    TEXT NOT NULL CHECK (action IN ('set', 'reset')),
+        old_value TEXT NOT NULL CHECK (json_valid(old_value)),
+        new_value TEXT NOT NULL CHECK (json_valid(new_value)),
+        principal TEXT NOT NULL,
+        display   TEXT
+    ) STRICT
+    """,
+    "CREATE INDEX settings_audit_key ON settings_audit(key, seq)",
+)
+
+
+def _v15(conn: sqlite3.Connection) -> None:
+    for statement in _V15_STATEMENTS:
+        conn.execute(statement)
+
+
 # 有序遷移：索引 i 的函式把版本從 i 升到 i+1。只能往後加，不可改動已發佈的項目。
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _v1,
@@ -578,6 +651,8 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _v11,
     _v12,
     _v13,
+    _v14,
+    _v15,
 )
 
 SCHEMA_VERSION = len(MIGRATIONS)

@@ -284,8 +284,14 @@ def recall(request: Request, req: RecallRequest) -> dict[str, Any]:
 @router.post("/ask")
 def ask(request: Request, req: AskRequest) -> dict[str, Any]:
     """recall 的 note 片段交問答模型整理（D11）。檢索完就關連線，再呼叫模型：
-    模型呼叫可能要數秒到 `ask.timeout`，不佔著資料庫連線。"""
+    模型呼叫可能要數秒到 `ask.timeout`，不佔著資料庫連線。
+
+    `ask.enabled`（執行期設定，D13）關閉時直接 403 `ask_disabled`，
+    不檢索、不呼叫模型。"""
     state = _state(request)
+    runtime = state.runtime.current()
+    if not runtime.ask.enabled:
+        raise ask_service.AskDisabled("問答已由管理者在設定頁關閉")
     with state.connection() as conn:
         context = ask_service.prepare(
             conn,
@@ -296,7 +302,7 @@ def ask(request: Request, req: AskRequest) -> dict[str, Any]:
             dim=state.dim,
             k=req.k,
             kinds=req.kinds,
-            snippet_max_chars=state.settings.config.ask.snippet_max_chars,
+            snippet_max_chars=runtime.ask.snippet_max_chars,
         )
     return ask_service.generate(context, state.answerer).to_dict()
 
@@ -407,6 +413,8 @@ def status_(
     vault_key = req.vault if req is not None else None
     space = validate_space(req.space) if req is not None else None
     now = datetime.now(UTC)
+    # 門檻類設定可由設定頁覆寫（D13）：一律讀執行期有效值
+    cfg = state.runtime.current()
     with state.connection() as conn:
         vault_info = None
         if vault_key is not None:
@@ -421,23 +429,21 @@ def status_(
                     "now": now,
                     "enrich_backlog_max_age": DEFAULT_BACKLOG_MAX_AGE,
                     # 未設定備份目錄時 backup.recent 記為 skipped
-                    "backup_dir": state.settings.config.backup.dir,
-                    "backup_max_age_hours": state.settings.config.backup.max_age_hours,
+                    "backup_dir": cfg.backup.dir,
+                    "backup_max_age_hours": cfg.backup.max_age_hours,
                     # 未設定 blob_dir 時 blob 對帳記為 skipped
-                    "blob_dir": state.settings.config.documents.blob_dir,
-                    "documents_stuck_seconds": (
-                        state.settings.config.documents.stuck_seconds
-                    ),
+                    "blob_dir": cfg.documents.blob_dir,
+                    "documents_stuck_seconds": cfg.documents.stuck_seconds,
                     # 0 = 不警告（tombstones.summary 只當資訊項）
-                    "tombstones_warn_age_days": (
-                        state.settings.config.database.tombstone_warn_age_days
-                    ),
-                    "tombstones_warn_bytes": (
-                        state.settings.config.database.tombstone_warn_bytes
-                    ),
-                    # ask.provider：問答模型是否可用（只看有沒有建立用戶端，不打網路）
+                    "tombstones_warn_age_days": cfg.database.tombstone_warn_age_days,
+                    "tombstones_warn_bytes": cfg.database.tombstone_warn_bytes,
+                    # ask.provider：問答模型是否可用（只看有沒有建立用戶端，不打網路）；
+                    # 管理者關閉問答時記為 skipped
                     "ask_configured": state.answerer is not None,
-                    "ask_model": state.settings.config.ask.model,
+                    "ask_enabled": cfg.ask.enabled,
+                    "ask_model": cfg.ask.model,
+                    # episodes.ingest_recency：收料關閉時 skipped（D13）
+                    "episodes_ingest": cfg.episodes.ingest,
                     # notes.principal_agreement：設定值與既有 note 是否一致（D12）
                     "principal": state.settings.principal,
                 },

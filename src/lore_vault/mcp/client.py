@@ -95,7 +95,8 @@ def _status_error(response: httpx2.Response) -> ServiceError:
             "認證失敗（HTTP 401）：LORE_VAULT_API_TOKEN 與服務端不一致或未帶上",
             body,
         )
-    if status == 403:
+    if status == 403 and not (body is not None and isinstance(body.get("error"), dict)):
+        # 服務自己的 403（例如 ask_disabled）帶錯誤格式，走下方的通用分支
         return ServiceError(
             status,
             "存取被拒（HTTP 403）：通常是 Cloudflare Access 拒絕，確認 "

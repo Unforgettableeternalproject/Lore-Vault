@@ -124,14 +124,17 @@ def _attempt(
 ) -> ui_login.LoginOutcome:
     """在 threadpool 執行（scrypt 是 CPU 工作）；同一時間只跑一個嘗試。"""
     ui = _ui(request)
-    with ui.login_lock, request.app.state.lore.connection() as conn:
+    state = request.app.state.lore
+    # 保留天數可由設定頁調整（D13）：每次嘗試讀執行期有效值
+    retention = state.runtime.current().ui.login_log_retention_days
+    with ui.login_lock, state.connection() as conn:
         return ui_login.attempt_login(
             conn,
             username,
             password,
             ip=ip,
             now=_now(ui),
-            retention_days=ui.login_log_retention_days,
+            retention_days=retention,
         )
 
 

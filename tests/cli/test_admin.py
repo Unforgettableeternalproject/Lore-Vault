@@ -260,8 +260,10 @@ def test_undelete_restores_note_from_snapshot(db):
         result = imports.reconcile(conn, SOURCE)
     finally:
         conn.close()
-    # seq 是新的（FTS／向量關聯鍵），其餘逐欄相同
+    # seq 是新的（FTS／向量關聯鍵）；還原後向量已不在、重新排入補算，
+    # 入列時間（enqueued）是還原當下。其餘逐欄相同
     before.pop("seq"), after.pop("seq")
+    assert after.pop("enqueued") >= before.pop("enqueued")
     assert after == before
     assert result.status == "pass"
     assert _run(db, "undelete-note", "--id", "note:a1", "--yes")[0] == 1

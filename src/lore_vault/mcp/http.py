@@ -34,6 +34,7 @@ from .settings import ShellSettings
 
 if TYPE_CHECKING:
     from lore_vault.api.settings import ApiSettings
+    from lore_vault.config import Config
 
 MCP_PATH = "/mcp"
 # in-process 轉發用的虛擬位址（不會真的連線）
@@ -107,6 +108,14 @@ class McpEndpoint:
         await manager.handle_request(scope, receive, send)
 
 
+def _runtime_download_limit(app: object, config: Config) -> int:
+    state = getattr(getattr(app, "state", None), "lore", None)
+    runtime = getattr(state, "runtime", None)
+    if runtime is None:
+        return config.mcp.http_download_max_bytes
+    return runtime.current().mcp.http_download_max_bytes
+
+
 def build_http_server(app: object, settings: ApiSettings) -> MCPServer:
     """HTTP 模式的殼與 MCP server；`app` 是要轉發到的同一個 ASGI app。"""
     config = settings.config
@@ -126,6 +135,8 @@ def build_http_server(app: object, settings: ApiSettings) -> MCPServer:
         # 內層 app 的未處理例外回 500 → ServiceError，不讓工具任務直接崩潰
         transport=LoopbackTransport(app=app, raise_app_exceptions=False),  # type: ignore[arg-type]
         mode=MODE_HTTP,
+        # 上限可由設定頁調整（D13）：每次 download 讀服務的執行期有效值
+        download_limit=lambda: _runtime_download_limit(app, config),
     )
     return build_server(shell)
 

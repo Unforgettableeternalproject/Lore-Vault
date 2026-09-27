@@ -298,7 +298,7 @@ def test_v13_renames_principal_and_adds_ui_login_tables(db_path):
                 "snapshot) VALUES (?, 'folder/m', ?, 'r', ?)",
                 (note_id, ts, snap),
             )
-        assert migrate(raw) == SCHEMA_VERSION == 13
+        assert migrate(raw, migrations=migrate_mod.MIGRATIONS[:13]) == 13
         rows = raw.execute(
             "SELECT id, principal, updated_by_principal, updated FROM notes ORDER BY id"
         ).fetchall()
@@ -343,5 +343,57 @@ def test_v13_renames_principal_and_adds_ui_login_tables(db_path):
                 "VALUES (?, 'x', 'u', 'maybe')",
                 (ts,),
             )
+    finally:
+        raw.close()
+
+
+def test_v14_backfills_enqueued_without_old_updated_for_pending(db_path):
+    """v13 的庫升到 v14：待補算的 note 入列時間回填成遷移當下（不是舊 `updated`，
+    否則舊 PM 匯入的 note 升級後 backlog 瞬間 warn）；已補算完成、或目前版本已標記
+    失敗的沿用 `updated`。"""
+    from datetime import UTC, datetime
+
+    from lore_vault.storage.timeutil import parse_utc
+
+    old = "2025-01-01T00:00:00.000Z"
+    raw = sqlite3.connect(db_path, isolation_level=None)
+    try:
+        assert migrate(raw, migrations=migrate_mod.MIGRATIONS[:13]) == 13
+        raw.execute(
+            "INSERT INTO vaults (key, display, kind, created) "
+            "VALUES ('folder/m', 'm', 'repo', ?)",
+            (old,),
+        )
+        for note_id, summary in (
+            ("n-pending", None),
+            ("n-done", "摘要"),
+            ("n-failed", None),
+            ("n-no-vector", "摘要"),
+        ):
+            raw.execute(
+                "INSERT INTO notes (id, vault, title, summary, body, created, "
+                "updated, principal) VALUES (?, 'folder/m', ?, ?, '內文', ?, ?, 'p')",
+                (note_id, note_id, summary, old, old),
+            )
+        seqs = dict(raw.execute("SELECT id, seq FROM notes").fetchall())
+        for note_id in ("n-done", "n-failed"):
+            raw.execute(
+                "INSERT INTO note_embeddings (note_seq, dim, vector, updated) "
+                "VALUES (?, 1, x'00000000', ?)",
+                (seqs[note_id], old),
+            )
+        raw.execute(
+            "INSERT INTO note_enrichment (note_seq, kind, for_updated, attempts, "
+            "status, last_attempt, next_attempt) "
+            "VALUES (?, 'summary', ?, 3, 'failed', ?, ?)",
+            (seqs["n-failed"], old, old, old),
+        )
+        before = datetime.now(UTC)
+        assert migrate(raw) == SCHEMA_VERSION
+        rows = dict(raw.execute("SELECT id, enqueued FROM notes").fetchall())
+        assert rows["n-done"] == old
+        assert rows["n-failed"] == old
+        for note_id in ("n-pending", "n-no-vector"):
+            assert parse_utc(rows[note_id]) >= before.replace(microsecond=0)
     finally:
         raw.close()

@@ -3,6 +3,7 @@
 from .client import Answerer, Completion, OpenAIAnswerer
 from .service import (
     AskContext,
+    AskDisabled,
     AskError,
     AskInvalidOutput,
     AskNotConfigured,
@@ -18,6 +19,7 @@ from .service import (
 __all__ = [
     "Answerer",
     "AskContext",
+    "AskDisabled",
     "AskError",
     "AskInvalidOutput",
     "AskNotConfigured",

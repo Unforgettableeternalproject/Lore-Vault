@@ -226,7 +226,6 @@ class UiAuth:
     trusted_proxies: tuple[IpNetwork, ...]
     cookie_secure: bool
     clock: Clock
-    login_log_retention_days: float
     # 同一時間只跑一個登入嘗試（全域失敗計數的嚴格順序）
     login_lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -246,5 +245,4 @@ class UiAuth:
             trusted_proxies=parse_trusted_proxies(config.trusted_proxies),
             cookie_secure=config.cookie_secure,
             clock=clock,
-            login_log_retention_days=config.login_log_retention_days,
         )

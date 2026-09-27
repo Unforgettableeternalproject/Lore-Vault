@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 
 from lore_vault.api.app import create_app
 from lore_vault.api.settings import ApiSettings
-from lore_vault.config import Config, EmbeddingConfig, Secret
+from lore_vault.config import Config, EmbeddingConfig, EpisodesConfig, Secret
 from lore_vault.storage import fts, ui_login, vectors
 from lore_vault.storage.db import connect
 
@@ -120,7 +120,10 @@ def make_settings(db_path: Path, **overrides) -> ApiSettings:
     base = {
         "db_path": db_path,
         "token": Secret(TOKEN),
-        "config": Config(embedding=EmbeddingConfig(dim=DIM)),
+        # episode 收料預設關閉（D13）；既有測試照常收料，關閉的行為另有測試
+        "config": Config(
+            embedding=EmbeddingConfig(dim=DIM), episodes=EpisodesConfig(ingest=True)
+        ),
         "query_embedder": FakeEmbedder(),
         "enrich_worker": False,
         # 預設不暖機：否則背景執行緒會去連本機 Ollama（暖機另有測試）

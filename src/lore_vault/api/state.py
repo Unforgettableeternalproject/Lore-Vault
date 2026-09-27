@@ -30,6 +30,7 @@ from lore_vault.storage.db import connect
 from lore_vault.storage.snapshot import SnapshotCache
 
 from .background import BackgroundEnricher
+from .runtime import RuntimeConfig
 from .settings import ApiSettings
 from .warmup import EmbeddingWarmup
 
@@ -151,6 +152,8 @@ class AppState:
     def __init__(self, settings: ApiSettings) -> None:
         self.settings = settings
         self.dim = settings.config.embedding.dim
+        # 執行期有效設定（設定檔／環境變數 + DB 覆寫，D13）：白名單內的項目一律從這裡讀
+        self.runtime = RuntimeConfig(settings.config, self.connection)
         self.query_embedder: Embedder = (
             settings.query_embedder
             if settings.query_embedder is not None

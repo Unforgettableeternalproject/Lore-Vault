@@ -39,6 +39,8 @@ rate_per_minute = 30
 [ask]
 # ask()（D11）：recall 取回的 note 片段交模型整理成逐點回答（POST /v1/ask、MCP ask）。
 # key 同樣走 OPENAI_API_KEY；沒有 key 時 ask 回 ask_not_configured，doctor ask.provider 為 warn
+# 關閉時 ask 回 403 ask_disabled（UI 設定頁可在執行期覆寫）
+enabled = true
 provider = "openai"
 base_url = "https://api.openai.com/v1"
 model = "gpt-6-luna"
@@ -49,6 +51,13 @@ max_completion_tokens = 2000
 timeout = 60.0
 # 每則 note 送進模型的正文節錄上限（字元）；k 預設 10、上限 20
 snippet_max_chars = 6000
+
+[episodes]
+# 服務是否接受各機器 hook 推送的 episode（對話紀錄，POST /v1/episodes）。預設關閉：
+# 自架者不會意外把對話原文集中到服務上。關閉時回 403 episode_ingest_disabled，
+# 客戶端 spool 把紀錄留在本機、拉長退避，開啟後自動補推；已收進來的照常可讀。
+# 也可用環境變數 LORE_VAULT_EPISODES_INGEST=true，或在 UI 設定頁執行期切換（存 DB、覆寫本值）
+ingest = false
 
 [worker]
 # 同一版本最多嘗試幾次，超過標記失敗（doctor enrich.failed 會紅）
