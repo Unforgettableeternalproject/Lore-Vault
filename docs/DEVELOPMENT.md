@@ -610,9 +610,20 @@ KEY=VALUE、只用標準庫解析；行程環境變數中同名鍵優先。
   （例如無內容的 meta 回合）移到 `spool/archived/`、檔名不變即可結案；沒有任何程式讀 `archived/`
 - `concept_snapshot.age`：從未拉取、manifest 與檔案 sha256 不一致、格式不符、超過年齡（以 `checked_at` 計）為 fail
 - `concept_snapshot.path_agreement`：client.env 的 `LORE_VAULT_CONCEPT_SNAPSHOT` 與 MCP 快照路徑（`--mcp-concept-snapshot-path`，未給則由設定推導 `mcp.concept_snapshot_path`／`<snapshot_dir>/concepts.json`）不是同一檔為 fail；任一邊未設為 skipped
+- `episode_pull.status`（D13）：讀 `pipeline_state.json` 的 `episode_pull`。`mode=failed`、服務端缺少快取中曾收下的 episode（`server_missing>0`）、成功拉取但快取筆數 ≠ 服務端 `total`、降級且為對帳錯誤或距上次成功超過 `episode_pull_stale_days`（預設 3）為 fail；一般降級（`local_fallback`）、強制本機（`local_forced`）、舊版服務（無增量水位）、從未拉取為 warn；不連服務
 - `concept_push.lag`：本地 `concepts.json` 的 id 與 `pipeline_state.json` 的 `service_pushed_concept_ids` 比對，有未推送或待刪除 id、或上次推送（`concept_push` 紀錄）失敗為 fail；從未推送、或 id 一致但 `concepts.json` 在上次成功推送後又被改過為 warn；不連服務
 
-### 主機管線轉接（骨架，預設關閉）
+### 主機管線轉接
+
+**episode 來源（D13）**：STAGES 在 `health` 與 `distill` 之間多一個 `pull`：先推本機 spool，再以服務端
+`seq` 為水位增量拉取 `GET /v1/episodes?vault=*&after_seq=N`（回應每筆帶 `seq`，另有 `next_after_seq`、
+`max_seq`、`total`）到 `~/.lore-vault/episode_cache/`（`service.jsonl` 只追加、`state.json` 水位），
+與本機 jsonl 依 (session_id, prompt_id, turn_index) 合併到 `merged/episodes.jsonl`，蒸餾以
+`--episode-dir` 讀它。水位之前的漏列（筆數對帳）、服務端 `max_seq` 退回（資料庫還原）、舊版服務
+（回應沒有 `max_seq`）都改為全量重拉並併入快取。服務不可達或未設定時預設退回本機 jsonl（加上次快取），
+`--on-pull-failure fail` 改為停止；`--episode-source local` 強制只讀本機（除錯用）。結果寫
+`pipeline_state.json` 的 `episode_pull`，健康告警與 doctor `episode_pull.status` 讀它。
+設計細節見 `agent_memory_spike/episode_source.py`。
 
 `pipeline.py --pull-episodes OUT.jsonl [--since UTC]`（`GET /v1/episodes`，全部 vault、依 cursor 讀到底）、
 `pipeline.py --push-concepts [--dry-run]`（`POST /v1/concepts` upsert；刪除＝上次推過、這次已不在池內的 id，

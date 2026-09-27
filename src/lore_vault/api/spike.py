@@ -2,7 +2,8 @@
 
 - `POST /v1/episodes`：客戶端 spool 推送；逐筆結果，冪等；vault 不存在時自動建立
   （只限這條路徑，notes write 仍不自動建）。由 `episodes.ingest` 控制，預設關閉（D13）
-- `GET /v1/episodes`：主機管線分頁讀取（vault 必填，跨 vault 明示 `"*"`）
+- `GET /v1/episodes`：主機管線分頁讀取（vault 必填，跨 vault 明示 `"*"`）；
+  `after_seq` 為增量模式（episode 快取水位）
 - `GET /v1/concepts/export`：與 spike `concepts.json` 同格式（PreToolUse scorer 的快照）
 - `POST /v1/concepts`：主機管線批次 upsert／刪除（整批成功或整批不寫）；未帶 vault 的
   repo-scope 新 concept 依 A17 決定歸屬（source_turns → scope 比對 → 拒收）
@@ -236,10 +237,38 @@ def get_episodes(
     session_id: str | None = None,
     cursor: str | None = None,
     limit: int = Query(EPISODE_PAGE_DEFAULT, ge=1, le=EPISODE_PAGE_MAX),
+    after_seq: int | None = Query(
+        None, ge=0, description="增量模式：只回 seq > after_seq（依 seq 排序）"
+    ),
 ) -> dict[str, Any]:
     """依 (started_at, seq) 由舊到新分頁；每筆是 Episode dict 另加凍結的 `vault`。
 
+    帶 `after_seq` 時改為增量模式（主機管線的 episode 快取水位，見
+    `records.list_episode_rows_after_seq`）：每筆另帶 `seq`，回應多 `next_after_seq`
+    （還有下一頁時）、`max_seq`、`total`（範圍內 seq <= max_seq 的筆數，供快取對帳）。
+    不可與 `cursor`／`since`／`session_id` 併用。
+
     不受收料開關影響：已收進來的資料照常可讀（主機管線 `--pull-episodes` 要能拉完）。"""
+    if after_seq is not None:
+        if cursor is not None or since is not None or session_id is not None:
+            raise InvalidCursor("after_seq 不可與 cursor／since／session_id 併用")
+        with _state(request).connection() as conn:
+            seq_rows, next_after, max_seq, total = records.list_episode_rows_after_seq(
+                conn,
+                vault,  # type: ignore[arg-type]  # None → VaultRequired（400）
+                after_seq=after_seq,
+                limit=limit,
+            )
+        return {
+            "items": [
+                {**episode.to_dict(), "vault": key, "seq": seq}
+                for key, seq, episode in seq_rows
+            ],
+            "next_cursor": None,
+            "next_after_seq": next_after,
+            "max_seq": max_seq,
+            "total": total,
+        }
     decoded = _decode_episode_cursor(cursor) if cursor is not None else None
     with _state(request).connection() as conn:
         rows, next_cursor = records.list_episode_rows(

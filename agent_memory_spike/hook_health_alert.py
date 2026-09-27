@@ -53,6 +53,11 @@ SILENT_INJECT_DAYS = 7     # 注入本來就稀疏（約 18%/編輯輪），要�
 
 # 與 pipeline.CONCEPT_PUSH_KEY 相同；不 import pipeline（它會拖進 transcript）
 CONCEPT_PUSH_KEY = "concept_push"
+# 與 episode_source.EPISODE_PULL_KEY／MODE_* 相同（同理不 import；test_episode_source 驗證一致）
+EPISODE_PULL_KEY = "episode_pull"
+EPISODE_PULL_FALLBACK = "local_fallback"
+EPISODE_PULL_FORCED = "local_forced"
+EPISODE_PULL_FAILED = "failed"
 
 
 def _age_days(path: Path) -> float | None:
@@ -100,6 +105,27 @@ def collect_alerts() -> list[str]:
         alerts.append(
             f"concept 推送到服務失敗（{push.get('at')}）：{summary[:120]}"
             "（服務端記憶停在上次成功推送）")
+
+    # 1c. episode 來源（D13）。拉取失敗時管線退回本機 jsonl 照跑、階段報 OK，
+    #     遠端機器的 episode 靜默地沒進蒸餾——只有這筆紀錄看得到
+    pull = state.get(EPISODE_PULL_KEY) if isinstance(state, dict) else None
+    if isinstance(pull, dict):
+        mode = pull.get("mode")
+        reason = str(pull.get("reason") or "").strip()[:120]
+        if mode == EPISODE_PULL_FALLBACK:
+            alerts.append(
+                f"夜間管線沒從服務拉到 episode（{pull.get('at')}）：{reason}"
+                "（本輪只用本機語料，遠端機器的 episode 沒進蒸餾）")
+        elif mode == EPISODE_PULL_FORCED:
+            alerts.append("夜間管線被設成只讀本機 episode（--episode-source local），"
+                          "遠端機器的 episode 不會進蒸餾")
+        elif mode == EPISODE_PULL_FAILED:
+            alerts.append(f"夜間管線從服務拉取 episode 失敗而停止（{pull.get('at')}）：{reason}")
+        counts = pull.get("counts")
+        missing = counts.get("server_missing") if isinstance(counts, dict) else None
+        if isinstance(missing, int) and missing > 0:
+            alerts.append(f"服務端少了 {missing} 筆曾經收下的 episode（資料庫可能被還原），"
+                          "見 doctor episode_pull.status")
 
     # 2. 排程本身有沒有在跑。管線失敗至少還留得下 log，排程掛了連 log 都不會有——
     #    後者更難察覺，因為所有既有紀錄看起來都還是好的

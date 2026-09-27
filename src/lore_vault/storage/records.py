@@ -154,6 +154,56 @@ def list_episode_rows(
     return items, next_cursor
 
 
+def list_episode_rows_after_seq(
+    conn: sqlite3.Connection,
+    vault: str,
+    *,
+    after_seq: int,
+    limit: int = 1000,
+) -> tuple[list[tuple[str, int, Episode]], int | None, int, int]:
+    """增量讀取：`seq > after_seq`，依 seq 由小到大（主機管線的 episode 快取用）。
+
+    回傳 `(本頁 [(vault, seq, Episode)], 下一頁的 after_seq 或 None, max_seq, total)`。
+    `max_seq` 是**先讀出**的範圍內最大 seq（沒有資料為 0），本頁與 `total` 都只算
+    `seq <= max_seq`：讀取期間新寫入的列不會讓 total 與本頁對不上。
+
+    seq 是 INTEGER PRIMARY KEY、episodes 只插入不刪改，SQLite 單一寫者使 seq 依序可見，
+    所以 `seq > 水位` 不會漏掉延遲到貨的舊對話（`started_at` 很舊、很晚才收料的
+    遠端 episode）。
+    """
+    scope = resolve_read(conn, vault, space=SPACE_DEV)
+    _check_limit(limit)
+    if after_seq < 0:
+        raise ValueError(f"after_seq 不可為負，得到 {after_seq}")
+    clause, params = vault_clause(scope, "vault")
+    max_seq = int(
+        conn.execute(
+            f"SELECT coalesce(max(seq), 0) FROM episodes WHERE {clause}", params
+        ).fetchone()[0]
+    )
+    total = int(
+        conn.execute(
+            f"SELECT count(*) FROM episodes WHERE {clause} AND seq <= ?",
+            (*params, max_seq),
+        ).fetchone()[0]
+    )
+    rows = conn.execute(
+        f"""
+        SELECT vault, seq, data FROM episodes
+        WHERE {clause} AND seq > ? AND seq <= ?
+        ORDER BY seq LIMIT ?
+        """,
+        (*params, after_seq, max_seq, limit + 1),
+    ).fetchall()
+    page = rows[:limit]
+    items = [
+        (r["vault"], int(r["seq"]), Episode.from_dict(json.loads(r["data"])))
+        for r in page
+    ]
+    next_after = int(page[-1]["seq"]) if len(rows) > limit else None
+    return items, next_after, max_seq, total
+
+
 def count_episodes(conn: sqlite3.Connection, vault: str) -> int:
     scope = resolve_read(conn, vault, space=SPACE_DEV)
     clause, params = vault_clause(scope, "vault")

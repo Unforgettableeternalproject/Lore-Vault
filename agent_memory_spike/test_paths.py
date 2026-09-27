@@ -61,6 +61,9 @@ BEFORE = {
     "hook_stop.CLIENT_ENV_PATH": ".lore-vault/client.env",
     "pipeline.CLIENT_ENV_PATH": ".lore-vault/client.env",
     "pipeline.CONCEPT_PATH": ".lore-vault/concepts.json",
+    # D13 新增：服務 episode 快取與 spool（同 hook_stop.spool_dir_for）
+    "pipeline.EPISODE_CACHE_DIR": ".lore-vault/episode_cache",
+    "pipeline.SPOOL_DIR": ".lore-vault/spool",
     "retrieve.CONTROL_CONCEPT_PATH": ".lore-vault/control_concepts.json",
     "retrieve.DEFAULT_CONCEPT_PATH": ".lore-vault/concepts.json",
     "retrieve.DEFAULT_EPISODE_DIR": ".lore-vault/episodes",
