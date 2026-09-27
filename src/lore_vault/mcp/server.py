@@ -105,7 +105,7 @@ INSTRUCTIONS = (
     "不含文件）。文件用 upload 上傳後在背景抽取；recall 會一併回文件段落（kind=chunk，"
     "含檔名與 locator 位置），全文用 get 取 doc:／chunk: id。"
     "ask 會把 recall 到的 note 交模型整理成逐點回答；那只是片段的整理、信心有限，"
-    "關鍵事實要用 get 核對原 note。"
+    "可參考但不可當作唯一事實來源，關鍵事實要用 get 核對原 note。"
 )
 
 _HINTS = {
@@ -1027,7 +1027,9 @@ def build_server(shell: Shell) -> MCPServer:
         "ask": (
             "用 recall 的同一條檢索取前 k 則 note，交模型整理成逐點回答"
             "（answer.points，每點附 note_ids）。注意：回答只是檢索片段的整理，"
-            "信心有限——片段沒撈到的不會知道；關鍵事實請以 get 核對原 note 再採用。"
+            "信心有限——片段沒撈到的不會知道，模型也可能因輸出抖動或極端情況整理出"
+            "不精確的內容。結果可以參考，但不要當作唯一事實來源；關鍵事實請以 get"
+            "核對原 note 再採用。"
             "status=insufficient 表示片段不足；unsupported=true 的點沒有有效引用"
             "（引用了片段外的 id 已移除，見 dropped_citations），不要當成事實。"
             "degraded=true 表示檢索降級（只走關鍵字）。目前只用 note，不含文件。"

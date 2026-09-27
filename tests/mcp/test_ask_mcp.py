@@ -151,4 +151,5 @@ async def test_ask_tool_description_warns_about_confidence(db_path):
     tools = {t.name: t for t in await server.list_tools()}
     description = tools["ask"].description
     assert "信心有限" in description and "get" in description
+    assert "唯一事實" in description and "唯一事實" in INSTRUCTIONS
     assert "ask" in INSTRUCTIONS
