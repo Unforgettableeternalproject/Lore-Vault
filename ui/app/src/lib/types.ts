@@ -425,3 +425,43 @@ export interface StatusResult {
   documents: { enabled: boolean; worker: WorkerStatus; backlog: BacklogStatus };
   doctor: DoctorReport;
 }
+
+// ── 問答（/v1/ask，D11）：recall 的 note 片段交模型整理成逐點回答 ──
+
+export interface AskPoint {
+  claim: string;
+  /** 支持這一點的 note id（已過引用防呆，只會是 sources 內的 id） */
+  note_ids: string[];
+  /** 沒有任何有效引用的點：保留但標為無依據 */
+  unsupported: boolean;
+}
+
+export interface AskSource {
+  id: string;
+  vault: string;
+  title: string;
+  updated: string;
+  score: number;
+  excerpt_truncated: boolean;
+}
+
+export interface AskResult {
+  /** answered／insufficient（片段不足以回答） */
+  status: 'answered' | 'insufficient' | string;
+  answer: { points: AskPoint[] };
+  dropped_citations: unknown[];
+  /** 模型回 answered 但沒有任何有效引用，被改判為 insufficient */
+  status_downgraded: boolean;
+  sources: AskSource[];
+  k: number;
+  kinds: string[];
+  unsupported_kinds: string[];
+  degraded: boolean;
+  degraded_reason: string | null;
+  degraded_detail: string | null;
+  missing_embeddings: number | null;
+  model: string | null;
+  usage: Record<string, number> | null;
+  latency_ms: { retrieval: number; generation: number | null; total: number };
+  notice: string;
+}
