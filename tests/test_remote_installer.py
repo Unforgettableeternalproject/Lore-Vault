@@ -16,6 +16,13 @@ REPO = Path(__file__).resolve().parents[1]
 INSTALLER = REPO / "integrations" / "remote" / "install.py"
 SKILL = REPO / "integrations" / "claude" / "skills" / "pm" / "SKILL.md"
 
+
+def _skill_lf() -> bytes:
+    # 安裝器以文字讀取 kit 的 SKILL.md、寫出一律 LF；
+    # repo 工作區在 autocrlf 下可能是 CRLF
+    return SKILL.read_bytes().replace(b"\r\n", b"\n")
+
+
 FAKE_TOKEN = "FAKE-TOKEN-7f3a9c-DO-NOT-LEAK"
 BASE_URL = "https://vault.example.com"
 
@@ -357,7 +364,7 @@ def test_full_install_interactive(tmp_path):
     # --home 導向 tmp 時寫絕對路徑，殼不會讀到真實 ~/.cloudflared
     assert written["cf_access_env_file"] == p.cf_env.as_posix()
     assert written["snapshot_dir"] == p.snapshot_dir.as_posix()
-    assert p.skill.read_bytes() == SKILL.read_bytes()
+    assert p.skill.read_bytes() == _skill_lf()
     assert inst.backup_path(p.claude_json).exists()
     assert (
         inst.backup_path(p.skill)
@@ -827,7 +834,7 @@ def test_http_mode_full_flow(tmp_path):
     assert not any(c[1] in ("venv", "pip") for c in runner.calls)
     assert checks[0][0] == BASE_URL
     assert checks[0][1]["Authorization"] == f"Bearer {FAKE_TOKEN}"
-    assert installer.paths.skill.read_bytes() == SKILL.read_bytes()
+    assert installer.paths.skill.read_bytes() == _skill_lf()
     assert not installer.paths.mcp_toml.exists()
 
     report = next(installer.paths.lv_dir.glob("install-report-*.txt")).read_text(
