@@ -1,10 +1,16 @@
-# Lore Vault 服務（T-26）。對外只綁 127.0.0.1:5056
-# （5055／8502 是現行 Open Notebook，Cloudflare tunnel 仍指向它們；切換是另一張需授權的卡）。
+# Lore Vault 服務（T-26、D12）。
 #
-# 需要 .env（不進映像、不進版控）：
-#   LORE_VAULT_API_TOKEN=...          服務 bearer token（A15）
-#   OPENAI_API_KEY=...                摘要用
-#   LORE_VAULT_HOST_BACKUP_DIR=...    主機上的備份目錄（只放備份檔），掛到容器 /backups
+# 最小啟動（全部走預設）：docker compose up -d
+#   - 服務只綁 127.0.0.1:5056（LORE_VAULT_BIND／LORE_VAULT_PORT 可改）
+#   - LORE_VAULT_API_TOKEN 未設時首次啟動自動產生，存於 volume 的 /data/secrets/api-token
+#   - embedding 預設走主機 Ollama（host.docker.internal:11434）
+#
+# profiles（可用 --profile 或 .env 的 COMPOSE_PROFILES 啟用，逗號分隔）：
+#   ollama  附帶 Ollama 容器，首次啟動自動拉 embedding 模型；
+#           須同時在 .env 設 LORE_VAULT_EMBEDDING_BASE_URL=http://ollama:11434
+#   tunnel  附帶 cloudflared（TUNNEL_TOKEN），在 Cloudflare 把公開主機名指向 http://lore-vault:8000
+#
+# 所有變數見 .env.example；.env 不進映像、不進版控。
 name: lore-vault
 
 services:
@@ -14,23 +20,35 @@ services:
     container_name: lore-vault
     restart: unless-stopped
     env_file:
-      - .env
-    # Ollama 走 host.docker.internal:11434（docker/config.toml 預設；
-    # 要改就在 .env 設 LORE_VAULT_EMBEDDING_BASE_URL）
+      # 沒有 .env 也能啟動（token 與管理員密碼會自動產生）
+      - path: .env
+        required: false
+    # embedding 預設走 docker/config.toml 的 host.docker.internal:11434；
+    # 要改就在 .env 設 LORE_VAULT_EMBEDDING_BASE_URL（ollama profile 用 http://ollama:11434）
     extra_hosts:
       # Docker Desktop 內建此名稱；Linux 引擎需要這行
       - "host.docker.internal:host-gateway"
     ports:
-      - "127.0.0.1:5056:8000"
+      # 預設只綁本機。改成 0.0.0.0 等於把沒有 TLS 的 HTTP 直接對外，須自接 TLS 反向代理
+      - "${LORE_VAULT_BIND:-127.0.0.1}:${LORE_VAULT_PORT:-5056}:8000"
     volumes:
       # 資料庫只放 named volume，禁止 bind mount 到 NTFS（D1、T-01）
       - lore-vault-data:/data
       # 備份目錄允許 bind mount：只放 VACUUM INTO 的產物，不是 live DB
       - type: bind
-        source: ${LORE_VAULT_HOST_BACKUP_DIR:?請在 .env 設定 LORE_VAULT_HOST_BACKUP_DIR（主機備份目錄）}
+        source: ${LORE_VAULT_HOST_BACKUP_DIR:-./backups}
         target: /backups
+        bind:
+          # 目錄不存在時由 Docker 建立（Linux 上擁有者會是 root，見自架指南）
+          create_host_path: true
+    depends_on:
+      # 只在 ollama profile 啟用時生效：等模型拉完才啟動。
+      # required: false 讓未啟用 profile 的預設啟動不受影響（Compose ≥ 2.20）
+      ollama-pull:
+        condition: service_completed_successfully
+        required: false
     healthcheck:
-      # slim 映像沒有 curl；帶上 bearer token（本機也需認證，A15），/healthz 若豁免認證也無妨
+      # slim 映像沒有 curl；/healthz 免認證，有 token 時順帶送出也無妨
       test:
         - CMD
         - python
@@ -42,7 +60,55 @@ services:
       retries: 3
     stop_grace_period: 30s
 
+  # ── profile: ollama ─────────────────────────────────────────────────
+  ollama:
+    image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
+    container_name: lore-vault-ollama
+    profiles: [ollama]
+    restart: unless-stopped
+    # 不對外發布埠；lore-vault 以服務名 http://ollama:11434 連線
+    volumes:
+      - lore-vault-ollama:/root/.ollama
+    healthcheck:
+      # 映像沒有 curl；`ollama list` 成功代表伺服器已可服務
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 12
+
+  # 一次性：拉 embedding 模型後結束（已存在時很快完成）
+  ollama-pull:
+    image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
+    profiles: [ollama]
+    restart: "no"
+    environment:
+      OLLAMA_HOST: ollama:11434
+    entrypoint: ["ollama"]
+    command: ["pull", "${LORE_VAULT_EMBEDDING_MODEL:-bge-m3}"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+
+  # ── profile: tunnel ─────────────────────────────────────────────────
+  cloudflared:
+    image: ${CLOUDFLARED_IMAGE:-cloudflare/cloudflared:latest}
+    container_name: lore-vault-cloudflared
+    profiles: [tunnel]
+    restart: unless-stopped
+    # token 型 tunnel：公開主機名與目標在 Cloudflare 後台設定，目標填 http://lore-vault:8000
+    command: ["tunnel", "--no-autoupdate", "run"]
+    environment:
+      # 不用 :? 強制：插值作用於整個檔案，會讓未啟用 tunnel 的預設啟動失敗；
+      # 未設時 cloudflared 自己會啟動失敗並在 log 說明
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
+    depends_on:
+      lore-vault:
+        condition: service_healthy
+
 volumes:
   lore-vault-data:
     # 固定名稱，不隨 compose 專案名變動；`docker compose down -v` 會刪掉它，勿用
     name: lore-vault-data
+  lore-vault-ollama:
+    name: lore-vault-ollama

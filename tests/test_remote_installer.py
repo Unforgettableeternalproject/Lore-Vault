@@ -17,6 +17,7 @@ INSTALLER = REPO / "integrations" / "remote" / "install.py"
 SKILL = REPO / "integrations" / "claude" / "skills" / "pm" / "SKILL.md"
 
 FAKE_TOKEN = "FAKE-TOKEN-7f3a9c-DO-NOT-LEAK"
+BASE_URL = "https://vault.example.com"
 
 
 def _load():
@@ -137,6 +138,8 @@ def make_installer(tmp_path, runner, *, answers=None, secret=None, **kw):
         out=cap,
     )
     kw.pop("no_prompt", None)
+    # 服務位址必填；要測「未給位址」的情境時明確傳 base_url=None
+    kw.setdefault("base_url", BASE_URL)
     installer = inst.Installer(
         paths=inst.Paths(home),
         kit_dir=kit,
@@ -155,16 +158,20 @@ def make_installer(tmp_path, runner, *, answers=None, secret=None, **kw):
 
 
 def test_render_mcp_toml_has_expected_keys_and_no_secret():
-    text = inst.render_mcp_toml()
+    text = inst.render_mcp_toml(BASE_URL + "/")
     import tomllib
 
     data = tomllib.loads(text)["mcp"]
+    # 未用 CF Access 時不寫 cf_access_env_file（殼遇到指向不存在檔案的鍵會拒絕啟動）
     assert data == {
-        "base_url": "https://pm-api.unforgettableeternalproject.com",
-        "cf_access_env_file": "~/.cloudflared/pm-token.env",
+        "base_url": BASE_URL,
         "snapshot_dir": "~/.lore-vault/snapshot",
         "timeout": 15.0,
     }
+    with_cf = tomllib.loads(
+        inst.render_mcp_toml(BASE_URL, cf_access_env_file="~/cf.env")
+    )["mcp"]
+    assert with_cf["cf_access_env_file"] == "~/cf.env"
     # 只有路徑值含 token 字樣，鍵名都不是密鑰類
     assert all("token" not in k and "secret" not in k for k in data)
 
@@ -181,11 +188,12 @@ def test_mcp_toml_loads_with_real_settings(tmp_path):
     from lore_vault.mcp.settings import load_shell_settings
 
     cfg = tmp_path / "mcp.toml"
-    cfg.write_text(inst.render_mcp_toml(), encoding="utf-8")
+    cfg.write_text(inst.render_mcp_toml(BASE_URL), encoding="utf-8")
     env = tmp_path / "mcp.env"
     env.write_bytes(inst.render_mcp_env(FAKE_TOKEN))
     settings = load_shell_settings(config_path=cfg, env_file=env, environ={})
-    assert settings.base_url == inst.DEFAULT_BASE_URL
+    assert settings.base_url == BASE_URL
+    assert settings.cf_access is None
     assert settings.token.reveal() == FAKE_TOKEN
     assert settings.timeout == 15.0
 
@@ -327,8 +335,9 @@ def test_full_install_interactive(tmp_path):
         tmp_path,
         runner,
         home=home,
-        # 開始？／base_url／覆寫 skill？
-        answers=["y", "", "y"],
+        base_url=None,
+        # 開始？／服務位址／CF Access？（用建議路徑）／憑證檔路徑（預設）／覆寫 skill？
+        answers=["y", BASE_URL + "/mcp", "y", "", "y"],
         secret=lambda prompt: FAKE_TOKEN,
     )
     # 測試環境 stdin 不是主控台；這裡模擬在 PowerShell 內執行
@@ -344,7 +353,7 @@ def test_full_install_interactive(tmp_path):
     import tomllib
 
     written = tomllib.loads(p.mcp_toml.read_text(encoding="utf-8"))["mcp"]
-    assert written["base_url"] == inst.DEFAULT_BASE_URL
+    assert written["base_url"] == BASE_URL
     # --home 導向 tmp 時寫絕對路徑，殼不會讀到真實 ~/.cloudflared
     assert written["cf_access_env_file"] == p.cf_env.as_posix()
     assert written["snapshot_dir"] == p.snapshot_dir.as_posix()
@@ -391,6 +400,7 @@ def test_rerun_is_idempotent_and_keeps_existing(tmp_path):
         kit=installer.kit_dir,
         assume_yes=True,
         environ={},
+        base_url=None,
     )
     assert installer2.install() == 0
     # --yes 下既有設定保留
@@ -514,13 +524,52 @@ def test_rollback_restores_backups(tmp_path):
     assert "重開 Claude Code" in cap.text
 
 
-def test_missing_cf_env_blocks_install(tmp_path):
+def test_missing_cf_env_blocks_install_only_when_requested(tmp_path):
     home = make_home(tmp_path, cf=False)
     runner = FakeRunner()
-    installer, _ = make_installer(tmp_path, runner, home=home, assume_yes=True)
+    installer, cap = make_installer(
+        tmp_path,
+        runner,
+        home=home,
+        assume_yes=True,
+        cf_env_file=home / ".cloudflared" / "pm-token.env",
+    )
     with pytest.raises(inst.StepFailed):
         installer.install()
+    assert "CF Access 憑證檔不存在" in cap.text
     assert not (home / ".lore-vault").exists()
+
+
+def test_install_without_cf_omits_cf_key(tmp_path):
+    """CF Access 為選配：沒有憑證檔也能裝，mcp.toml 不寫 cf_access_env_file。"""
+    import tomllib
+
+    home = make_home(tmp_path, cf=False)
+    installer, _ = make_installer(
+        tmp_path,
+        FakeRunner(),
+        home=home,
+        assume_yes=True,
+        environ={"LORE_VAULT_API_TOKEN": FAKE_TOKEN},
+    )
+    assert installer.install() == 0
+    data = tomllib.loads(installer.paths.mcp_toml.read_text(encoding="utf-8"))["mcp"]
+    assert "cf_access_env_file" not in data
+    assert data["base_url"] == BASE_URL
+
+
+def test_yes_without_base_url_stops_with_hint(tmp_path):
+    installer, _ = make_installer(
+        tmp_path,
+        FakeRunner(),
+        assume_yes=True,
+        base_url=None,
+        environ={"LORE_VAULT_API_TOKEN": FAKE_TOKEN},
+    )
+    with pytest.raises(inst.StepFailed) as exc:
+        installer.install()
+    assert "--base-url" in exc.value.resume
+    assert not installer.paths.mcp_toml.exists()
 
 
 def test_main_dry_run_cli(tmp_path, capsys):
@@ -656,3 +705,227 @@ def test_self_check_code_connection_refused(tmp_path):
         port = s.getsockname()[1]
     proc = _run_self_check(tmp_path, f"http://127.0.0.1:{port}")
     assert inst.parse_self_check(proc.stdout)["category"] in ("connect", "unreachable")
+
+
+# ── 服務位址與 HTTP 模式 ──
+
+
+def test_normalize_base_url():
+    assert inst.normalize_base_url(" https://a.example/mcp/ ") == "https://a.example"
+    assert inst.normalize_base_url("http://127.0.0.1:5056/") == "http://127.0.0.1:5056"
+    for bad in ("", "vault.example.com", "ftp://a.example"):
+        with pytest.raises(inst.StepFailed):
+            inst.normalize_base_url(bad)
+
+
+def test_plaintext_remote_detection():
+    assert inst.is_plaintext_remote("http://10.0.0.2:5056")
+    assert not inst.is_plaintext_remote("http://127.0.0.1:5056")
+    assert not inst.is_plaintext_remote("http://localhost:5056")
+    assert not inst.is_plaintext_remote("https://vault.example.com")
+
+
+def test_mcp_add_http_argv_puts_headers_last():
+    # --header 是可變長度選項，放在名稱與網址之前會吞掉位置參數
+    argv = inst.mcp_add_http_argv(
+        "claude", "https://a.example/mcp", {"Authorization": "Bearer X"}
+    )
+    assert argv == [
+        "claude",
+        "mcp",
+        "add",
+        "--transport",
+        "http",
+        "-s",
+        "user",
+        "lore-vault",
+        "https://a.example/mcp",
+        "--header",
+        "Authorization: Bearer X",
+    ]
+
+
+def _ok_status(*_args):
+    return {
+        "category": "ok",
+        "ok": True,
+        "schema_version": 14,
+        "schema_expected": 14,
+        "doctor": {"pass": 1, "fail": 0, "warn": 0, "skipped": 0},
+        "doctor_fails": [],
+    }
+
+
+def test_http_mode_full_flow(tmp_path):
+    runner = FakeRunner(existing={"open-notebook": "User config"})
+    checks: list[tuple[str, dict]] = []
+
+    def fake_check(url, headers, timeout):
+        checks.append((url, dict(headers)))
+        return _ok_status()
+
+    home = make_home(tmp_path)
+    installer, cap = make_installer(
+        tmp_path,
+        runner,
+        home=home,
+        assume_yes=True,
+        mode="http",
+        cf_env_file=home / ".cloudflared" / "pm-token.env",
+        environ={"LORE_VAULT_API_TOKEN": FAKE_TOKEN},
+        http_check=fake_check,
+    )
+    # HTTP 模式不需要 wheel
+    next(installer.kit_dir.glob(inst.WHEEL_GLOB)).unlink()
+    assert installer.install() == 0
+
+    add = next(c for c in runner.calls if c[1:3] == ["mcp", "add"])
+    assert add[3:5] == ["--transport", "http"]
+    assert add[7:9] == ["lore-vault", BASE_URL + "/mcp"]
+    assert f"Authorization: Bearer {FAKE_TOKEN}" in add
+    assert "CF-Access-Client-Id: cid-secret-value" in add
+    assert "CF-Access-Client-Secret: csec-value" in add
+    assert ["C:/bin/claude.exe", "mcp", "remove", "open-notebook", "-s", "user"] in (
+        runner.calls
+    )
+    assert not any(c[1] in ("venv", "pip") for c in runner.calls)
+    assert checks[0][0] == BASE_URL
+    assert checks[0][1]["Authorization"] == f"Bearer {FAKE_TOKEN}"
+    assert installer.paths.skill.read_bytes() == SKILL.read_bytes()
+    assert not installer.paths.mcp_toml.exists()
+
+    report = next(installer.paths.lv_dir.glob("install-report-*.txt")).read_text(
+        "utf-8"
+    )
+    assert "HTTP" in report
+    # HTTP 模式沒有 wheel，status 行不列 wheel schema
+    status_line = next(
+        line for line in report.splitlines() if line.startswith("status：")
+    )
+    assert "wheel" not in status_line
+    for blob in (cap.text, report):
+        for secret in (FAKE_TOKEN, "cid-secret-value", "csec-value"):
+            assert secret not in blob
+
+
+def test_http_mode_check_failure_stops_before_register(tmp_path):
+    runner = FakeRunner()
+    installer, _ = make_installer(
+        tmp_path,
+        runner,
+        assume_yes=True,
+        mode="http",
+        environ={"LORE_VAULT_API_TOKEN": FAKE_TOKEN},
+        http_check=lambda *a: {"category": "bearer", "message": "HTTP 401"},
+    )
+    with pytest.raises(inst.StepFailed) as exc:
+        installer.install()
+    assert inst.CATEGORY_HINTS["bearer"] in exc.value.message
+    assert not any(c[1:3] == ["mcp", "add"] for c in runner.calls)
+
+
+def test_auto_mode_picks_http_without_shell_config(tmp_path):
+    installer, _ = make_installer(tmp_path, FakeRunner(), assume_yes=True, mode="auto")
+    assert installer.resolve_mode() == "http"
+    installer.paths.mcp_toml.parent.mkdir(parents=True)
+    installer.paths.mcp_toml.write_text("", encoding="utf-8")
+    installer.mode = "auto"
+    assert installer.resolve_mode() == "shell"
+
+
+def test_main_dry_run_http_without_base_url(tmp_path, capsys):
+    home = make_home(tmp_path, cf=False)
+    kit = make_kit(tmp_path)
+    runner = FakeRunner()
+    inst.main(
+        ["--dry-run", "--home", str(home), "--kit-dir", str(kit)],
+        runner=runner,
+        environ={"LORE_VAULT_API_TOKEN": FAKE_TOKEN},
+    )
+    out = capsys.readouterr().out
+    assert "HTTP" in out
+    # 本機 PATH 可能沒有 claude，此時停在環境檢查；有的話 dry-run 只顯示遮蔽後的 header
+    assert "Bearer ***" in out or "找不到 claude" in out
+    assert FAKE_TOKEN not in out
+    assert not (home / ".lore-vault").exists()
+
+
+# ── HTTP 模式自檢實跑（本機假服務，不連外）──
+
+
+def _serve_http(status_code: int, body: dict, location: str | None = None):
+    import http.server
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            data = json.dumps(body).encode()
+            self.send_response(status_code)
+            if location:
+                self.send_header("Location", location)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        # 自檢若跟隨轉址，登入頁會回 200；用來證明沒有跟過去
+        def do_GET(self):  # noqa: N802
+            data = b"<html>login</html>"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+@pytest.mark.parametrize(
+    "code,body,location,category",
+    [
+        (
+            200,
+            {
+                "ok": True,
+                "schema": {"version": 14, "expected": 14},
+                "doctor": {"summary": {"pass": 2}, "checks": []},
+            },
+            None,
+            "ok",
+        ),
+        (401, {"error": {"code": "unauthorized", "message": "x"}}, None, "bearer"),
+        (302, {}, "/login", "cf_access"),
+        (403, {}, None, "cf_access"),
+        (530, {}, None, "unreachable"),
+        (500, {"error": {"code": "storage_error", "message": "boom"}}, None, "service"),
+    ],
+)
+def test_http_self_check_against_local_service(code, body, location, category):
+    server = _serve_http(code, body, location)
+    try:
+        data = inst.http_self_check(
+            f"http://127.0.0.1:{server.server_port}",
+            {"Authorization": f"Bearer {FAKE_TOKEN}"},
+            5,
+        )
+    finally:
+        server.shutdown()
+    assert data["category"] == category, data
+    assert FAKE_TOKEN not in json.dumps(data, ensure_ascii=False)
+    if category == "ok":
+        assert data["schema_version"] == 14
+
+
+def test_http_self_check_connection_refused():
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    data = inst.http_self_check(f"http://127.0.0.1:{port}", {}, 5)
+    assert data["category"] in ("connect", "unreachable")
