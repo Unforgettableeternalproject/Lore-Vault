@@ -524,6 +524,26 @@ def test_rollback_restores_backups(tmp_path):
     assert "重開 Claude Code" in cap.text
 
 
+def test_rollback_with_yes_restores_without_prompt(tmp_path):
+    """--rollback --yes 要直接還原，不能因確認題預設否而中止。"""
+    installer, _ = make_installer(tmp_path, FakeRunner(), assume_yes=True)
+    p = installer.paths
+    p.claude_json.write_text("new", encoding="utf-8")
+    inst.backup_path(p.claude_json).write_text("old", encoding="utf-8")
+    assert installer.rollback() == 0
+    assert p.claude_json.read_text(encoding="utf-8") == "old"
+
+
+def test_rollback_interactive_defaults_to_abort(tmp_path):
+    installer, _ = make_installer(tmp_path, FakeRunner(), answers=[""])
+    p = installer.paths
+    p.claude_json.write_text("new", encoding="utf-8")
+    inst.backup_path(p.claude_json).write_text("old", encoding="utf-8")
+    with pytest.raises(inst.Abort):
+        installer.rollback()
+    assert p.claude_json.read_text(encoding="utf-8") == "new"
+
+
 def test_missing_cf_env_blocks_install_only_when_requested(tmp_path):
     home = make_home(tmp_path, cf=False)
     runner = FakeRunner()
@@ -600,6 +620,21 @@ def test_self_check_code_compiles():
 # ── 自檢程式實跑（本機假服務，不連外）──
 
 
+SPACE_REQUIRED = {"error": {"code": "space_required", "message": "space 必填"}}
+
+
+def _status_rule(raw: bytes, status_code: int, body: dict) -> tuple[int, dict]:
+    """模擬服務端 `/v1/status`：無 body 是純健康檢查；有 body 就必須帶 space。"""
+    if raw.strip():
+        try:
+            req = json.loads(raw)
+        except ValueError:
+            req = None
+        if not isinstance(req, dict) or "space" not in req:
+            return 400, SPACE_REQUIRED
+    return status_code, body
+
+
 def _serve(status_code: int, body: dict):
     import http.server
     import threading
@@ -609,9 +644,10 @@ def _serve(status_code: int, body: dict):
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_POST(self):  # noqa: N802
             seen.update({k.lower(): v for k, v in self.headers.items()})
-            self.rfile.read(int(self.headers.get("Content-Length") or 0))
-            data = json.dumps(body).encode()
-            self.send_response(status_code)
+            raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            code, payload = _status_rule(raw, status_code, body)
+            data = json.dumps(payload).encode()
+            self.send_response(code)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
@@ -859,9 +895,10 @@ def _serve_http(status_code: int, body: dict, location: str | None = None):
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_POST(self):  # noqa: N802
-            self.rfile.read(int(self.headers.get("Content-Length") or 0))
-            data = json.dumps(body).encode()
-            self.send_response(status_code)
+            raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            code, payload = _status_rule(raw, status_code, body)
+            data = json.dumps(payload).encode()
+            self.send_response(code)
             if location:
                 self.send_header("Location", location)
             self.send_header("Content-Type", "application/json")

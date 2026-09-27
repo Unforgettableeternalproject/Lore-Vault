@@ -478,7 +478,8 @@ async def main():
     out["cf_access"] = settings.cf_access is not None
     client = ServiceClient(settings)
     try:
-        body = await client.post("/v1/status", {})
+        # 無 body 才是純健康檢查；帶 {} 會被服務端要求 space（400 space_required）
+        body = await client.post("/v1/status", None)
     except ServiceUnreachable as exc:
         out.update(category=classify_unreachable(exc.detail), message=exc.detail)
         return
@@ -595,13 +596,14 @@ def http_self_check(
 ) -> dict:
     """HTTP 模式的自檢：直接 POST `/v1/status`（不經殼），分類同殼的自檢。
 
-    回傳內容不含請求 header；呼叫端仍以 UI.redact 遮蔽。
+    送無 body 的 POST：服務端只把無 body 視為純健康檢查，帶 `{}` 會回
+    400 `space_required`。回傳內容不含請求 header；呼叫端仍以 UI.redact 遮蔽。
     """
     req = urllib.request.Request(
         base_url.rstrip("/") + "/v1/status",
-        data=b"{}",
+        data=None,
         method="POST",
-        headers={"Content-Type": "application/json", **headers},
+        headers=dict(headers),
     )
     opener = urllib.request.build_opener(_NoRedirect())
     try:
@@ -1506,7 +1508,8 @@ class Installer:
             for _, dest in found:
                 self.record(f"還原 {dest.name}", "dry")
             return 0
-        if not self.ui.confirm("確定還原？", default=False):
+        # --yes 代表已同意還原；互動時仍預設否
+        if not self.ui.assume_yes and not self.ui.confirm("確定還原？", default=False):
             raise Abort()
         for bak, dest in found:
             dest.parent.mkdir(parents=True, exist_ok=True)

@@ -74,7 +74,7 @@ claude mcp add --transport http -s user lore-vault <服務位址>/mcp \
 | `--cf-access-env FILE` | 選配：服務前面有 Cloudflare Access 時，含 `CF_ACCESS_CLIENT_ID`／`CF_ACCESS_CLIENT_SECRET` 的檔案；沒給時互動詢問是否使用 |
 | `--update` | 完整殼：只重裝 wheel＋自檢，不動設定；之後 `/mcp` 重連即可。HTTP 模式不需要 |
 | `--yes` | 非互動；token 取自環境變數 `LORE_VAULT_API_TOKEN`（完整殼：有設就覆寫 `mcp.env`，沒設則沿用既有），既有 `mcp.toml` 保留 |
-| `--rollback` | 還原兩份 `.bak-precutover`（`~/.claude.json` 整份回到備份時狀態），之後重開 Claude Code |
+| `--rollback` | 還原兩份 `.bak-precutover`（`~/.claude.json` 整份回到備份時狀態），之後重開 Claude Code；互動時會再確認（預設否），加 `--yes` 則直接還原 |
 | `--no-mask` | 報告不把家目錄遮成 `~` |
 
 以下手動步驟保留作為參考與除錯用；安裝程式失敗時可對照單步排查。
