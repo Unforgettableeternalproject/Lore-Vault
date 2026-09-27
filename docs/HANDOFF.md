@@ -49,7 +49,6 @@
 ## 已知問題
 
 - 全套 pytest 偶有 1 項計時測試失敗（重跑即過）
-- `enrich.backlog` 等待時間以 note 的 `updated` 起算，匯入的舊 note 會顯示極大值
 - 登入鎖定是全域的（解鎖：`docker exec lore-vault python -m lore_vault.cli.admin ui-unlock --yes`）；Eternity 後門待做
 - 刪除保留全文快照，需定期 `cli.admin purge-tombstones`
 - `ask` 連續快速發問會撞 OpenAI TPM 限流（回 429 `ask_rate_limited`）

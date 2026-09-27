@@ -112,7 +112,7 @@ class SummaryConfig:
 class AskConfig:
     """`ask()`（D11）：recall 的 note 片段交 LLM 整理成逐點回答。"""
 
-    # 關閉時 `/v1/ask` 回 503 `ask_disabled`（執行期可由 UI 設定頁覆寫，D13）
+    # 關閉時 `/v1/ask` 回 403 `ask_disabled`（執行期可由 UI 設定頁覆寫，D13）
     enabled: bool = True
     provider: str = "openai"
     base_url: str = "https://api.openai.com/v1"
