@@ -18,7 +18,7 @@ test.beforeAll(async ({ request }) => {
   longNoteId = await writeNote(request, {
     vault: LONG_VAULT,
     title: 'mobilequartz 長 key vault 的筆記',
-    body: '路徑 `C:/Users/Bernie/source/repos/Unforgettableeternalproject/Chatroom/bridge/chatroom_mcp/watch.py`。',
+    body: '路徑 `C:/Users/example/projects/sample-repo/src/very_long_module_name/watch.py`。',
   });
   noteId = await writeNote(request, {
     vault: VAULT,
