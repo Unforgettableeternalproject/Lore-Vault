@@ -1316,7 +1316,7 @@ def build_server(shell: Shell) -> MCPServer:
     server = MCPServer(
         name="lore-vault",
         instructions=HTTP_INSTRUCTIONS if shell.http else INSTRUCTIONS,
-        version="0.1.0",
+        version="0.1.1",
         lifespan=lifespan,
     )
 

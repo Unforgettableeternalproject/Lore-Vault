@@ -29,7 +29,7 @@ _MAX_ERROR_BODY = 4 * 1024 * 1024
 
 # 與 pyproject.toml 的 project.version 同步（有測試守護）。hook 路徑每次編輯都跑，
 # 不用 importlib.metadata：避免 import 成本，也避免套件未安裝時拿不到版本
-CLIENT_VERSION = "0.1.0"
+CLIENT_VERSION = "0.1.1"
 
 
 def user_agent(component: str) -> str:

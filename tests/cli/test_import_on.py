@@ -1139,4 +1139,4 @@ def test_urllib_getter_sends_lore_vault_user_agent(monkeypatch):
 
     monkeypatch.setattr(mod.urllib.request, "urlopen", capture)
     assert mod.urllib_getter("http://127.0.0.1:9/api/notes", {}, 0.1) == (200, b"[]")
-    assert seen == ["lore-vault-import/0.1.0"]
+    assert seen == ["lore-vault-import/0.1.1"]

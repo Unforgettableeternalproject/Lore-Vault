@@ -550,7 +550,7 @@ def test_request_json_sends_lore_vault_user_agent():
     with FakeService(lambda *a: (200, {"items": []}, {})) as svc:
         service.request_json(_settings(svc.url), "GET", "/v1/episodes", timeout=5)
     [req] = svc.requests
-    assert req["headers"]["user-agent"] == "lore-vault-hook/0.1.0"
+    assert req["headers"]["user-agent"] == "lore-vault-hook/0.1.1"
 
 
 def test_spool_push_sends_lore_vault_user_agent(tmp_path):
@@ -558,7 +558,7 @@ def test_spool_push_sends_lore_vault_user_agent(tmp_path):
     with FakeService() as svc:
         spool.push_pending(tmp_path, _settings(svc.url))
     assert [r["headers"]["user-agent"] for r in svc.requests] == [
-        "lore-vault-hook/0.1.0"
+        "lore-vault-hook/0.1.1"
     ]
 
 
@@ -570,7 +570,7 @@ def test_with_user_agent_keeps_caller_value_case_insensitively():
         "A": "b",
         "User-Agent": user_agent("enrich"),
     }
-    assert user_agent("enrich") == "lore-vault-enrich/0.1.0"
+    assert user_agent("enrich") == "lore-vault-enrich/0.1.1"
 
 
 def test_client_version_matches_pyproject():

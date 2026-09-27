@@ -132,7 +132,7 @@ def create_app(
 
     app = FastAPI(
         title="Lore Vault",
-        version="0.1.0",
+        version="0.1.1",
         lifespan=lifespan,
         # 契約文件放在需認證的 /v1 底下；不提供互動式文件頁
         openapi_url="/v1/openapi.json",

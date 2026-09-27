@@ -1,6 +1,6 @@
 [project]
 name = "lore-vault"
-version = "0.1.0"
+version = "0.1.1"
 description = "給 coding agent 的本機記憶系統"
 license = "MIT"
 license-files = ["LICENSE"]

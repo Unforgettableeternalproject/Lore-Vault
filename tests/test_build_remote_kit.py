@@ -47,7 +47,7 @@ class FakeRunner:
             if not self.build_ok:
                 return subprocess.CompletedProcess(argv, 1, "", "boom")
             out = Path(argv[argv.index("-o") + 1])
-            (out / "lore_vault-0.1.0-py3-none-any.whl").write_bytes(b"wheel")
+            (out / "lore_vault-0.1.1-py3-none-any.whl").write_bytes(b"wheel")
             (out / ".gitignore").write_text("*")
             return subprocess.CompletedProcess(argv, 0, "", "")
         raise AssertionError(argv)
@@ -56,14 +56,14 @@ class FakeRunner:
 def test_build_kit_assembles_contents(tmp_path):
     runner = FakeRunner()
     kit = kit_mod.build_kit(tmp_path, runner=runner, today=dt.date(2026, 9, 27))
-    assert kit.name == "lore-vault-kit-0.1.0-20260927-abc1234"
+    assert kit.name == "lore-vault-kit-0.1.1-20260927-abc1234"
     names = sorted(p.name for p in kit.iterdir())
     assert names == [
         "README.txt",
         "SKILL.md",
         "hooks",
         "install.py",
-        "lore_vault-0.1.0-py3-none-any.whl",
+        "lore_vault-0.1.1-py3-none-any.whl",
     ]
     assert (kit / "SKILL.md").read_bytes() == (
         REPO / "integrations/claude/skills/pm/SKILL.md"
@@ -130,7 +130,7 @@ def test_kit_hooks_follow_doctor_boundary(built_kit):
     """kit 的 hook 檔案＝doctor hooks.stdlib_only 掃到的集合，不多不少。"""
     hooks = built_kit / "hooks"
     manifest = json.loads((hooks / "VERSION.json").read_text(encoding="utf-8"))
-    assert manifest["version"] == "0.1.0"
+    assert manifest["version"] == "0.1.1"
     assert manifest["commit"] == "abc1234"
     scan = _hook_scan()
     assert scan.ok

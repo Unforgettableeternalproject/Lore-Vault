@@ -199,4 +199,4 @@ def test_urllib_transport_sends_lore_vault_user_agent(monkeypatch):
     monkeypatch.setattr(clients.urllib.request, "urlopen", capture)
     clients.urllib_transport("http://127.0.0.1:9/x", b"{}", {}, 0.1)
     clients.urllib_transport("http://127.0.0.1:9/x", None, {"User-Agent": "c/1"}, 0.1)
-    assert seen == ["lore-vault-enrich/0.1.0", "c/1"]
+    assert seen == ["lore-vault-enrich/0.1.1", "c/1"]
