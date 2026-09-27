@@ -10,7 +10,11 @@ import { chunkDisplayText, DocDetail } from './DocDetail';
 import { Docs } from './Docs';
 import { Notes } from './Notes';
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  // 篩選會寫回查詢字串；happy-dom 的網址跨測試共用，每個測試後重設
+  window.history.replaceState(null, '', '/ui/docs');
+});
 
 const VAULT = 'github.com/org/lore-vault';
 
@@ -103,6 +107,50 @@ describe('文件列表狀態', () => {
     fireEvent.click(within(screen.getByTestId('doc-deleted')).getByRole('button', { name: '復原' }));
     await waitFor(() => expect(screen.queryByTestId('doc-deleted')).toBeNull());
     expect(callsTo('/v1/document_undelete').at(-1)!.body).toEqual({ space: 'dev', id: 'doc:u1' });
+  });
+});
+
+describe('文件篩選（與記憶層同一套）', () => {
+  it('狀態、類型、檔名送進 /v1/list（依檔名副檔名），並寫回網址', async () => {
+    const { api, callsTo } = makeApi({ '/v1/list': listOf([doc()]) });
+    renderWithApp(<Docs />, api);
+    await screen.findByText('a.md', { selector: 'a' });
+    fireEvent.click(within(screen.getByRole('group', { name: '抽取狀態' })).getByRole('button', { name: '處理中' }));
+    fireEvent.change(screen.getByRole('combobox', { name: '文件類型' }), { target: { value: 'md' } });
+    fireEvent.input(screen.getByRole('textbox', { name: '檔名關鍵字' }), { target: { value: 'spec' } });
+    fireEvent.click(screen.getByRole('button', { name: '套用檔名' }));
+    await waitFor(() =>
+      expect(callsTo('/v1/list').at(-1)!.body).toMatchObject({
+        kinds: ['document'],
+        statuses: ['pending', 'extracting'],
+        extensions: ['md', 'markdown'],
+        title: 'spec',
+        offset: 0,
+      }),
+    );
+    expect(Object.fromEntries(new URLSearchParams(window.location.search))).toEqual({ status: 'processing', type: 'md', title: 'spec' });
+  });
+
+  it('初值取自網址；不在白名單的值當沒有', async () => {
+    window.history.replaceState(null, '', '/ui/docs?status=failed&type=exe&title=report');
+    const { api, callsTo } = makeApi({ '/v1/list': listOf([]) });
+    renderWithApp(<Docs />, api);
+    await waitFor(() => expect(callsTo('/v1/list').length).toBeGreaterThan(0));
+    const body = callsTo('/v1/list')[0]!.body;
+    expect(body).toMatchObject({ statuses: ['failed'], title: 'report' });
+    expect(body).not.toHaveProperty('extensions');
+  });
+
+  it('篩選後沒有結果：說明並可清除篩選；沒有篩選時維持上傳提示', async () => {
+    window.history.replaceState(null, '', '/ui/docs?status=failed');
+    const { api, callsTo } = makeApi({ '/v1/list': listOf([]) });
+    renderWithApp(<Docs />, api);
+    const empty = await screen.findByTestId('docs-empty');
+    expect(empty.textContent).toContain('沒有符合篩選條件的文件');
+    fireEvent.click(within(empty).getByRole('button', { name: '清除篩選' }));
+    await waitFor(() => expect(callsTo('/v1/list').at(-1)!.body).not.toHaveProperty('statuses'));
+    expect((await screen.findByTestId('docs-empty')).textContent).toContain('這裡還沒有文件');
+    expect(window.location.search).toBe('');
   });
 });
 

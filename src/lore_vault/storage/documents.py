@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -23,6 +24,7 @@ from lore_vault.schema.chars import check_fields
 
 from .db import transaction
 from .errors import NotFound
+from .filters import contains_clause, filter_choices, filter_extensions, filter_text
 from .migrate import DOCUMENT_ERROR_CODES
 from .timeutil import utc_now
 from .vaults import resolve_read, resolve_write, vault_clause
@@ -401,7 +403,13 @@ def _since_filters(
     space: str,
     since: str | None,
     until: str | None,
+    title: str | None = None,
+    statuses: Sequence[str] | None = None,
+    extensions: Sequence[str] | None = None,
 ) -> tuple[list[str], list[Any]]:
+    title = filter_text("title", title)
+    picked_statuses = filter_choices("statuses", statuses, sorted(DOCUMENT_STATUSES))
+    picked_exts = filter_extensions(extensions)
     scope = resolve_read(conn, vault, space=space)
     clause, params = vault_clause(scope, "vault")
     conditions = [clause]
@@ -412,6 +420,19 @@ def _since_filters(
     if until is not None:
         conditions.append("updated <= ?")
         args.append(until)
+    if title is not None:
+        clause_sql, arg = contains_clause("filename", title)
+        conditions.append(clause_sql)
+        args.append(arg)
+    if picked_statuses is not None:
+        conditions.append(f"status IN ({','.join('?' * len(picked_statuses))})")
+        args.extend(picked_statuses)
+    if picked_exts is not None:
+        # 以檔名字尾判斷（與 UI 列上的「類型」一致），不看 mime；副檔名已驗證為英數字
+        conditions.append(
+            "(" + " OR ".join("lower(filename) LIKE ?" for _ in picked_exts) + ")"
+        )
+        args.extend(f"%.{ext}" for ext in picked_exts)
     return conditions, args
 
 
@@ -425,9 +446,14 @@ def list_documents_since(
     limit: int = 50,
     cursor: tuple[str, str] | None = None,
     offset: int = 0,
+    title: str | None = None,
+    statuses: Sequence[str] | None = None,
+    extensions: Sequence[str] | None = None,
 ) -> tuple[list[Document], tuple[str, str] | None]:
     """`list` 工具用：依 (updated, id) 由新到舊、`since <= updated <= until`（含端點），
-    分頁同 `list_documents`；`offset` 為頁碼分頁用，與 `cursor` 擇一。"""
+    分頁同 `list_documents`；`offset` 為頁碼分頁用，與 `cursor` 擇一。
+    `title`：檔名含該字串（ASCII 不分大小寫）；`statuses`：抽取狀態；`extensions`：
+    檔名副檔名（不含點、不分大小寫）。都在 SQL 內、LIMIT 之前過濾。"""
     if limit <= 0:
         raise ValueError(f"limit 必須大於 0，得到 {limit}")
     if offset < 0:
@@ -435,7 +461,14 @@ def list_documents_since(
     if offset and cursor is not None:
         raise ValueError("offset 與 cursor 只能擇一")
     conditions, args = _since_filters(
-        conn, vault, space=space, since=since, until=until
+        conn,
+        vault,
+        space=space,
+        since=since,
+        until=until,
+        title=title,
+        statuses=statuses,
+        extensions=extensions,
     )
     if cursor is not None:
         conditions.append("(updated, id) < (?, ?)")
@@ -460,10 +493,20 @@ def count_documents_since(
     space: str,
     since: str | None = None,
     until: str | None = None,
+    title: str | None = None,
+    statuses: Sequence[str] | None = None,
+    extensions: Sequence[str] | None = None,
 ) -> int:
     """與 `list_documents_since` 相同篩選條件下的總筆數。"""
     conditions, args = _since_filters(
-        conn, vault, space=space, since=since, until=until
+        conn,
+        vault,
+        space=space,
+        since=since,
+        until=until,
+        title=title,
+        statuses=statuses,
+        extensions=extensions,
     )
     row = conn.execute(
         f"SELECT count(*) FROM documents WHERE {' AND '.join(conditions)}", args

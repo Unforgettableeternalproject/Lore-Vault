@@ -18,6 +18,7 @@ from lore_vault.schema.chars import check_fields
 from . import fts
 from .db import transaction
 from .errors import DuplicateRecord, NotFound, VaultRequired
+from .filters import contains_clause, filter_text
 from .timeutil import next_after, normalize_utc
 from .vaults import resolve_read, resolve_write, vault_clause
 
@@ -160,6 +161,12 @@ def get_note(conn: sqlite3.Connection, vault: str, note_id: str, *, space: str) 
     return found[0]
 
 
+# list 的作者狀態篩選：named＝有自報名（含舊資料的 legacy）、missing＝未具名
+AUTHOR_NAMED = "named"
+AUTHOR_MISSING = "missing"
+AUTHOR_STATES = (AUTHOR_NAMED, AUTHOR_MISSING)
+
+
 def _note_filters(
     conn: sqlite3.Connection,
     vault: str,
@@ -168,7 +175,14 @@ def _note_filters(
     since: str | None,
     until: str | None,
     topics: Sequence[str] | None,
+    title: str | None = None,
+    author: str | None = None,
+    author_state: str | None = None,
 ) -> tuple[list[str], list[Any]]:
+    title = filter_text("title", title)
+    author = filter_text("author", author)
+    if author_state is not None and author_state not in AUTHOR_STATES:
+        raise ValueError(f"author_state 必須是 {list(AUTHOR_STATES)} 之一")
     scope = resolve_read(conn, vault, space=space)
     clause, params = vault_clause(scope, "vault")
     conditions = [clause]
@@ -190,6 +204,18 @@ def _note_filters(
             f"({placeholders}))"
         )
         args.extend(topics)
+    if title is not None:
+        clause_sql, arg = contains_clause("title", title)
+        conditions.append(clause_sql)
+        args.append(arg)
+    if author is not None:
+        clause_sql, arg = contains_clause("author", author)
+        conditions.append(clause_sql)
+        args.append(arg)
+    if author_state == AUTHOR_NAMED:
+        conditions.append("author IS NOT NULL AND trim(author) != ''")
+    elif author_state == AUTHOR_MISSING:
+        conditions.append("(author IS NULL OR trim(author) = '')")
     return conditions, args
 
 
@@ -204,6 +230,9 @@ def list_notes(
     limit: int = 50,
     cursor: tuple[str, str] | None = None,
     offset: int = 0,
+    title: str | None = None,
+    author: str | None = None,
+    author_state: str | None = None,
 ) -> tuple[list[Note], tuple[str, str] | None]:
     """依 (updated, id) 由新到舊分頁。回傳 (本頁, 下一頁 cursor 或 None)。
 
@@ -211,6 +240,8 @@ def list_notes(
     `topics`：只列至少含其中一個 topic 的 note（大小寫精確比對）；在 SQL 內、
     LIMIT 之前過濾，分頁不會因為事後過濾而少回。
     `offset`：跳過前面幾筆（頁碼分頁用）；與 `cursor` 擇一。
+    `title`／`author`：標題／作者含該字串（ASCII 不分大小寫）；`author_state`：
+    named（有作者）／missing（未具名）。同樣在 SQL 內、LIMIT 之前過濾。
     """
     if limit <= 0:
         raise ValueError(f"limit 必須大於 0，得到 {limit}")
@@ -219,7 +250,15 @@ def list_notes(
     if offset and cursor is not None:
         raise ValueError("offset 與 cursor 只能擇一")
     conditions, args = _note_filters(
-        conn, vault, space=space, since=since, until=until, topics=topics
+        conn,
+        vault,
+        space=space,
+        since=since,
+        until=until,
+        topics=topics,
+        title=title,
+        author=author,
+        author_state=author_state,
     )
     if cursor is not None:
         conditions.append("(updated, id) < (?, ?)")
@@ -244,10 +283,21 @@ def count_listed_notes(
     since: str | None = None,
     until: str | None = None,
     topics: Sequence[str] | None = None,
+    title: str | None = None,
+    author: str | None = None,
+    author_state: str | None = None,
 ) -> int:
     """與 `list_notes` 相同篩選條件下的總筆數（頁碼分頁用）。"""
     conditions, args = _note_filters(
-        conn, vault, space=space, since=since, until=until, topics=topics
+        conn,
+        vault,
+        space=space,
+        since=since,
+        until=until,
+        topics=topics,
+        title=title,
+        author=author,
+        author_state=author_state,
     )
     row = conn.execute(
         f"SELECT count(*) FROM notes WHERE {' AND '.join(conditions)}", args

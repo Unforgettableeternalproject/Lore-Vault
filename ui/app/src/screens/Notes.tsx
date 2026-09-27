@@ -1,4 +1,6 @@
-// 筆記列表（T-80）：依目前 vault 篩選分頁瀏覽，標籤與時間篩選走 `/v1/list` 的 topics／since；
+// 筆記列表（T-80）：依目前 vault 篩選分頁瀏覽；篩選（與記憶層同一套元件）走 `/v1/list`：
+// 標籤 topics、更新日期區間 since／until、標題 title、作者 author（部分符合）與 author_state
+// （已具名／未具名），條件同步到網址查詢字串（vault 仍由側欄共用狀態決定）。
 // 標籤選項取自 `/v1/topics`（範圍內全部標籤與筆數）。摘要受 list 的 `budget` 限制，後端在本頁公平分配：
 // 超過配額的摘要被截短（summary_truncated，列上標「截短」），連下限都給不起的尾端 note 摘要被省略
 // （summary_source: omitted）；整頁的 truncated／summaries_truncated／summaries_omitted 以橫幅呈現並可放大預算。
@@ -7,10 +9,20 @@
 import { useEffect, useState } from 'preact/hooks';
 
 import { Badge, Banner, EmptyState, ErrorState, Loading, SourceTag } from '../components/ui';
-import { DEFAULT_PAGE_SIZE, Pager } from '../components/Pager';
+import {
+  ChipGroup,
+  FilterPanel,
+  queryChoice,
+  queryDate,
+  queryText,
+  screenQuery,
+  TextFilter,
+  useQuerySync,
+} from '../components/Filters';
+import { DateRange, DEFAULT_PAGE_SIZE, Pager, rangeParams, type DateRangeValue } from '../components/Pager';
 import { VaultPicker } from '../components/VaultPicker';
 import { useApp, vaultName } from '../lib/context';
-import { authorLabel, daysAgoIso, describeError, formatTime, isAbort } from '../lib/format';
+import { authorLabel, describeError, formatTime, isAbort } from '../lib/format';
 import { routePath } from '../lib/router';
 import type { ListResult, NoteListItem, TopicsResult } from '../lib/types';
 
@@ -18,12 +30,13 @@ import type { ListResult, NoteListItem, TopicsResult } from '../lib/types';
 export const LIST_SUMMARY_CHARS = 280;
 /** 「顯示更多摘要」最多把預算放大到初始值的倍數 */
 const BUDGET_GROWTH_CAP = 8;
-const TIME_FILTERS = [
-  { id: 'all', label: '全部', days: null },
-  { id: '7d', label: '7 天', days: 7 },
-  { id: '30d', label: '30 天', days: 30 },
+const AUTHOR_STATES = [
+  { id: '', label: '全部' },
+  { id: 'named', label: '已具名' },
+  { id: 'missing', label: '未具名' },
 ] as const;
-type TimeId = (typeof TIME_FILTERS)[number]['id'];
+type AuthorState = (typeof AUTHOR_STATES)[number]['id'];
+const AUTHOR_STATE_IDS = AUTHOR_STATES.map((a) => a.id);
 
 /** 截斷橫幅標題：分別列出截短與省略的筆數 */
 function truncatedTitle(page: ListResult<NoteListItem>): string {
@@ -40,8 +53,13 @@ export function Notes() {
   const [pageNo, setPageNo] = useState(1);
   const baseBudget = Math.max(limits.list_default_budget, pageSize * LIST_SUMMARY_CHARS);
   const [budget, setBudget] = useState(baseBudget);
-  const [tag, setTag] = useState<string | null>(null);
-  const [time, setTime] = useState<TimeId>('all');
+  // 篩選初值取自網址（重新整理、從筆記返回都保留）
+  const [initial] = useState(() => screenQuery('notes'));
+  const [tag, setTag] = useState<string | null>(() => queryText(initial, 'tag') || null);
+  const [range, setRange] = useState<DateRangeValue>(() => ({ from: queryDate(initial, 'from'), to: queryDate(initial, 'to') }));
+  const [title, setTitle] = useState(() => queryText(initial, 'title'));
+  const [author, setAuthor] = useState(() => queryText(initial, 'author'));
+  const [authorState, setAuthorState] = useState<AuthorState>(() => queryChoice(initial, 'author_state', AUTHOR_STATE_IDS, ''));
   const [page, setPage] = useState<ListResult<NoteListItem> | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [loading, setLoading] = useState(true);
@@ -49,11 +67,21 @@ export function Notes() {
   const [topics, setTopics] = useState<TopicsResult['topics'] | null>(null);
   const [topicsError, setTopicsError] = useState<string | null>(null);
 
+  useQuerySync('notes', { tag, from: range.from, to: range.to, title, author, author_state: authorState });
+  const filtered = Boolean(tag || range.from || range.to || title || author || authorState);
+  const clearFilters = () => {
+    setTag(null);
+    setRange({ from: '', to: '' });
+    setTitle('');
+    setAuthor('');
+    setAuthorState('');
+  };
+
   // 篩選或每頁筆數變了回第一頁、摘要預算重置
   useEffect(() => {
     setPageNo(1);
     setBudget(baseBudget);
-  }, [vault, tag, time, pageSize]);
+  }, [vault, tag, range.from, range.to, title, author, authorState, pageSize]);
 
   // 標籤選項：範圍內全部標籤（不是只看已載入的那一頁）
   useEffect(() => {
@@ -74,7 +102,6 @@ export function Notes() {
     const ctrl = new AbortController();
     setLoading(true);
     setError(null);
-    const days = TIME_FILTERS.find((t) => t.id === time)?.days ?? null;
     api
       .post<ListResult<NoteListItem>>(
         '/v1/list',
@@ -87,7 +114,10 @@ export function Notes() {
           with_total: true,
           budget,
           ...(tag ? { topics: [tag] } : {}),
-          ...(days ? { since: daysAgoIso(days) } : {}),
+          ...(title ? { title } : {}),
+          ...(author ? { author } : {}),
+          ...(authorState ? { author_state: authorState } : {}),
+          ...rangeParams(range),
         },
         ctrl.signal,
       )
@@ -101,7 +131,7 @@ export function Notes() {
         setLoading(false);
       });
     return () => ctrl.abort();
-  }, [api, space.id, vault, tag, time, pageNo, pageSize, budget, tick]);
+  }, [api, space.id, vault, tag, range.from, range.to, title, author, authorState, pageNo, pageSize, budget, tick]);
 
   const items = page?.items ?? [];
   const maxBudget = baseBudget * BUDGET_GROWTH_CAP;
@@ -125,43 +155,58 @@ export function Notes() {
         </button>
       </div>
 
-      <div class="lv-filters">
-        <VaultPicker />
-        <div class="lv-chips" role="group" aria-label="標籤篩選">
-          <span class="lv-filters__label">TAGS</span>
-          <button type="button" class={'lv-chip lv-chip--mono' + (tag === null ? ' is-on' : '')} aria-pressed={tag === null} onClick={() => setTag(null)}>
-            全部
-          </button>
-          {tagOptions.map((t) => (
-            <button
-              key={t.topic}
-              type="button"
-              class={'lv-chip lv-chip--mono' + (tag === t.topic ? ' is-on' : '')}
-              aria-pressed={tag === t.topic}
-              aria-label={`#${t.topic}（${t.count} 則）`}
-              onClick={() => setTag(tag === t.topic ? null : t.topic)}
-            >
-              #{t.topic}
-              <span class="lv-chip__count" aria-hidden="true">
-                {t.count}
-              </span>
-            </button>
-          ))}
-          {tagMissing && (
-            <button type="button" class="lv-chip lv-chip--mono is-on" aria-pressed="true" onClick={() => setTag(null)}>
-              #{tag}
-            </button>
-          )}
+      <FilterPanel
+        active={filtered}
+        onClear={clearFilters}
+        summary={
+          <>
+            範圍：{vaultName({ vaults }, vault)}
+            {tag ? ` · #${tag}` : ''}
+            {title ? ` · 標題含「${title}」` : ''}
+            {author ? ` · 作者含「${author}」` : ''}
+            {authorState === 'named' ? ' · 已具名' : authorState === 'missing' ? ' · 未具名' : ''}
+            {range.from || range.to ? ` · ${range.from || '最早'}～${range.to || '今天'}` : ''}
+          </>
+        }
+      >
+        <div class="lv-filter-panel__row">
+          <VaultPicker />
+          <DateRange value={range} onChange={setRange} />
         </div>
-        <div class="lv-chips" role="group" aria-label="時間篩選">
-          <span class="lv-filters__label">TIME</span>
-          {TIME_FILTERS.map((t) => (
-            <button key={t.id} type="button" class={'lv-chip' + (time === t.id ? ' is-on' : '')} aria-pressed={time === t.id} onClick={() => setTime(t.id)}>
-              {t.label}
+        <div class="lv-filter-panel__row">
+          <div class="lv-chips" role="group" aria-label="標籤篩選">
+            <span class="lv-filters__label">TAGS</span>
+            <button type="button" class={'lv-chip lv-chip--mono' + (tag === null ? ' is-on' : '')} aria-pressed={tag === null} onClick={() => setTag(null)}>
+              全部
             </button>
-          ))}
+            {tagOptions.map((t) => (
+              <button
+                key={t.topic}
+                type="button"
+                class={'lv-chip lv-chip--mono' + (tag === t.topic ? ' is-on' : '')}
+                aria-pressed={tag === t.topic}
+                aria-label={`#${t.topic}（${t.count} 則）`}
+                onClick={() => setTag(tag === t.topic ? null : t.topic)}
+              >
+                #{t.topic}
+                <span class="lv-chip__count" aria-hidden="true">
+                  {t.count}
+                </span>
+              </button>
+            ))}
+            {tagMissing && (
+              <button type="button" class="lv-chip lv-chip--mono is-on" aria-pressed="true" onClick={() => setTag(null)}>
+                #{tag}
+              </button>
+            )}
+          </div>
         </div>
-      </div>
+        <div class="lv-filter-panel__row">
+          <TextFilter value={title} onApply={setTitle} inputLabel="標題關鍵字" placeholder="標題含…（不分大小寫）" submitLabel="套用標題" testId="filter-title" />
+          <ChipGroup label="作者" groupLabel="作者狀態" options={AUTHOR_STATES} value={authorState} onChange={setAuthorState} />
+          <TextFilter value={author} onApply={setAuthor} inputLabel="作者名稱" placeholder="作者含…（不分大小寫）" submitLabel="套用作者" testId="filter-author" />
+        </div>
+      </FilterPanel>
       {topicsError && (
         <p class="lv-notice lv-notice--warn" role="status" data-testid="topics-error">
           標籤清單載入失敗：{topicsError}（仍可瀏覽筆記，只是不能依標籤篩選）
@@ -283,17 +328,10 @@ export function Notes() {
           {items.length === 0 && !loading && (
             <EmptyState
               testId="notes-empty"
-              title={tag || time !== 'all' ? '沒有符合篩選條件的筆記' : '這裡還沒有筆記'}
+              title={filtered ? '沒有符合篩選條件的筆記' : '這裡還沒有筆記'}
               action={
-                tag || time !== 'all' ? (
-                  <button
-                    type="button"
-                    class="btn-outline"
-                    onClick={() => {
-                      setTag(null);
-                      setTime('all');
-                    }}
-                  >
+                filtered ? (
+                  <button type="button" class="btn-outline" onClick={clearFilters}>
                     清除篩選
                   </button>
                 ) : (

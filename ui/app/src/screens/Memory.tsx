@@ -2,6 +2,7 @@
 // 以及收料概況（by_machine／by_vault）。concept 與 episode 只屬於 dev，其他 space 只顯示說明。
 import { useEffect, useState } from 'preact/hooks';
 
+import { ChipGroup, FilterPanel, TextFilter } from '../components/Filters';
 import { DateRange, DEFAULT_PAGE_SIZE, Pager, rangeParams, type DateRangeValue } from '../components/Pager';
 import { Badge, EmptyState, ErrorState, Loading } from '../components/ui';
 import { VaultPicker } from '../components/VaultPicker';
@@ -62,7 +63,6 @@ function ConceptList() {
   const { api, space, vault, vaults } = useApp();
   const [kind, setKind] = useState('');
   const [scopeState, setScopeState] = useState('');
-  const [scopeInput, setScopeInput] = useState('');
   const [scope, setScope] = useState('');
   const [range, setRange] = useState<DateRangeValue>({ from: '', to: '' });
   const [pageNo, setPageNo] = useState(1);
@@ -111,7 +111,15 @@ function ConceptList() {
 
   return (
     <div class="lv-memory-concepts">
-      <section class="lv-filter-panel" aria-label="篩選條件" data-testid="filter-panel">
+      <FilterPanel
+        summary={
+          <>
+            範圍：{vaultName({ vaults }, vault)}
+            {scope ? ` · scope「${scope}」` : ''}
+            {range.from || range.to ? ` · ${range.from || '最早'}～${range.to || '今天'}` : ''}
+          </>
+        }
+      >
         <div class="lv-filter-panel__row">
           <VaultPicker />
           <label class="lv-filters__group">
@@ -127,45 +135,10 @@ function ConceptList() {
           <DateRange value={range} onChange={setRange} />
         </div>
         <div class="lv-filter-panel__row">
-          <div class="lv-chips" role="group" aria-label="scope 狀態">
-            <span class="lv-filters__label">SCOPE</span>
-            {SCOPE_STATES.map((s) => (
-              <button
-                key={s.id}
-                type="button"
-                class={'lv-chip lv-chip--mono' + (scopeState === s.id ? ' is-on' : '')}
-                aria-pressed={scopeState === s.id}
-                onClick={() => setScopeState(s.id)}
-              >
-                {s.label}
-              </button>
-            ))}
-          </div>
-          <form
-            class="lv-filter-panel__scope"
-            onSubmit={(e) => {
-              e.preventDefault();
-              setScope(scopeInput.trim());
-            }}
-          >
-            <input
-              class="lv-input"
-              aria-label="scope 名稱"
-              placeholder="repo scope（不分大小寫）"
-              value={scopeInput}
-              onInput={(e) => setScopeInput((e.target as HTMLInputElement).value)}
-            />
-            <button type="submit" class="btn-outline btn-outline--sm">
-              套用 scope
-            </button>
-          </form>
+          <ChipGroup label="SCOPE" groupLabel="scope 狀態" options={SCOPE_STATES} value={scopeState} onChange={setScopeState} />
+          <TextFilter value={scope} onApply={setScope} inputLabel="scope 名稱" placeholder="repo scope（不分大小寫）" submitLabel="套用 scope" />
         </div>
-        <p class="lv-filter-panel__summary lv-muted lv-small">
-          範圍：{vaultName({ vaults }, vault)}
-          {scope ? ` · scope「${scope}」` : ''}
-          {range.from || range.to ? ` · ${range.from || '最早'}～${range.to || '今天'}` : ''}
-        </p>
-      </section>
+      </FilterPanel>
 
       {error !== null && <ErrorState error={error} onRetry={() => setTick((t) => t + 1)} />}
       {loading && !page && <Loading />}

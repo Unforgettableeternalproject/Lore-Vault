@@ -27,7 +27,10 @@ from lore_vault.schema import Note, validate_author
 from lore_vault.schema.chars import check_fields
 from lore_vault.storage import fts, vectors
 from lore_vault.storage.db import transaction
+from lore_vault.storage.documents import DOCUMENT_STATUSES
+from lore_vault.storage.filters import filter_choices, filter_extensions, filter_text
 from lore_vault.storage.notes import (
+    AUTHOR_STATES,
     count_listed_notes,
     get_note,
     get_notes,
@@ -742,6 +745,11 @@ def list_(
     until: str | None = None,
     offset: int | None = None,
     with_total: bool = False,
+    title: str | None = None,
+    author: str | None = None,
+    author_state: str | None = None,
+    statuses: Sequence[str] | None = None,
+    extensions: Sequence[str] | None = None,
 ) -> ListResult:
     """標題清單，依 updated 由新到舊；note 與文件（`kinds` 預設兩者）合併分頁。
 
@@ -758,6 +766,12 @@ def list_(
     頁碼分頁（UI）：`offset` 跳過前面幾筆（與 `cursor` 擇一），`with_total` 另回相同篩選
     下的總筆數 `total`；`until` 與 `since` 一起限定 updated 區間（含端點）。
     只列一種 kind 時 offset 直接下到 SQL；兩種合併時各取前 offset+limit 筆合併後再切。
+
+    其他篩選（都在 SQL 內、LIMIT 之前，total 與 items 用同一組條件）：
+    `title` 兩種都適用（note 標題／文件檔名含該字串，ASCII 不分大小寫）；
+    `author`（作者含該字串）、`author_state`（named／missing）與 `topics` 一樣只屬
+    note，指定時不列文件；`statuses`（抽取狀態）、`extensions`（檔名副檔名）只屬
+    文件，指定時不列 note。兩類同時指定就沒有符合的項目。
     """
     if isinstance(limit, bool) or not isinstance(limit, int):
         raise TypeError("limit 必須是整數")
@@ -771,12 +785,21 @@ def list_(
         if cursor is not None:
             raise ValueError("offset 與 cursor 只能擇一")
     wanted = _list_kinds(kinds)
+    # 篩選值先驗證（即使該 kind 這次沒列，也不默默忽略錯誤的參數）
+    title = filter_text("title", title)
+    author = filter_text("author", author)
+    if author_state is not None and author_state not in AUTHOR_STATES:
+        raise ValueError(f"author_state 必須是 {list(AUTHOR_STATES)} 之一")
+    statuses = filter_choices("statuses", statuses, sorted(DOCUMENT_STATUSES))
+    extensions = filter_extensions(extensions)
+    note_only = topics is not None or author is not None or author_state is not None
+    doc_only = statuses is not None or extensions is not None
+    list_notes_kind = LIST_KIND_NOTE in wanted and not doc_only
+    list_docs_kind = LIST_KIND_DOCUMENT in wanted and not note_only
     decoded = _decode_cursor(cursor) if cursor is not None else None
     skip = offset or 0
     # 兩種 kind 合併時，offset 無法分別下到兩張表：各取前 skip+limit 筆，合併後再切
-    merged = (
-        LIST_KIND_NOTE in wanted and LIST_KIND_DOCUMENT in wanted and topics is None
-    )
+    merged = list_notes_kind and list_docs_kind
     fetch_limit, fetch_offset = (skip + limit, 0) if merged and skip else (limit, skip)
     since_norm = normalize_utc(since) if since is not None else None
     until_norm = normalize_utc(until) if until is not None else None
@@ -784,22 +807,26 @@ def list_(
     unsupported: list[str] = []
     rows: list[tuple[str, str, dict[str, Any]]] = []
     more = False
-    if LIST_KIND_NOTE in wanted:
+    if list_notes_kind:
+        note_filters: dict[str, Any] = {
+            "since": since,
+            "until": until,
+            "topics": topics,
+            "title": title,
+            "author": author,
+            "author_state": author_state,
+        }
         notes, next_notes = list_notes(
             conn,
             vault,
             space=space,
-            since=since,
-            until=until,
-            topics=topics,
             limit=fetch_limit,
             cursor=decoded,
             offset=fetch_offset,
+            **note_filters,
         )
         if with_total:
-            total += count_listed_notes(
-                conn, vault, space=space, since=since, until=until, topics=topics
-            )
+            total += count_listed_notes(conn, vault, space=space, **note_filters)
         more = more or next_notes is not None
         replaced = superseded_by(conn, notes)
         rows.extend(
@@ -823,27 +850,36 @@ def list_(
             )
             for n in notes
         )
-    if LIST_KIND_DOCUMENT in wanted and topics is None:
+    if list_docs_kind:
         if documents_available:
+            doc_filters: dict[str, Any] = {
+                "since": since_norm,
+                "until": until_norm,
+                "title": title,
+                "statuses": statuses,
+                "extensions": extensions,
+            }
             page, next_docs = document_service.list_page(
                 conn,
                 vault,
                 space=space,
-                since=since_norm,
-                until=until_norm,
                 limit=fetch_limit,
                 cursor=decoded,
                 offset=fetch_offset,
+                **doc_filters,
             )
             more = more or next_docs is not None
             rows.extend(page)
             if with_total:
                 total += document_service.count_since(
-                    conn, vault, space=space, since=since_norm, until=until_norm
+                    conn, vault, space=space, **doc_filters
                 )
         else:
             resolve_read(conn, vault, space=space)
             unsupported.append(LIST_KIND_DOCUMENT)
+    if not list_notes_kind and not list_docs_kind:
+        # 篩選互斥（note 專屬＋文件專屬）或排除了唯一要求的 kind：空頁，但仍檢查範圍
+        resolve_read(conn, vault, space=space)
     rows.sort(key=lambda r: (r[0], r[1]), reverse=True)
     if merged and skip:
         rows = rows[skip:]

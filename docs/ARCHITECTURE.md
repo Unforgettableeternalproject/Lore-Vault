@@ -175,6 +175,14 @@ spike 接入端點（階段 8，同樣需 bearer；每筆 body 項目 = schema d
 
 `/v1/list` 另接受 `until`（updated 上界，含端點；與 `since` 一起做日期區間）、`offset`（頁碼分頁，與 `cursor` 擇一）與 `with_total`（回 `total`＝相同篩選下的總筆數，回應同時帶回 `offset`）；UI 的分頁元件使用，MCP 殼仍用 cursor。
 
+`/v1/list` 的篩選參數（UI 筆記／文件頁；MCP 殼不帶）：
+
+- `title`：note 標題／文件檔名含該字串（ASCII 不分大小寫，`%`、`_` 照字面比對）；兩種 kind 都適用。
+- `author`：note 作者含該字串（同上）；`author_state`：`named`（有作者，含舊資料的 `legacy`）／`missing`（未具名）。與 `topics` 一樣只屬 note，指定時不列文件。
+- `statuses`：文件抽取狀態清單（`pending`／`extracting`／`ready`／`failed`）；`extensions`：檔名副檔名清單（不含點、不分大小寫，只收英數字；依檔名字尾判斷，不看 mime）。只屬文件，指定時不列 note。
+- note 專屬與文件專屬篩選同時指定時沒有符合的項目（空頁、`total: 0`）。
+- 全部篩選都在 SQL 內、LIMIT 之前套用，`total` 與 `items` 用同一組條件；空字串、空清單、白名單外的值或超過 200 字回 400 `invalid_request`（該 kind 這次沒列也照樣驗證）。
+
 concept／episode 只屬 dev：在 lore／personal 查詢 `vault="*"` 回空、指定 dev 的 key 為 404。
 
 **兩段式確認**（⚠ 標記的端點）：不帶 `confirm_token` → 只規劃，回 `{executed: false, plan, confirm_token, expires_at}`；以**完全相同的參數**加上 token 再送一次 → `{executed: true, plan, …}`。token＝base64url(payload)．HMAC-SHA256，payload 綁定操作名、全部請求參數（含 space、reason）、規劃內容的 sha256 與到期時間（5 分鐘）；祕密每個服務程序隨機產生（重啟後舊 token 失效）。簽章不符、格式錯誤、參數或操作不符 → 400 `invalid_confirm_token`；過期 → 400 `confirm_token_expired`。執行時在同一個寫入交易內重新規劃並比對 digest，不符 → 409 `plan_changed`：`error.plan` 附目前規劃，另附綁定新規劃的 `error.confirm_token`／`error.expires_at`（同一操作、同一組參數）；**仍需使用者看過新規劃再確認一次**，以新 token 重送才執行，服務端不會自動執行。舊 token 綁的是舊規劃的 digest，只要資料維持新狀態，重送一律 409、不執行（token 無狀態：資料若恢復成舊規劃的樣子，舊 token 才又相符）。儲存層筆數核對失敗的 409 `plan_changed`（第二道防線）不附 plan／token。指紋除規劃本身外另含：note 的 `updated`、文件的 status／updated／supersedes、vault 內 note／文件最大的 `updated`。執行後目標已不存在，重送同一 token 得 404。

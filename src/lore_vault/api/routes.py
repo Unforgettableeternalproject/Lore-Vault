@@ -139,6 +139,13 @@ class ListRequest(_ScopedReq):
     # 本頁 note 摘要字數總和上限（title 不計；公平分配，超過配額的截短、
     # 連下限都給不起的尾端 summary 為 null）
     budget: int = DEFAULT_LIST_BUDGET
+    # 篩選（UI 的筆記／文件頁）：title 兩種都適用（標題／檔名含該字串）；
+    # author／author_state 只屬 note，statuses／extensions 只屬文件
+    title: str | None = None
+    author: str | None = None
+    author_state: str | None = None
+    statuses: list[str] | None = None
+    extensions: list[str] | None = None
 
 
 class WriteRequest(_ScopedReq):
@@ -312,6 +319,11 @@ def list_(request: Request, req: ListRequest) -> dict[str, Any]:
             until=req.until,
             offset=req.offset,
             with_total=req.with_total,
+            title=req.title,
+            author=req.author,
+            author_state=req.author_state,
+            statuses=req.statuses,
+            extensions=req.extensions,
         )
     return result.to_dict()
 

@@ -14,6 +14,7 @@ Preact + Vite，建置成 `ui/app/dist` 由 FastAPI 同源提供於 `/ui`（`src
 | `ui/app/src/components/ui.tsx` | `Badge`、`EmptyState`、`Banner`、`ErrorState`、`Loading`、`Dialog`、兩段式確認 |
 | `ui/app/src/components/VaultPicker.tsx` | 頁面內 vault 篩選器 |
 | `ui/app/src/components/Pager.tsx` | 頁碼分頁 `Pager`、日期區間 `DateRange`、`rangeParams` |
+| `ui/app/src/components/Filters.tsx` | 列表篩選共用：`FilterPanel`（摘要＋清除篩選）、`ChipGroup`、`TextFilter`（送出才套用）、網址同步 `useQuerySync`／`screenQuery` |
 | `ui/app/src/lib/context.ts` | `AppEnv`（api、space、vault 篩選、toast、健檢徽章、最近一次檢索降級…） |
 | `ui/app/src/lib/format.ts` | 文案與格式：錯誤碼、`formatTime`、`stripInternalRefs`、語意狀態說法 |
 | `ui/app/src/lib/health.ts` | 健檢分組、客戶端檢查清單、備份明細解析 |
@@ -37,6 +38,10 @@ Preact + Vite，建置成 `ui/app/dist` 由 FastAPI 同源提供於 `/ui`（`src
   - 載入中不停用按鈕：上一個請求會被 AbortController 取消，停用反而會閃成低對比。
 - **`DateRange`**：本地日期轉 `since`＝當天 00:00、`until`＝23:59:59.999 的 UTC ISO，兩端都含。
 - **API 分頁擴充**：`/v1/list`、`/v1/concept_query` 支援 `until`、`offset`（與 `cursor` 擇一）、`with_total`（回 `total`）。MCP 殼仍用 cursor。見 `docs/ARCHITECTURE.md`。
+- **列表篩選**：記憶層、筆記、文件共用 `components/Filters.tsx`。
+  - 筆記：vault、日期區間、標籤、標題、作者（部分符合）與作者狀態（已具名／未具名）；文件：vault、日期區間、類型（依檔名副檔名，`md` 含 `markdown`、`yaml` 含 `yml`）、抽取狀態（處理中＝排隊中＋抽取中）、檔名。對應 `/v1/list` 的 `title`／`author`／`author_state`／`statuses`／`extensions`。
+  - 筆記、文件的篩選同步到網址查詢字串（`replaceState`，只在網址仍是該列表時寫，不新增歷史紀錄）；頁碼、每頁筆數與 vault 不進網址。記憶層沒有網址同步與「清除篩選」鈕（DateRange 自己的「清除」仍在）。
+  - 文字篩選按鈕或 Enter 才送出，不每鍵發請求。
 
 ## 3. 本機 demo 與截圖／axe
 
@@ -87,5 +92,4 @@ e2e 已涵蓋功能與 axe；要看「像正式站」的畫面（長 GitHub key�
 - subgrid 需要較新的瀏覽器（Chrome 117+ 等）；太舊的瀏覽器會退回各列自行排版。
 - 客戶端分類清單寫死在 UI（見上）。
 - 記憶層、文件的每頁筆數不記住（每次進頁面回到預設 30）。
-- 筆記頁的時間篩選仍是「全部／7 天／30 天」chip，沒有改成日期區間，以免改變既有行為。
 - 側欄 vault 清單限高以 1920×900 以上首屏看得到「目前寫入位置」為準；更矮的視窗會把側欄整體捲動。
