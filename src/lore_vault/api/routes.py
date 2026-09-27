@@ -17,6 +17,10 @@
 
 `POST /v1/documents`（T-67）是唯一的 multipart 端點：欄位 `file`、`vault`、`space`
 （必填）、`filename?`、`mime?`；大小上限在讀取 body 時就擋（413 `too_large`）。
+
+`POST /v1/document_download` 是唯一回二進位的端點：body 同其他 RPC（`space`、
+`vault`、`id`，選填 `max_bytes`），成功回原始位元組（Content-Type 為上傳時的 mime、
+`Content-Disposition` 帶檔名、`X-Lore-Vault-Sha256`），錯誤仍是 JSON。
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import UTC, datetime
 from typing import Annotated, Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, Body, Request, Response, status
 from fastapi.responses import JSONResponse
@@ -49,8 +54,10 @@ from lore_vault.recall.service import DEFAULT_LIMIT as RECALL_DEFAULT_LIMIT
 from lore_vault.recall.service import MODE_HYBRID
 from lore_vault.schema import Vault, canonical_key
 from lore_vault.storage import document_index as storage_document_index
+from lore_vault.storage import documents as storage_documents
 from lore_vault.storage import enrichment as storage_enrichment
 from lore_vault.storage import snapshot as storage_snapshot
+from lore_vault.storage.blobs import BlobCorrupt, BlobNotFound
 from lore_vault.storage.db import transaction
 from lore_vault.storage.errors import UnknownVault, VaultRequired
 from lore_vault.storage.migrate import SCHEMA_VERSION, current_version
@@ -64,7 +71,12 @@ from lore_vault.storage.vaults import (
     validate_space,
 )
 
-from .errors import DocumentsNotConfigured, PayloadTooLarge, VaultExists
+from .errors import (
+    DocumentsNotConfigured,
+    PayloadTooLarge,
+    VaultExists,
+    error_body,
+)
 from .principals import principal_of
 from .state import AppState
 
@@ -562,6 +574,70 @@ async def upload_document(request: Request) -> JSONResponse:
     return JSONResponse(
         result.to_dict(),
         status_code=status.HTTP_200_OK if result.duplicate else status.HTTP_201_CREATED,
+    )
+
+
+# ── 原始檔下載 ──
+
+# 回應 header：原始檔的 sha256（讀出時已驗過；客戶端寫檔前再比一次）
+HEADER_DOCUMENT_SHA256 = "X-Lore-Vault-Sha256"
+HEADER_DOCUMENT_ID = "X-Lore-Vault-Document-Id"
+
+
+class DocumentDownloadRequest(_ScopedReq):
+    vault: str | None = None
+    id: str
+    # 呼叫端能收的上限（位元組）；文件超過時回 413 `too_large`，不讀 blob
+    max_bytes: int | None = Field(default=None, gt=0)
+
+
+def content_disposition(filename: str) -> str:
+    """`attachment`；ASCII 後備檔名去掉引號與控制字元，完整名稱以 RFC 5987 帶。"""
+    fallback = (
+        "".join(
+            ch if 32 <= ord(ch) < 127 and ch not in '"\\;' else "_" for ch in filename
+        ).strip()
+        or "download"
+    )
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename)}"
+
+
+@router.post("/document_download")
+def document_download(request: Request, req: DocumentDownloadRequest) -> Response:
+    """取回文件原始檔（上傳時的位元組）。範圍同 get：vault／space 內找不到一律 404；
+    讀 blob 時驗 sha256，遺失或損毀回 500（`blob_missing`／`blob_corrupt`），
+    不回傳可能損毀的內容。墓碑中的文件不可下載（先 undelete）。"""
+    state = _state(request)
+    if not state.settings.config.documents.blob_dir:
+        raise DocumentsNotConfigured("服務未設定 documents.blob_dir，不能下載文件")
+    with state.connection() as conn:
+        doc = storage_documents.get_document(
+            conn,
+            req.vault,  # type: ignore[arg-type]  # None → VaultRequired
+            req.id,
+            space=req.space,  # type: ignore[arg-type]  # None → SpaceRequired
+        )
+    if req.max_bytes is not None and doc.size_bytes > req.max_bytes:
+        raise PayloadTooLarge(
+            f"文件 {doc.id!r} 為 {doc.size_bytes} 位元組，超過這次請求的上限 "
+            f"{req.max_bytes} 位元組"
+        )
+    try:
+        data = state.blob_store().read(doc.sha256)
+    except BlobNotFound as exc:
+        return JSONResponse(error_body("blob_missing", str(exc)), status_code=500)
+    except BlobCorrupt as exc:
+        return JSONResponse(error_body("blob_corrupt", str(exc)), status_code=500)
+    return Response(
+        content=data,
+        media_type=doc.mime or "application/octet-stream",
+        headers={
+            "Content-Disposition": content_disposition(doc.filename),
+            HEADER_DOCUMENT_SHA256: doc.sha256,
+            HEADER_DOCUMENT_ID: doc.id,
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 

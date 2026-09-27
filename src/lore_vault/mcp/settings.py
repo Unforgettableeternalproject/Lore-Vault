@@ -48,6 +48,9 @@ class ShellSettings:
     max_upload_bytes: int = 25 * 1024 * 1024
     # `ask` 工具的請求逾時（服務端檢索 + 模型呼叫）
     ask_timeout: float = 90.0
+    # `download` 一次最多收多少位元組：stdio 殼為 documents.max_file_bytes（寫本機檔）；
+    # HTTP 端點為 mcp.http_download_max_bytes（base64 進上下文，刻意設小）
+    download_max_bytes: int = 25 * 1024 * 1024
 
 
 def load_shell_settings(
@@ -82,6 +85,7 @@ def load_shell_settings(
         upload_roots=parse_upload_roots(mcp.upload_roots),
         max_upload_bytes=config.documents.max_file_bytes,
         ask_timeout=mcp.ask_timeout,
+        download_max_bytes=config.documents.max_file_bytes,
     )
 
 

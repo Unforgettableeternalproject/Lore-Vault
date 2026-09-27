@@ -25,7 +25,13 @@ from mcp.client.streamable_http import streamable_http_client
 from lore_vault.api.app import create_app
 from lore_vault.api.settings import ApiSettings
 from lore_vault.binding import resolve_binding
-from lore_vault.config import Config, DocumentsConfig, EmbeddingConfig, Secret
+from lore_vault.config import (
+    Config,
+    DocumentsConfig,
+    EmbeddingConfig,
+    McpConfig,
+    Secret,
+)
 from lore_vault.mcp.http import LoopbackTransport, build_http_server
 from lore_vault.mcp.server import (
     HTTP_INSTRUCTIONS,
@@ -204,7 +210,13 @@ async def test_tools_list_matches_stdio_exactly(http, db_path, blob_dir):
     ]
     assert got == stdio
     names = [t["name"] for t in got]
-    assert len(names) == 10 and "upload" in names and "vault_resolve" in names
+    assert len(names) == 13 and "upload" in names and "vault_resolve" in names
+    assert {"download", "delete", "undelete"} <= set(names)
+    # 兩步式與墓碑可還原要寫在工具說明裡（兩種模式同一份）
+    by_name = {t["name"]: t for t in got}
+    assert "confirm_token" in by_name["delete"]["description"]
+    assert "不要自動連打兩步" in by_name["delete"]["description"]
+    assert "undelete" in by_name["delete"]["description"]
 
 
 def test_http_instructions_explain_remote_url(http):
@@ -343,6 +355,80 @@ def test_upload_rejects_path_and_bad_content_over_http(http, db_path, tmp_path):
 # ── principal、session、fail closed ─────────────────────────────────
 
 
+# ── download／delete／undelete ──────────────────────────────────────
+
+
+def test_download_returns_base64_over_http(http, db_path):
+    add_vault(db_path, "github.com/u/docs")
+    session = _open(http)
+    content = "# 下載\n\n原始內容。\n".encode()
+    up = session.ok(
+        "upload",
+        vault="github.com/u/docs",
+        filename="原檔.md",
+        content_base64=_b64(content),
+    )
+    result = session.ok("download", vault="github.com/u/docs", id=up["document_id"])
+    assert base64.b64decode(result["content_base64"]) == content
+    assert result["filename"] == "原檔.md" and result["size_bytes"] == len(content)
+    assert result["sha256"] == up["sha256"] and "path" not in result
+    err = session.err(
+        "download", vault="github.com/u/docs", id=up["document_id"], path="x.md"
+    )
+    assert err["error"]["code"] == "path_not_supported"
+    assert "stdio" in err["hint"]
+
+
+def test_download_over_http_enforces_size_limit(db_path, blob_dir):
+    add_vault(db_path, "github.com/u/docs")
+    config = Config(
+        embedding=EmbeddingConfig(dim=DIM),
+        documents=DocumentsConfig(blob_dir=str(blob_dir), max_file_bytes=MAX_FILE),
+        mcp=McpConfig(http_download_max_bytes=16),
+    )
+    with TestClient(create_app(_settings(db_path, blob_dir, config=config))) as c:
+        session = _open(c)
+        up = session.ok(
+            "upload",
+            vault="github.com/u/docs",
+            filename="big.md",
+            content_base64=_b64(b"x" * 17),
+        )
+        err = session.err("download", vault="github.com/u/docs", id=up["document_id"])
+        assert err["error"]["code"] == "too_large"
+        assert err["error"]["limit_bytes"] == 16
+        assert "stdio" in err["hint"] and "UI" in err["hint"]
+        small = session.ok(
+            "upload",
+            vault="github.com/u/docs",
+            filename="small.md",
+            content_base64=_b64(b"y" * 16),
+        )
+        ok = session.ok("download", vault="github.com/u/docs", id=small["document_id"])
+        assert base64.b64decode(ok["content_base64"]) == b"y" * 16
+
+
+def test_delete_two_step_over_http(http, db_path):
+    add_vault(db_path, "github.com/u/docs")
+    session = _open(http)
+    note = session.ok("write", vault="github.com/u/docs", title="t", body="b")
+    planned = session.ok("delete", vault="github.com/u/docs", id=note["id"])
+    assert planned["executed"] is False and planned["next_step"]
+    listed = session.ok("list", vault="github.com/u/docs")
+    assert note["id"] in {i["id"] for i in listed["items"]}
+    done = session.ok(
+        "delete",
+        vault="github.com/u/docs",
+        id=note["id"],
+        confirm_token=planned["confirm_token"],
+    )
+    assert done["executed"] is True
+    listed = session.ok("list", vault="github.com/u/docs")
+    assert note["id"] not in {i["id"] for i in listed["items"]}
+    restored = session.ok("undelete", id=note["id"])
+    assert restored["restored"] is True and restored["kind"] == "note"
+
+
 def test_write_over_http_uses_credential_principal(http, db_path):
     add_vault(db_path, "github.com/u/w")
     session = _open(http)
@@ -411,7 +497,7 @@ async def test_sdk_client_over_http(db_path, blob_dir, mode):
             )
             async with Client(transport, mode=mode) as client:
                 tools = await client.list_tools()
-                assert len(tools.tools) == 10
+                assert len(tools.tools) == 13
                 result = await client.call_tool(
                     "vault_resolve", {"remote_url": "https://github.com/U/SDK.git"}
                 )

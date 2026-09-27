@@ -61,6 +61,16 @@ class ServiceError(Exception):
         return None
 
 
+class DownloadTooLarge(Exception):
+    """下載內容超過殼端上限（不是服務錯誤，也不是不可達）。`size` 為已知的大小
+    （Content-Length，或中止時已收到的位元組數）。"""
+
+    def __init__(self, size: int, limit: int) -> None:
+        super().__init__(f"下載內容至少 {size} 位元組，超過上限 {limit} 位元組")
+        self.size = size
+        self.limit = limit
+
+
 def _json_or_none(response: httpx2.Response) -> dict[str, Any] | None:
     try:
         data = response.json()
@@ -193,6 +203,35 @@ class ServiceClient:
                 "服務回應不是 JSON 物件（可能被中間層攔截，確認 mcp.base_url）",
             )
         return data
+
+    async def post_download(
+        self, path: str, body: dict[str, Any], *, max_bytes: int
+    ) -> tuple[bytes, dict[str, str]]:
+        """POST JSON、串流收二進位回應；回傳（內容, 小寫 header）。錯誤分類同 `post`。
+
+        超過 `max_bytes` 立刻中止並拋 `DownloadTooLarge`：先看 Content-Length，
+        再邊收邊累計（不信任 header），不為超大內容配置記憶體。
+        """
+        try:
+            async with self._client.stream("POST", path, json=body) as response:
+                if response.status_code in UNREACHABLE_STATUSES:
+                    await response.aread()
+                    raise _unreachable_from_status(response)
+                if not 200 <= response.status_code < 300:
+                    await response.aread()
+                    raise _status_error(response)
+                headers = {k.lower(): v for k, v in response.headers.items()}
+                length = headers.get("content-length", "")
+                if length.isdigit() and int(length) > max_bytes:
+                    raise DownloadTooLarge(int(length), max_bytes)
+                received = bytearray()
+                async for chunk in response.aiter_bytes():
+                    received.extend(chunk)
+                    if len(received) > max_bytes:
+                        raise DownloadTooLarge(len(received), max_bytes)
+        except httpx2.TransportError as exc:
+            raise _unreachable_from_exc(exc) from None
+        return bytes(received), headers
 
     async def download_snapshot(
         self, dest: Path, *, if_none_match: str | None = None

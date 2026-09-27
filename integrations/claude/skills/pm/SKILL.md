@@ -2,7 +2,7 @@
 name: pm
 description: 查詢與維護 Lore Vault 專案記憶；用於歷史決策、隱性限制、跨 session 接續及明確的 /pm 指令。
 user-invocable: true
-allowed-tools: Bash, Read, Grep, Glob, Agent, mcp__lore-vault__space, mcp__lore-vault__vault_resolve, mcp__lore-vault__recall, mcp__lore-vault__ask, mcp__lore-vault__get, mcp__lore-vault__list, mcp__lore-vault__write, mcp__lore-vault__update, mcp__lore-vault__upload, mcp__lore-vault__status
+allowed-tools: Bash, Read, Grep, Glob, Agent, mcp__lore-vault__space, mcp__lore-vault__vault_resolve, mcp__lore-vault__recall, mcp__lore-vault__ask, mcp__lore-vault__get, mcp__lore-vault__list, mcp__lore-vault__write, mcp__lore-vault__update, mcp__lore-vault__upload, mcp__lore-vault__download, mcp__lore-vault__delete, mcp__lore-vault__undelete, mcp__lore-vault__status
 argument-hint: "[init|explore|query|note|sync|status] [args...]"
 ---
 
@@ -53,6 +53,14 @@ HTTP 連線沒有本地快照：服務不可達時 MCP 工具直接失敗，照�
 - `author` 填自己的角色名（依本機 persona 的角色名；子代理用各自名稱）；不代填別人，不填 `legacy`，不確定就省略。
 - 內容包含結論、適用範圍、必要證據與仍未確定的條件；推測不寫成規則，不把當次解法升格為所有專案的慣例。不要同步複製到 MEMORY.md、CLAUDE.md 與其他記憶庫。
 - 語料可能含商業專案原文；除非任務需要，不把整篇 note 讀進上下文。
+
+## 刪除、還原與下載
+
+- **刪除只在使用者要求或明確同意時做**。`delete(vault, id, reason?)` 是兩步式：第一次不帶 `confirm_token`，只回 `plan` 與 token（不會刪）；把 plan 的重點（標題／檔名、筆數、連帶影響）給使用者看，取得明確同意後，才以**完全相同**的 vault／id／reason 加上 `confirm_token` 再呼叫一次。不要在同一輪自動連打兩步，也不要把「使用者叫你整理記憶」當成刪除同意。
+- 回 `plan_changed` 表示資料在兩步之間變了、沒有刪：把錯誤附的新 plan 再給使用者確認，同意後才用附帶的新 token。`invalid_confirm_token`／`confirm_token_expired` 就重新規劃，不猜參數重送；兩步之間不要切換 space。
+- 知識修正走 `update` 原 note，不用「刪了重寫」；重複 note 先合併內容再請使用者確認刪哪篇。
+- 刪除會留墓碑，`undelete(id)` 以同一個 id 還原（範圍為目前 space）；回 `not_restorable` 時照 `reason` 回報，不自行重建。
+- `download(vault, id)` 只取文件（`doc:…`）的原始檔，note 用 `get`。本機殼寫到 `path`（限專案目錄與 `mcp.upload_roots`，省略時寫到專案根、用原檔名）；既有檔預設拒絕，要覆寫須先確認再帶 `overwrite=true`。HTTP 連線回 `content_base64`（上限約 1MB）；超過時請使用者改用本機殼或 UI 下載，不要重試。
 
 ## 指令
 

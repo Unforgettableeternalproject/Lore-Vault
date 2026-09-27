@@ -118,6 +118,8 @@ def build_http_server(app: object, settings: ApiSettings) -> MCPServer:
         snapshot_on_start=False,
         max_upload_bytes=config.documents.max_file_bytes,
         ask_timeout=config.mcp.ask_timeout,
+        # download 以 base64 回傳（進 agent 上下文），上限另設、刻意較小
+        download_max_bytes=config.mcp.http_download_max_bytes,
     )
     shell = Shell(
         shell_settings,
