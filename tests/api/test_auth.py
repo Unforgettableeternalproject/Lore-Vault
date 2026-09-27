@@ -136,6 +136,10 @@ def test_openapi_is_served_behind_auth(anon):
         "/v1/concept_query",
         "/v1/episode_summary",
         "/v1/topics",
+        # 執行期設定（D13；只允許 UI session）
+        "/v1/settings",
+        "/v1/settings_update",
+        "/v1/settings_reset",
     } == paths
 
 

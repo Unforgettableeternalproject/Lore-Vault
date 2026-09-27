@@ -56,6 +56,15 @@ REJECT_STATUSES = frozenset({STATUS_CONFLICT, STATUS_INVALID})
 
 # 服務不可達或拒絕後，Stop hook 在這段時間內不再嘗試（`--push` 不受限）
 DEFAULT_BACKOFF_SECONDS = 60.0
+# 服務明確回「未開啟 episode 收料」（403 `episode_ingest_disabled`，D13）：
+# 這是服務端的設定、不是暫時故障，檔案留在 pending（不移到 rejected、不算損毀），
+# 退避拉長到小時級，不讓每次 Stop 都打一次服務。服務開啟後下一輪（或 `--push`）補推
+INGEST_DISABLED_CODE = "episode_ingest_disabled"
+DISABLED_BACKOFF_SECONDS = 6 * 3600.0
+# push_state.json 的 last_error_kind
+ERROR_KIND_UNAVAILABLE = "unavailable"
+ERROR_KIND_REJECTED = "rejected"
+ERROR_KIND_DISABLED = "disabled"
 
 
 def _utc_now() -> datetime:
@@ -293,8 +302,11 @@ def push_pending(
     backoff_seconds: float = DEFAULT_BACKOFF_SECONDS,
     now: Callable[[], datetime] = _utc_now,
 ) -> PushResult:
-    """推一批（最舊的 `limit` 筆）。任何失敗都不拋例外，檔案留在 pending。"""
-    from .service import ServiceError, ServiceUnavailable, request_json
+    """推一批（最舊的 `limit` 筆）。任何失敗都不拋例外，檔案留在 pending。
+
+    服務回 `episode_ingest_disabled` 時記 `last_error_kind = "disabled"`、退避
+    `DISABLED_BACKOFF_SECONDS`（`--push` 不受退避限制，但同樣只推一次就停）。"""
+    from .service import ServiceError, ServiceUnavailable, error_code, request_json
 
     result = PushResult()
     if not settings.push_configured:
@@ -347,13 +359,20 @@ def push_pending(
         if items is None:
             raise ServiceError("回應格式不符（缺 results 或筆數不一致）")
     except ServiceError as exc:
+        disabled = error_code(exc.body) == INGEST_DISABLED_CODE
         result.kept = len(episodes)
         result.error = exc.detail
-        state["last_error"] = exc.detail
-        state["last_error_kind"] = (
-            "unavailable" if isinstance(exc, ServiceUnavailable) else "rejected"
-        )
-        state["backoff_until_ts"] = started.timestamp() + backoff_seconds
+        if disabled:
+            result.error = "服務未開啟 episode 收料，紀錄留在本機、開啟後自動補推"
+        state["last_error"] = result.error
+        if disabled:
+            state["last_error_kind"] = ERROR_KIND_DISABLED
+        elif isinstance(exc, ServiceUnavailable):
+            state["last_error_kind"] = ERROR_KIND_UNAVAILABLE
+        else:
+            state["last_error_kind"] = ERROR_KIND_REJECTED
+        delay = DISABLED_BACKOFF_SECONDS if disabled else backoff_seconds
+        state["backoff_until_ts"] = started.timestamp() + delay
         _save_state(spool_dir, state)
         return result
 

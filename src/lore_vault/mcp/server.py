@@ -251,6 +251,7 @@ _HINTS = {
     ),
     "too_large": "單檔上限 25MB（設定 documents.max_file_bytes）",
     "ask_not_configured": "服務沒有問答模型（缺 OPENAI_API_KEY）；改用 recall + get",
+    "ask_disabled": "問答已由管理者在服務設定頁關閉；改用 recall + get",
     "ask_provider_error": "問答模型呼叫失敗；稍後重試，或改用 recall + get",
     "ask_timeout": "問答模型逾時；稍後重試、降低 k，或改用 recall + get",
     "ask_rate_limited": "問答模型被限流；等 retry_after 秒後重試，或改用 recall + get",
@@ -468,11 +469,15 @@ class Shell:
         cwd: Callable[[], str] = os.getcwd,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         mode: str = MODE_STDIO,
+        download_limit: Callable[[], int] | None = None,
     ) -> None:
         if mode not in MODES:
             raise ValueError(f"mode 必須是 {MODES} 之一，得到 {mode!r}")
         self.settings = settings
         self.mode = mode
+        # `download` 上限的即時來源（HTTP 端點由服務的執行期設定提供，D13）；
+        # None = 用 settings.download_max_bytes
+        self._download_limit = download_limit
         self.client = ServiceClient(settings, transport=transport)
         self._cwd = cwd
         self._now = now
@@ -1143,7 +1148,11 @@ class Shell:
         if not self.http and path is not None:
             # 先擋不允許的路徑，不為注定寫不了的請求下載內容
             self._download_target(path, "placeholder")
-        limit = self.settings.download_max_bytes
+        limit = (
+            self._download_limit()
+            if self._download_limit is not None
+            else self.settings.download_max_bytes
+        )
         try:
             data, headers = await self.client.post_download(
                 "/v1/document_download",

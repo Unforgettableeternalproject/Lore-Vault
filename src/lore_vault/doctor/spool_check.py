@@ -45,17 +45,24 @@ def spool_pending(ctx: DoctorContext) -> CheckResult:
     client = load_client_settings(Path(str(env_file)), environ={})
 
     age = stats.oldest_pending_age
+    state = spool.load_push_state(spool_dir)
     counts = {
         "pending": stats.pending,
         "oldest_age_seconds": int(age) if age is not None else 0,
     }
     details = [client.describe()]
-    state = spool.load_push_state(spool_dir)
     if state.get("last_error"):
         details.append(f"上次推送失敗：{state['last_error']}")
     if state.get("last_ok_at"):
         details.append(f"上次推送成功：{state['last_ok_at']}")
 
+    if state.get("last_error_kind") == spool.ERROR_KIND_DISABLED:
+        # 服務端刻意關閉收料（D13）：資料安全留在本機，不因年齡升成 fail
+        return CheckResult.warn(
+            f"服務未開啟 episode 收料：{stats.pending} 筆留在本機，服務開啟後自動補推",
+            details=details,
+            counts=counts,
+        )
     if age is not None and age > fail_h * 3600:
         return CheckResult.fail(
             f"{stats.pending} 筆未推送，最舊 {age / 3600:.1f} 小時（門檻 {fail_h:g}）",

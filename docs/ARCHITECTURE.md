@@ -146,13 +146,39 @@ spike 接入端點（階段 8，同樣需 bearer；每筆 body 項目 = schema d
 
 | 端點 | 契約 |
 |---|---|
-| `POST /v1/episodes` | `{"episodes": [Episode + vault]}`，每批 ≤ 200（超過 400）。回 `{accepted, duplicates, conflicts, invalid, created_vaults, results: [{index, key: [session_id, prompt_id, turn_index], status, vault?, error?}]}`；status：`accepted`／`duplicate`（同鍵同內容，成功）／`conflict`（同鍵不同內容或不同 vault，不覆寫，客戶端留 spool）／`invalid`。vault 不存在時自動建立（kind=repo、display=episode.repo 或 key、`origin='episode'`＋觸發來源）；只有這條路徑自動建 |
-| `GET /v1/episodes` | query `vault`（必填，跨 vault 明示 `*`）、`since`（started_at ≥）、`session_id`、`cursor`、`limit`（預設 200、上限 1000）。依 (started_at, seq) 由舊到新；回 `{items: [Episode + vault], next_cursor}` |
+| `POST /v1/episodes` | `{"episodes": [Episode + vault]}`，每批 ≤ 200（超過 400）。回 `{accepted, duplicates, conflicts, invalid, created_vaults, results: [{index, key: [session_id, prompt_id, turn_index], status, vault?, error?}]}`；status：`accepted`／`duplicate`（同鍵同內容，成功）／`conflict`（同鍵不同內容或不同 vault，不覆寫，客戶端留 spool）／`invalid`。vault 不存在時自動建立（kind=repo、display=episode.repo 或 key、`origin='episode'`＋觸發來源）；只有這條路徑自動建。**收料開關**（D13）：`episodes.ingest` 為 false（預設）時整批 403 `episode_ingest_disabled`、不寫任何東西；客戶端 spool 依錯誤碼把檔案留在 pending、退避 6 小時（`hooks.spool.DISABLED_BACKOFF_SECONDS`），不移到 rejected |
+| `GET /v1/episodes` | query `vault`（必填，跨 vault 明示 `*`）、`since`（started_at ≥）、`session_id`、`cursor`、`limit`（預設 200、上限 1000）。依 (started_at, seq) 由舊到新；回 `{items: [Episode + vault], next_cursor}`。不受收料開關影響：已收進來的照常可讀（主機管線 `--pull-episodes` 要能拉完；`episode_summary` 同） |
 | `GET /v1/concepts/export` | query `vault` 預設明示 `*`（scope 由客戶端 scorer 判斷），可指定單一 vault。body 與 spike `concepts.json` 同格式（頂層 list、欄位與順序同 spike；`usability` 只在有值時出現）；依寫入順序排序（不依 id）。scope 缺欄位的 concept 不匯出（header `X-Lore-Vault-Excluded-Missing-Scope`）。ETag = body sha256，`If-None-Match` 符合回 304 |
 | `POST /v1/concepts` | `{"vault": key 或 "*", "mode": "upsert"／"create"／"update", "concepts": [Concept + vault?], "delete": [id]}`，合計 ≤ 1000。**整批成功或整批不寫**：任一筆 invalid／conflict 回 400／409（`error.code = batch_rejected`，附逐筆結果）。歸屬：既有 id 沿用原 vault（凍結）；新 id 且 `scope=null` → `global`（kind=global，不存在時自動建、`origin='pipeline'`）；新 id 且 scope 為 repo 名 → 每筆 vault 或批次單一 vault；都沒帶時依 A17：(A) `source_turns` 的 `[prompt_id, turn_index]` 查 episodes 所屬 vault（部分查不到可，指向多個 vault 即歧義、不退 B）→ (B) scope 不分大小寫比對非 global vault 的 display、key／別名的整串、最後一段（repo）與最後兩段（`org/repo`），唯一命中才採用 → 都失敗該筆 invalid，逐筆帶 `code`＝`vault_unresolved`／`vault_ambiguous`（歧義另附 `candidates`，scope 撞名可改寫成 `org/repo`）；A、B 只解析到既有 vault，不自動建。成功的逐筆結果附 `vault` 與 `resolved_by`（`existing`／`global`／`explicit`／`source_turns`／`scope_match`）。scope 必須出現。新增排在匯出最後；`delete` 不存在回 `not_found`（冪等） |
 | `POST /v1/injections` | `{"injections": [Injection + vault + recorded?]}`，每批 ≤ 500。status：`accepted`／`duplicate`（同 vault 內容全等的重送，不看 recorded）／`unknown_vault`（不自動建，稍後重送）／`invalid` |
 
 **文件下載**：`POST /v1/document_download`，body `{space, vault, id, max_bytes?}`（未知欄位 422），是唯一回二進位的端點。範圍同 `get`：文件不在該 vault／space（含墓碑中的文件）一律 404 `not_found`，`vault="*"` 為目前 space 全部。成功回上傳時的原始位元組：`Content-Type` 為上傳時的 mime、`Content-Disposition: attachment`（ASCII 後備檔名＋RFC 5987 `filename*=UTF-8''…`）、`X-Lore-Vault-Sha256`、`X-Lore-Vault-Document-Id`、`Cache-Control: no-store`。`max_bytes` 給了而文件較大 → 413 `too_large`（依 metadata 判斷，不讀 blob）。讀 blob 時驗 sha256：遺失 500 `blob_missing`、雜湊不符 500 `blob_corrupt`（不回可能損毀的內容）；未設 `blob_dir` 500 `documents_not_configured`。bearer 與 UI session（cookie＋`X-Lore-Vault-UI`）皆可，由同一個中介層處理。不另加 doctor 檢查：這是唯讀資料流，blob 存在與雜湊已由 `documents.blob_exists` 對帳、讀取時再驗一次。
+
+**執行期設定**（D13，`lore_vault.api.settings_admin`；白名單與驗證在 `lore_vault.runtime_settings`、儲存與稽核在 `storage.settings_store`，schema v15）。設定檔／環境變數是「預設值」，DB 的 `settings_overrides` 覆寫其上；讀取端一律經 `AppState.runtime.current()`（程序內快取，設定 API 寫入後立即失效；依據 A9 單一寫入程序，doctor CLI 等其他程序直接讀 DB）。**只允許 UI session**：bearer 請求一律 403 `ui_session_required`（在 body 驗證之前檢查）——bearer 由所有 agent／hook 共用，`/mcp` 也以 bearer 轉發 `/v1`，開放 bearer 等於任何 agent 都能翻隱私開關；其他管理端點開放 bearer 是因為有兩段式確認或墓碑可還原，設定沒有這層保護。
+
+| 端點 | body | 回應 |
+|---|---|---|
+| `GET /v1/settings` | — | `{categories: [{id, label}], items: [{key, type (bool／int／float), category, label, description, min, max, unit, value（生效值）, default（設定檔／環境變數的值）, source (default／override), override: {updated, updated_by} 或 null}], invalid_overrides: [{key, reason, updated}], audit: [最近 20 筆]}` |
+| `POST /v1/settings_update` | `{"values": {鍵: 值}}`（1 到白名單項數） | 同 GET，另附 `changed`（這次寫入的稽核列；與目前覆寫相同的鍵不寫、不記）。值只收 JSON 原型別：bool 必須是 true／false、int 不收小數、數字要在範圍內；任一鍵不合法整批不寫，400 `invalid_setting` 附 `errors: [{key, code (unknown_setting／invalid_value), message}]` |
+| `POST /v1/settings_reset` | `{"keys": [鍵]}` | 同上；刪除覆寫、回到預設值（原本沒有覆寫的鍵不記） |
+
+稽核列（`settings_audit`）：`{seq, at, key, action (set／reset), old_value, new_value（皆為生效值）, principal, display}`，與覆寫列同一交易寫入。
+
+白名單（每一項都有測試證明不重建 app 即生效，`tests/api/test_runtime_settings.py`）：
+
+| 鍵 | 型別／範圍 | 讀取端 |
+|---|---|---|
+| `episodes.ingest` | bool，預設 false | `POST /v1/episodes` 每次請求；`/v1/status` 的 `episodes.ingest_recency` |
+| `ask.enabled` | bool，預設 true | `/v1/ask` 每次請求（關閉 403 `ask_disabled`，不檢索、不呼叫模型）；`ask.provider` 記為 skipped |
+| `ask.snippet_max_chars` | int 500–50000 | `/v1/ask` 每次請求 |
+| `mcp.http_download_max_bytes` | int 1024–25 MiB | HTTP MCP `download` 每次呼叫（`Shell(download_limit=...)`） |
+| `backup.max_age_hours` | float 1–2160 | `/v1/status` 的 doctor 設定 |
+| `documents.stuck_seconds` | float 60–604800 | 同上（只有 doctor 使用） |
+| `database.tombstone_warn_age_days` | float 0–3650 | 同上 |
+| `database.tombstone_warn_bytes` | int 0–2^40 | 同上 |
+| `ui.login_log_retention_days` | float 1–3650 | 每次登入嘗試與啟動時清除登入紀錄 |
+
+刻意不收：token／密碼／OpenAI key、資料庫與 blob 路徑、模型與 base_url（用戶端啟動時建立）、worker 參數與 session 期限（啟動時建構）、`documents.max_file_bytes`（MCP 請求大小上限在啟動時決定）等需重啟或涉及密鑰的項目。DB 裡不合法的覆寫（手動改 DB、白名單移除的鍵）執行期略過、改用預設值，不讓服務起不來；doctor `settings.overrides` 為 fail。
 
 **UI 管理端點**（T-70～T-75，`lore_vault.api.manage`）。其中 `note_delete`／`document_delete`／`note_undelete`／`document_undelete` 另由 MCP 的 `delete`／`undelete` 工具原樣轉呼叫（殼不另寫刪除邏輯）；其餘（含 `vault_delete`、`vault_move_space`）不提供 MCP 工具。同 `/v1` 慣例：POST、bearer、未知欄位 422、body 必帶 `space`（缺 400 `space_required`）；vault 在別的 space 與不存在相同（404 `unknown_vault`），墓碑在別的 space 與不存在相同（404 `not_found`），錯誤訊息不帶出別 space 的 key。
 
@@ -215,7 +241,7 @@ MCP 有兩種入口，共用同一份工具定義（名稱、參數、說明、�
 | `undelete(id)` | 服務回應＋`kind` | 同樣依前綴分派到 `note_undelete`／`document_undelete`（範圍為目前 space，沒有 `vault` 參數，與端點一致）；`not_restorable` 附 `reason` |
 | `status(vault?)` | 健康狀態、最近更新、管線狀態 | 合併 doctor 摘要與 health alert；stdio 殼另附 `shell`（本地快照對帳），HTTP 端點另附 `mcp: {mode, space}` |
 
-刻意**不做**：chat（多輪對話）、model 管理、settings、source 匯入。`ask` 是單次問答、只整理檢索片段（D11）。
+刻意**不做**：chat（多輪對話）、model 管理、source 匯入；服務設定只經 UI（上方「執行期設定」，不提供 MCP 工具）。`ask` 是單次問答、只整理檢索片段（D11）。
 
 ## Hook 整合
 

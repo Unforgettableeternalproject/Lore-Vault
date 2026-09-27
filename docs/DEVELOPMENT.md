@@ -273,7 +273,7 @@ stdout 是 MCP 協定通道，log 一律寫 stderr（UTF-8）。設定錯誤時�
 - 檢索降級（embedder 逾時等）照樣回答，`degraded`／`degraded_reason`／`degraded_detail` 原樣沿用 recall
 - **本輪只用 note**：`kinds` 預設 `["note"]`；帶 `chunk` 列進 `unsupported_kinds`，只要求 chunk 回 400
   `unsupported_kind`（文件問答另評估）
-- 錯誤碼（刻意不用 502／503／504：MCP 殼把那些當成服務不可達）：`ask_not_configured`（500，缺 `OPENAI_API_KEY`）、
+- 錯誤碼（刻意不用 502／503／504：MCP 殼把那些當成服務不可達）：`ask_disabled`（403，設定頁關閉了 `ask.enabled`）、`ask_not_configured`（500，缺 `OPENAI_API_KEY`）、
   `ask_provider_error`（500，連不上、401／403／404、5xx）、`ask_timeout`（500）、`ask_rate_limited`（429，附 `retry_after`）、
   `ask_invalid_output`（500，空字串、`finish_reason` 非 stop（含 length 截斷）、非 JSON、結構不符）。
   參數錯誤同 recall（`vault_required`、`space_required`、`unknown_vault`、`invalid_request`：k 超出 1–20、question 空白）
@@ -579,6 +579,10 @@ KEY=VALUE、只用標準庫解析；行程環境變數中同名鍵優先。
 - Stop hook 尾端推一批（`POST /v1/episodes`）：accepted／duplicate 刪檔；conflict／invalid 移到
   `spool/rejected/`；其他情況留在 pending。硬性時限＝逾時 + 0.5 秒（推送在 daemon 執行緒，DNS 卡住也不拖住
   Stop）；失敗後退避 60 秒內不再嘗試
+- 服務關閉收料（D13，403 `episode_ingest_disabled`）：檔案留在 pending（不移 rejected、不算損毀），
+  `push_state.json` 記 `last_error_kind: "disabled"`、退避 6 小時；doctor `spool.pending` 為 warn（說明服務未開啟），
+  不因年齡升成 fail。服務開啟後下一次推送（或 `--push`）自動補推。其他 403（Cloudflare Access 頁面，沒有服務的錯誤格式）
+  照舊是 `rejected`、60 秒退避
 - 手動／排程：`python agent_memory_spike/hook_stop.py --push`（推到清空或失敗為止，失敗 exit 1）；
   `--push --dry-run` 只印待推送數與設定狀態
 - 量測（本機、系統 Python、每次 1 筆新輪次）：推送未設定時整支 Stop hook 比 HEAD 多約 100 ms
@@ -600,7 +604,8 @@ KEY=VALUE、只用標準庫解析；行程環境變數中同名鍵優先。
 [--spool-warn-age-hours 1] [--spool-fail-age-hours 24]`、`--category concept_snapshot --concept-snapshot FILE
 [--concept-snapshot-max-age-hours 24]`、`--category concept_push --spike-home DIR`（未給則取 `--spool-dir` 上一層）。
 
-- `spool.pending`：最舊一筆待推送超過 fail 門檻為 fail、超過 warn 門檻為 warn；推送未設定為 warn
+- `spool.pending`：最舊一筆待推送超過 fail 門檻為 fail、超過 warn 門檻為 warn；推送未設定為 warn；
+  上次推送被服務以「未開啟收料」拒收為 warn（不論年齡）
 - `spool.conflicts`：`rejected/` 非零為 fail（服務拒收或本地檔損毀，需人工處理）。確認不值得重推的
   （例如無內容的 meta 回合）移到 `spool/archived/`、檔名不變即可結案；沒有任何程式讀 `archived/`
 - `concept_snapshot.age`：從未拉取、manifest 與檔案 sha256 不一致、格式不符、超過年齡（以 `checked_at` 計）為 fail
@@ -750,6 +755,22 @@ KEY=VALUE、只用標準庫解析；行程環境變數中同名鍵優先。
 - `/ui` 回應帶嚴格 CSP（`default-src 'self'`、無 `unsafe-inline`、`frame-ancestors 'none'`）、
   `X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`、`X-Frame-Options: DENY` 等；
   `/ui/api/*` 另加 `Cache-Control: no-store`，`index.html` 為 `no-cache`
+
+### 服務設定頁與執行期設定（D13）
+
+- 設定頁（`/ui/settings`）的「服務設定」區塊讀寫 `GET /v1/settings`、`POST /v1/settings_update`、
+  `POST /v1/settings_reset`（契約與白名單見 `docs/ARCHITECTURE.md`「執行期設定」）。只允許 UI session，
+  bearer 一律 403 `ui_session_required`
+- 覆寫存 DB（schema v15 `settings_overrides`），修改與還原記 `settings_audit`（誰、何時、生效值舊→新）；
+  改完立即生效，不需重啟
+- **episode 收料預設關閉**（`episodes.ingest`）。本機部署要打開：`.env` 設 `LORE_VAULT_EPISODES_INGEST=true`
+  （成為預設值），或登入 UI 在設定頁切換（DB 覆寫，優先於 `.env`；還原預設就回到 `.env` 的值）
+- doctor：`settings.overrides`（覆寫不在白名單、型別或範圍不合法為 fail：執行期被略過、未生效）、
+  `settings.audit_agreement`（覆寫值與該鍵最後一筆稽核不符、或稽核為 set 但覆寫不在為 fail：有繞過 API 的寫入）；
+  `episodes.ingest_recency` 在收料關閉時 skipped——服務依有效值傳入；doctor CLI 沒有設定值時看 DB 覆寫，
+  沒有覆寫就照常檢查（CLI 不讀 `.env`；關閉收料又想讓 CLI 略過，就在設定頁存一次「關閉」）
+- 測試：`tests/api/test_runtime_settings.py`（每項即時生效、UI 限定、驗證、稽核）、
+  `tests/storage/test_settings_store.py`（拿掉保護會紅）、`tests/test_spool_ingest_disabled.py`（客戶端）
 
 ### UI 帳號：設定密碼、查看紀錄、解鎖
 

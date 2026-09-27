@@ -43,6 +43,13 @@ Preact + Vite，建置成 `ui/app/dist` 由 FastAPI 同源提供於 `/ui`（`src
   - 筆記、文件的篩選同步到網址查詢字串（`replaceState`，只在網址仍是該列表時寫，不新增歷史紀錄）；頁碼、每頁筆數與 vault 不進網址。記憶層沒有網址同步與「清除篩選」鈕（DateRange 自己的「清除」仍在）。
   - 文字篩選按鈕或 Enter 才送出，不每鍵發請求。
 
+- **服務設定（`screens/Settings.tsx` 的 `ServiceSettings`）**：`GET /v1/settings` 回傳分類與每項的型別、範圍、單位、生效值、預設值與來源，畫面依 `categories` 順序以 `<fieldset>` 分組，不寫死項目。
+  - 開關用原生 checkbox（label 包住、至少 44px 高），數字用 `type="number"`；編輯中的數字保留字串，儲存前才轉型。
+  - 前端檢查與服務端同規則（型別、整數、範圍），錯誤以 `role="alert"` 顯示在欄位下並設 `aria-invalid`；服務端 400 `invalid_setting` 的 `errors[]` 逐項對回欄位。
+  - 只送出有變動的項目（整批全成或全不改）；「還原預設」逐項送 `settings_reset`。來源用 `Badge`（預設＝plain、已覆寫＝warn），下方列預設值與覆寫者、時間；最近的修改列在區塊底部。
+  - DB 裡不合法的覆寫以錯誤 `Banner` 提示（服務已略過）。
+  - 只有 UI session 能讀寫；bearer 會 403 `ui_session_required`，e2e 要用登入後的頁面操作。
+
 ## 3. 本機 demo 與截圖／axe
 
 e2e 已涵蓋功能與 axe；要看「像正式站」的畫面（長 GitHub key、十幾個 vault、concept），就另起一個 demo 服務：

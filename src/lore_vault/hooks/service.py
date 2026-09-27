@@ -81,7 +81,22 @@ def auth_headers(settings: ClientSettings) -> dict[str, str]:
     return headers
 
 
-def _rejected_detail(status: int) -> str:
+def error_code(body: Any) -> str | None:
+    """服務的錯誤格式 `{"error": {"code": ...}}` 取出 code；不是這個形狀回 None
+    （例如 Cloudflare Access 的 403 頁面）。"""
+    if isinstance(body, dict):
+        error = body.get("error")
+        if isinstance(error, dict) and isinstance(error.get("code"), str):
+            return error["code"]
+    return None
+
+
+def _rejected_detail(status: int, payload: Any = None) -> str:
+    code = error_code(payload)
+    if code is not None:
+        # 服務自己的拒絕（例如 403 episode_ingest_disabled），不是 Access 問題
+        message = payload["error"].get("message")
+        return f"HTTP {status} {code}" + (f"：{message}" if message else "")
     if 300 <= status < 400:
         return (
             f"HTTP {status}：被導向"
@@ -125,7 +140,9 @@ def request_json(
         exc.close()
         if status in UNREACHABLE_STATUSES:
             raise ServiceUnavailable(f"HTTP {status}", status) from None
-        raise ServiceRejected(_rejected_detail(status), status, payload) from None
+        raise ServiceRejected(
+            _rejected_detail(status, payload), status, payload
+        ) from None
     except (
         urllib.error.URLError,
         TimeoutError,

@@ -14,6 +14,7 @@ from lore_vault.storage import enrichment as storage_enrichment
 from lore_vault.storage import imports as storage_imports
 from lore_vault.storage import ingest_checks as storage_ingest
 from lore_vault.storage import manage as storage_manage
+from lore_vault.storage import settings_store as storage_settings
 from lore_vault.storage import ui_login as storage_ui_login
 
 from .backup_check import backup_recent
@@ -163,7 +164,19 @@ def import_on_reconcile(ctx: DoctorContext) -> CheckResult:
 #    "auto_vault_warn_above"（未設＝只報數））──
 
 
+def _episodes_ingest_enabled(ctx: DoctorContext) -> bool | None:
+    """收料開關的有效值：設定鍵 `episodes_ingest`（服務依執行期設定填）優先；
+    未提供時（doctor CLI）看 DB 覆寫；都沒有回 None（不知道，照常檢查）。"""
+    value = ctx.settings.get("episodes_ingest")
+    if value is not None:
+        return bool(value)
+    override = storage_settings.read_override(ctx.require("db"), "episodes.ingest")
+    return override if isinstance(override, bool) else None
+
+
 def episodes_ingest_recency(ctx: DoctorContext) -> CheckResult:
+    if _episodes_ingest_enabled(ctx) is False:
+        raise CheckSkipped("服務未開啟 episode 收料（episodes.ingest = false）")
     now = ctx.settings.get("now") or datetime.now(UTC)
     max_age = float(
         ctx.settings.get(
@@ -290,6 +303,8 @@ def ask_provider(ctx: DoctorContext) -> CheckResult:
     （例如在服務外執行 doctor）。不打網路：模型名與 key 是否被接受要到實際呼叫才知道，
     錯誤會以 `ask_provider_error` 明確回給呼叫端。沒有 key 只影響 ask，所以是 warn。
     """
+    if ctx.settings.get("ask_enabled") is False:
+        raise CheckSkipped("問答已由管理者關閉（ask.enabled = false）")
     configured = ctx.settings.get("ask_configured")
     if configured is None:
         raise CheckSkipped("未提供 ask_configured（不在服務內執行）")
@@ -300,6 +315,23 @@ def ask_provider(ctx: DoctorContext) -> CheckResult:
             details=[f"ask.model={model}"] if model else (),
         )
     return CheckResult.ok(f"ask 模型 {model}" if model else "")
+
+
+# ── 執行期設定對帳（資源 "db"；D13，schema v15）──
+
+
+def settings_overrides(ctx: DoctorContext) -> CheckResult:
+    try:
+        return _to_result(storage_settings.overrides_validity(ctx.require("db")))
+    except storage_settings.MissingSettingsTables as exc:
+        raise CheckSkipped(str(exc)) from None
+
+
+def settings_audit_agreement(ctx: DoctorContext) -> CheckResult:
+    try:
+        return _to_result(storage_settings.audit_agreement(ctx.require("db")))
+    except storage_settings.MissingSettingsTables as exc:
+        raise CheckSkipped(str(exc)) from None
 
 
 def default_registry() -> Registry:
@@ -557,6 +589,19 @@ def default_registry() -> Registry:
             "client.env 的 LORE_VAULT_CONCEPT_SNAPSHOT 與 MCP 快照路徑指向同一檔",
         )
     )
+    for name, func, description in (
+        (
+            "settings.overrides",
+            settings_overrides,
+            "設定頁存的覆寫都在白名單內、型別與範圍合法（不合法的會被略過、未生效）",
+        ),
+        (
+            "settings.audit_agreement",
+            settings_audit_agreement,
+            "設定覆寫與稽核紀錄一致（每次修改都留下誰、何時、舊值→新值）",
+        ),
+    ):
+        registry.add(Check(name, "settings", func, description))
     registry.add(
         Check(
             "ask.provider",

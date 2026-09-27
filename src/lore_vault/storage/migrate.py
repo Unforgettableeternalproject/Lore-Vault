@@ -600,6 +600,42 @@ def _v14(conn: sqlite3.Connection) -> None:
     )
 
 
+# 執行期設定（v15，D13；白名單與驗證見 `lore_vault.runtime_settings`）：
+# - settings_overrides：UI 設定頁存的覆寫值（JSON），覆寫設定檔／環境變數的預設值。
+#   刻意不設 CHECK 限定鍵名：白名單在程式裡，doctor `settings.overrides` 對帳
+# - settings_audit：每次修改或還原一列（誰、何時、生效值舊→新）。
+#   與覆寫列在同一交易寫入，
+#   doctor `settings.audit_agreement` 核對「目前覆寫值 = 該鍵最後一筆稽核的新值」
+_V15_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE settings_overrides (
+        key        TEXT PRIMARY KEY CHECK (length(trim(key)) > 0),
+        value      TEXT NOT NULL CHECK (json_valid(value)),
+        updated    TEXT NOT NULL,
+        updated_by TEXT NOT NULL
+    ) STRICT
+    """,
+    """
+    CREATE TABLE settings_audit (
+        seq       INTEGER PRIMARY KEY,
+        at        TEXT NOT NULL,
+        key       TEXT NOT NULL,
+        action    TEXT NOT NULL CHECK (action IN ('set', 'reset')),
+        old_value TEXT NOT NULL CHECK (json_valid(old_value)),
+        new_value TEXT NOT NULL CHECK (json_valid(new_value)),
+        principal TEXT NOT NULL,
+        display   TEXT
+    ) STRICT
+    """,
+    "CREATE INDEX settings_audit_key ON settings_audit(key, seq)",
+)
+
+
+def _v15(conn: sqlite3.Connection) -> None:
+    for statement in _V15_STATEMENTS:
+        conn.execute(statement)
+
+
 # 有序遷移：索引 i 的函式把版本從 i 升到 i+1。只能往後加，不可改動已發佈的項目。
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _v1,
@@ -616,6 +652,7 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _v12,
     _v13,
     _v14,
+    _v15,
 )
 
 SCHEMA_VERSION = len(MIGRATIONS)

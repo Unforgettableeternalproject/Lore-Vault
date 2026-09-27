@@ -17,7 +17,7 @@ from mcp.client.client import Client
 
 from lore_vault.api.app import create_app
 from lore_vault.api.settings import ApiSettings
-from lore_vault.config import Config, EmbeddingConfig, Secret
+from lore_vault.config import Config, EmbeddingConfig, EpisodesConfig, Secret
 from lore_vault.mcp.server import Shell, build_server
 from lore_vault.mcp.settings import ShellSettings
 from lore_vault.schema import Vault
@@ -55,7 +55,10 @@ def app(db_path):
             db_path=db_path,
             snapshot_cache_dir=db_path.parent / "snapshot-cache",
             token=Secret(TOKEN),
-            config=Config(embedding=EmbeddingConfig(dim=DIM)),
+            # episode 收料預設關閉（D13）；殼與 spool 的契約測試需要打開
+            config=Config(
+                embedding=EmbeddingConfig(dim=DIM), episodes=EpisodesConfig(ingest=True)
+            ),
             query_embedder=NullEmbedder(),
             enrich_worker=False,
             embedding_warmup=False,

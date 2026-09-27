@@ -40,8 +40,11 @@
 | `LORE_VAULT_HOST_BACKUP_DIR` | `./backups` | 主機備份目錄 |
 | `TUNNEL_TOKEN` | （無） | tunnel profile 用 |
 | `LORE_VAULT_UI_TRUSTED_PROXIES` | `172.16.0.0/12` | 採信 `CF-Connecting-IP` 的來源網段 |
+| `LORE_VAULT_EPISODES_INGEST` | `false` | 是否接收各機器 hook 推送的對話紀錄（episode）。預設關閉，避免把對話原文集中到服務上；關閉時 hook 把紀錄留在各機器本地，打開後自動補推。也可登入 UI 在「連線設定」頁的服務設定切換，不需重啟 |
 
 其他服務設定可用 `LORE_VAULT_<區段>_<項目>` 環境變數覆寫映像內的 `docker/config.toml`（例如 `LORE_VAULT_ASK_MODEL`），完整清單見 [config.example.toml](../../config.example.toml)。
+
+少數可在執行中安全調整的設定（episode 收料、問答開關、健康檢查門檻、登入紀錄保留天數等）另可在 UI 設定頁修改：存在資料庫、優先於環境變數，改完立即生效，並記下修改者與時間；「還原預設」回到環境變數／設定檔的值。
 
 ### Embedding：用哪個 Ollama
 

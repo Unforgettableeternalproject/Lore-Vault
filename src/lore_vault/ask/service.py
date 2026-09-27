@@ -91,6 +91,15 @@ class AskNotConfigured(AskError):
     code = "ask_not_configured"
 
 
+class AskDisabled(AskError):
+    """管理者在設定頁關閉了問答（`ask.enabled = false`，D13）。
+
+    403：這是管理者的明確決定，不是服務故障（不可用 5xx，MCP 殼會誤報成不可達）。"""
+
+    code = "ask_disabled"
+    http_status = 403
+
+
 class AskProviderError(AskError):
     """模型服務連不上、認證或模型設定錯、5xx。"""
 
