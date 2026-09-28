@@ -18,7 +18,7 @@ timeout = 30.0
 # HTTP API 請求路徑（recall、write 查重）的逾時（秒）；逾時即降級為只走 lexical
 query_timeout = 3.0
 # 模型未載入時（Ollama /api/ps 查不到這個模型＝冷啟動）請求路徑改用的逾時（秒）；
-# 探測失敗時仍用 query_timeout
+# 探測失敗時仍用 query_timeout。/v1/ask 不論模型是否載入一律用這個逾時
 cold_query_timeout = 20.0
 # 每分鐘呼叫上限；0 = 不限
 rate_per_minute = 0
@@ -80,8 +80,8 @@ max_age_hours = 26.0
 [api]
 # HTTP 服務是否在同一程序內跑背景補算 worker（單一寫入程序，A9）；關閉時另跑 python -m lore_vault.enrich
 enrich_worker = true
-# 啟動後在背景做一次 embedding 暖機（用完整 embedding.timeout；不阻擋啟動、失敗只記 log，
-# 結果見 /v1/status 的 embedding.warmup）
+# 啟動後在背景做 embedding 暖機（用完整 embedding.timeout；不阻擋啟動、失敗只記 log；
+# Ollama 尚未就緒的連線類失敗會退避重試至多約 10 分鐘；結果見 /v1/status 的 embedding.warmup）
 embedding_warmup = true
 # 同程序的文件 worker（抽取 → 切段 → 索引 → chunk 向量）；documents.blob_dir 未設定時不啟動
 document_worker = true

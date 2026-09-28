@@ -72,7 +72,14 @@ export function Settings({ onLogout }: { onLogout: () => void }) {
       result.push({
         ok: warm === 'ok' ? true : warm === 'failed' ? false : null,
         label: '語意模型',
-        value: warm === 'ok' ? '已就緒' : warm === 'failed' ? `暖機失敗：${data.embedding.warmup.error ?? '原因不明'}` : warm,
+        value:
+          warm === 'ok'
+            ? '已就緒'
+            : warm === 'failed'
+              ? `暖機失敗：${data.embedding.warmup.error ?? '原因不明'}`
+              : warm === 'retrying'
+                ? '暖機重試中（Ollama 尚未就緒）'
+                : warm,
       });
     } catch (err) {
       result.push({ ok: false, label: '服務', value: describeError(err) });

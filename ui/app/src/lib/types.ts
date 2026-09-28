@@ -407,11 +407,13 @@ export interface BacklogStatus {
 }
 
 export interface WarmupStatus {
-  status: 'disabled' | 'pending' | 'running' | 'ok' | 'failed' | string;
+  status: 'disabled' | 'pending' | 'running' | 'retrying' | 'ok' | 'failed' | string;
   started_at: string | null;
   finished_at: string | null;
   elapsed_ms: number | null;
   error: string | null;
+  /** 已嘗試次數（連線類失敗會退避重試）；舊版服務沒有 */
+  attempts?: number;
 }
 
 export interface StatusResult {

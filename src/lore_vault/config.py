@@ -87,6 +87,7 @@ class EmbeddingConfig:
     query_timeout: float = 3.0
     # 模型未載入（Ollama `/api/ps` 沒有這個模型）時，請求路徑改用的較長逾時（秒）：
     # 冷啟動載入可能超過 `query_timeout`，用短逾時會讓閒置後的第一次查詢必定降級。
+    # `/v1/ask` 不論模型是否載入一律用這個逾時（本來就要等問答模型數秒）。
     cold_query_timeout: float = 20.0
     # 每分鐘呼叫上限；0 = 不限
     rate_per_minute: int = 0

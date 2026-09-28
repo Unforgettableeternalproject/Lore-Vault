@@ -25,6 +25,7 @@ const WARMUP_LABEL: Record<string, string> = {
   disabled: '未啟用暖機',
   pending: '等待暖機',
   running: '暖機中',
+  retrying: '暖機重試中（Ollama 尚未就緒）',
   ok: '已就緒',
   failed: '暖機失敗（語意檢索可能降級）',
 };
@@ -202,8 +203,11 @@ function StatusView({ status }: { status: StatusResult }) {
               <dt>啟動暖機</dt>
               <dd data-testid="health-warmup" class={status.embedding.warmup.status === 'failed' ? 'lv-text-error' : undefined}>
                 {WARMUP_LABEL[status.embedding.warmup.status] ?? status.embedding.warmup.status}
+                {status.embedding.warmup.status === 'retrying' && status.embedding.warmup.attempts != null && (
+                  <span class="lv-status__raw">已嘗試 {status.embedding.warmup.attempts} 次</span>
+                )}
                 {status.embedding.warmup.error && <span class="lv-status__raw">{status.embedding.warmup.error}</span>}
-                <span class="lv-status__raw">只在服務啟動時做一次；模型閒置後會被卸載</span>
+                <span class="lv-status__raw">服務啟動時執行；Ollama 尚未就緒會自動重試約 10 分鐘；模型閒置後會被卸載</span>
               </dd>
               <dt>最近一次檢索</dt>
               <dd data-testid="health-recall">

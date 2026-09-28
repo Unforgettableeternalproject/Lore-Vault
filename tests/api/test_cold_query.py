@@ -1,6 +1,7 @@
 """請求路徑的冷啟動逾時：Ollama `/api/ps` 回報模型未載入時，查詢 embedding 改用
 `embedding.cold_query_timeout`（預設 20 秒），不因 3 秒短逾時而降級；已載入維持短逾時；
-`/api/ps` 探測失敗時退回短逾時。`/v1/status` 回報 `embedding.model_loaded`。"""
+`/api/ps` 探測失敗時退回短逾時。`/v1/status` 回報 `embedding.model_loaded`。
+`/v1/ask` 不論模型是否載入一律用 `cold_query_timeout`。"""
 
 from __future__ import annotations
 
@@ -10,6 +11,7 @@ import json
 import pytest
 
 from lore_vault.api.state import HOT_WINDOW, QueryEmbedder
+from lore_vault.ask.client import Completion
 from lore_vault.config import load_config
 from lore_vault.enrich.clients import (
     EnrichTimeout,
@@ -18,7 +20,7 @@ from lore_vault.enrich.clients import (
     ollama_model_loaded,
 )
 
-from .conftest import DIM
+from .conftest import DIM, create_vault, embed_all, write_note
 
 MODEL = "bge-m3"
 
@@ -27,10 +29,19 @@ class FakeOllama:
     """模擬 Ollama：`loaded` 決定 `/api/ps` 的內容；模型未載入時 embed 要
     `load_seconds` 才回應（逾時小於它就丟 EnrichTimeout，等同真實的冷啟動逾時）。"""
 
-    def __init__(self, *, loaded: bool, load_seconds: float = 5.0, ps=None) -> None:
+    def __init__(
+        self,
+        *,
+        loaded: bool,
+        load_seconds: float = 5.0,
+        ps=None,
+        slow_seconds: float = 0.0,
+    ) -> None:
         self.loaded = loaded
         self.load_seconds = load_seconds
         self.ps = ps  # 自訂 /api/ps 行為：例外物件或 HttpResponse
+        # 已載入時 embed 仍要這麼久（偶發卡頓）；逾時小於它就丟 EnrichTimeout
+        self.slow_seconds = slow_seconds
         self.embeds: list[float] = []
         self.probes = 0
 
@@ -49,6 +60,8 @@ class FakeOllama:
         json.loads(body)
         self.embeds.append(timeout)
         if not self.loaded and timeout < self.load_seconds:
+            raise EnrichTimeout(f"請求逾時（{timeout} 秒）：{url}")
+        if self.loaded and timeout < self.slow_seconds:
             raise EnrichTimeout(f"請求逾時（{timeout} 秒）：{url}")
         self.loaded = True  # 載入完成後留在記憶體
         return HttpResponse(200, json.dumps({"embeddings": [[0.5] * DIM]}).encode())
@@ -90,6 +103,55 @@ def test_probe_failure_falls_back_to_short_timeout(make_client, ps):
     fake = FakeOllama(loaded=False, ps=ps)
     client = make_client(query_embedder=None, embed_transport=fake)
     body = _recall(client)
+    assert fake.embeds == [3.0]
+    assert body["degraded"] is True
+    assert body["degraded_reason"] == "embedder_timeout"
+
+
+class _Answerer:
+    model = "fake"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete(self, system: str, user: str) -> Completion:
+        self.calls += 1
+        return Completion(
+            json.dumps({"status": "insufficient", "points": []}), "fake", {}
+        )
+
+
+@pytest.fixture
+def slow_hot(make_client, db_path):
+    """模型已載入，但 embed 要 5 秒（> query_timeout 3、< cold_query_timeout 20）。
+    note 先用預設假 embedder 寫好並補向量，避免寫入查重動到 FakeOllama。"""
+    setup = make_client()
+    create_vault(setup, "folder/cold")
+    write_note(setup, "folder/cold", "資料庫選型", "決定採用 SQLite WAL。")
+    embed_all(db_path)
+    fake = FakeOllama(loaded=True, slow_seconds=5.0)
+    answerer = _Answerer()
+    client = make_client(query_embedder=None, embed_transport=fake, answerer=answerer)
+    return client, fake, answerer
+
+
+def test_ask_always_uses_cold_timeout_even_when_loaded(slow_hot):
+    """ask 本身要等問答模型數秒：已載入也用 cold_query_timeout，不因 3 秒短逾時降級。"""
+    client, fake, answerer = slow_hot
+    resp = client.post("/v1/ask", json={"vault": "folder/cold", "question": "SQLite"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["degraded"] is False, body
+    assert fake.embeds == [20.0]
+    assert answerer.calls == 1
+
+
+def test_recall_keeps_short_timeout_when_loaded(slow_hot):
+    """同情境的 recall 維持原行為：已載入用短逾時，卡住就降級。"""
+    client, fake, _ = slow_hot
+    resp = client.post("/v1/recall", json={"vault": "folder/cold", "query": "SQLite"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
     assert fake.embeds == [3.0]
     assert body["degraded"] is True
     assert body["degraded_reason"] == "embedder_timeout"

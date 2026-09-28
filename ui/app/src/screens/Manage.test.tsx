@@ -326,6 +326,21 @@ describe('系統健康', () => {
     expect(categories).toEqual(['storage']);
   });
 
+  it('暖機重試中：顯示重試標籤、嘗試次數與最近錯誤，不標紅', async () => {
+    const body = status([check({ name: 'storage.ok', category: 'storage' })]);
+    body.embedding.warmup = { status: 'retrying', started_at: null, finished_at: null, elapsed_ms: null, error: 'ProviderUnavailable: Connection refused', attempts: 3 };
+    const { api } = makeApi({
+      '/v1/status': () => json(body),
+      '/v1/episode_summary': () => json({ space: 'dev', vault: '*', total: 0, last_recorded: null, by_machine: [], by_vault: [] }),
+    });
+    renderWithApp(<Health />, api);
+    const warm = await screen.findByTestId('health-warmup');
+    expect(warm.textContent).toContain('暖機重試中');
+    expect(warm.textContent).toContain('已嘗試 3 次');
+    expect(warm.textContent).toContain('Connection refused');
+    expect(warm.className).not.toContain('lv-text-error');
+  });
+
   it('fail 醒目、排最前且展開明細；計數與頂列徽章同步；收料過久標紅', async () => {
     const recent = new Date(Date.now() - 3_600_000).toISOString();
     const { api, callsTo } = makeApi({

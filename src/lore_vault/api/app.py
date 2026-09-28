@@ -124,6 +124,7 @@ def create_app(
             async with mcp_endpoint.run():
                 yield
         finally:
+            state.warmup.stop()
             if state.enricher is not None:
                 state.enricher.stop()
             if state.documents_worker is not None:

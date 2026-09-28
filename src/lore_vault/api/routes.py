@@ -13,7 +13,8 @@
 未知欄位一樣 422 拒絕。
 
 `POST /v1/ask`（D11）：recall 同一條檢索取 note 片段，交問答模型整理；模型失敗回
-明確錯誤碼（`ask_*`，見 `api.errors`），不回假成功。
+明確錯誤碼（`ask_*`，見 `api.errors`），不回假成功。查詢 embedding 一律用
+`embedding.cold_query_timeout`（recall 在模型已載入時用短逾時）。
 
 `POST /v1/documents`（T-67）是唯一的 multipart 端點：欄位 `file`、`vault`、`space`
 （必填）、`filename?`、`mime?`；大小上限在讀取 body 時就擋（413 `too_large`）。
@@ -291,7 +292,11 @@ def ask(request: Request, req: AskRequest) -> dict[str, Any]:
     模型呼叫可能要數秒到 `ask.timeout`，不佔著資料庫連線。
 
     `ask.enabled`（執行期設定，D13）關閉時直接 403 `ask_disabled`，
-    不檢索、不呼叫模型。"""
+    不檢索、不呼叫模型。
+
+    查詢 embedding 用 `state.ask_embedder`：一律 `embedding.cold_query_timeout`，
+    不像 recall 在模型已載入時用 3 秒短逾時——ask 本來就要等模型數秒，
+    embedding 偶發卡住不該讓整個回答降級成只走 lexical。"""
     state = _state(request)
     runtime = state.runtime.current()
     if not runtime.ask.enabled:
@@ -302,7 +307,7 @@ def ask(request: Request, req: AskRequest) -> dict[str, Any]:
             req.question,
             req.vault,  # type: ignore[arg-type]
             space=req.space,  # type: ignore[arg-type]  # None → SpaceRequired
-            embedder=state.query_embedder,
+            embedder=state.ask_embedder,
             dim=state.dim,
             k=req.k,
             kinds=req.kinds,

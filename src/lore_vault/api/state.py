@@ -48,6 +48,9 @@ class QueryEmbedder:
     Ollama `/api/ps` 回報模型未載入（冷啟動）時改用 `embedding.cold_query_timeout`，
     閒置被卸載後的第一次查詢才不會必定降級。最近一次成功呼叫在 `HOT_WINDOW` 內不探測；
     探測失敗（None）維持短逾時——Ollama 狀況不明時不把請求拖長。
+
+    以上挑選只適用 recall 與 write 查重；`/v1/ask` 本身要等問答模型數秒，改用
+    `patient()`，一律用 `cold_query_timeout`（模型已載入也可能偶發卡過短逾時）。
     """
 
     def __init__(
@@ -85,8 +88,7 @@ class QueryEmbedder:
             return self._inner
         return self._cold if self._probe() is False else self._inner
 
-    def embed(self, text: str) -> Sequence[float]:
-        embedder = self._pick()
+    def _call(self, embedder: OllamaEmbedder, text: str) -> Sequence[float]:
         try:
             vector = embedder.embed(text)
         except EnrichTimeout as exc:
@@ -94,6 +96,26 @@ class QueryEmbedder:
         with self._lock:
             self._last_ok = self._clock()
         return vector
+
+    def embed(self, text: str) -> Sequence[float]:
+        return self._call(self._pick(), text)
+
+    def patient(self) -> Embedder:
+        """一律用 `cold_query_timeout` 的 embedder（ask 用）；未設定 cold 時退回短逾時。
+        逾時同樣轉 `TimeoutError`，成功同樣更新 HOT_WINDOW 計時。"""
+        return _PatientEmbedder(self)
+
+
+class _PatientEmbedder:
+    def __init__(self, owner: QueryEmbedder) -> None:
+        self._owner = owner
+
+    def __repr__(self) -> str:
+        return f"patient({self._owner!r})"
+
+    def embed(self, text: str) -> Sequence[float]:
+        owner = self._owner
+        return owner._call(owner._cold or owner._inner, text)
 
 
 def _transport(settings: ApiSettings):
@@ -158,6 +180,13 @@ class AppState:
             settings.query_embedder
             if settings.query_embedder is not None
             else default_query_embedder(settings)
+        )
+        # ask 用：注入的 embedder（測試）原樣沿用；否則一律 cold_query_timeout
+        patient = getattr(self.query_embedder, "patient", None)
+        self.ask_embedder: Embedder = (
+            patient()
+            if settings.query_embedder is None and callable(patient)
+            else self.query_embedder
         )
         self.answerer: Answerer | None = (
             settings.answerer
