@@ -31,6 +31,8 @@ Stop hook 觸發時，該輪的記錄**不保證已經完整寫進 transcript**�
     python hook_stop.py --dry-run ...                 # 只解析不寫入
     python hook_stop.py --push                        # 把本地 spool 推到服務（手動／排程）
     python hook_stop.py --push --dry-run              # 只看 spool 與推送設定狀態
+    python hook_stop.py --backfill-spool [--dry-run]  # spool 上線前的舊輪次補進 spool（不推送）
+    python hook_stop.py --repair-schema [--dry-run]   # 修正服務端 schema 不合法的舊輪次（先備份）
 
 ## 推送到服務（階段 8，T-38／T-39）
 
@@ -207,8 +209,11 @@ def backfill_repo_root(episode_dir: Path, *, dry_run: bool = False) -> int:
             root = infer_repo_root(rec)
             if root is None:
                 # 推不出來就留空：寧可讓 doctor 說「這輪沒有基準」，
-                # 也不要塞一個猜的路徑進去——那會變成看起來正常的錯資料
-                if rec.pop("repo_root", None) is not None:
+                # 也不要塞一個猜的路徑進去——那會變成看起來正常的錯資料。
+                # 「留空」是寫 None 而不是拔掉欄位：repo_root 是 Episode 的必填欄位（值可為 None），
+                # 拔掉會讓這輪 schema 不合法、永遠推不上服務（--repair-schema 補的 None 也會被拔回去）
+                if "repo_root" not in rec or rec["repo_root"] is not None:
+                    rec["repo_root"] = None
                     changed = True
                 failed += 1
                 continue
@@ -377,6 +382,248 @@ def push_command(episode_dir: Path, *, dry_run: bool) -> int:
     result = lv_spool.push_all(spool_dir, settings)
     print(f"[spool] {result.summary()}", file=sys.stderr)
     return 1 if result.error else 0
+
+
+def episode_cache_dir_for(episode_dir: Path) -> Path:
+    """服務 episode 快取（``paths.EPISODE_CACHE_DIR``）同樣在 episode 目錄同層，測試跟著換。"""
+    return episode_dir.parent / "episode_cache"
+
+
+def _schema_problem(exc: Exception) -> str:
+    """SchemaError 訊息只留欄位與規則（去掉「得到 …」後面的值），避免把語料內容帶進輸出。"""
+    return str(exc).split("，得到", 1)[0].split("得到", 1)[0].strip()[:120]
+
+
+def episode_schema_problem(rec: dict[str, Any], machine: str = "local") -> str | None:
+    """本機 episode 換成推送格式後能否通過服務端 schema。合法回 None，否則回（已去掉值的）原因。
+
+    走與 spool 推送相同的轉換（``wire_episode`` + ``sanitize_value``），
+    ``--backfill-spool``、``--repair-schema`` 與 doctor 共用這一個判定，
+    「修好了」與「backfill 收不收」才不會分岔。
+    """
+    from lore_vault.hooks import spool as lv_spool
+    from lore_vault.schema import Episode, SchemaError
+    from lore_vault.schema.chars import sanitize_value
+
+    wire, _ = sanitize_value(lv_spool.wire_episode(rec, machine=machine, vault=""))
+    wire.pop("vault", None)
+    try:
+        Episode.from_dict(wire)
+    except (SchemaError, ValueError, TypeError) as exc:
+        return _schema_problem(exc)
+    return None
+
+
+def _fix_schema(rec: dict[str, Any]) -> list[str]:
+    """就地修正一筆 schema 不合法的舊輪次，回傳套用的修法標籤。
+
+    每一類的依據（2026-10-02 對 ~/.lore-vault 實測 176 輪）：
+
+    - ``files_touched``：c41874e 之前的欄位，只取自 ``file-history-delta.trackingPath``，
+      語意是「這輪改過的檔案」——即現行 ``files_edited`` 的子集。遷移成 ``files_edited``
+      （依 ``repo_root`` 正規化成 repo 相對，與現行寫法同形；否則絕對路徑會讓
+      ``infer_repo_root`` 誤判當時沒有 root）。那個 schema 不分讀寫，``files_read`` 補空。
+    - 缺 ``symbols_edited``／``files_read``：早於該欄位的語料。補 ``[]``；下游
+      （retrieve／distill）本來就以 ``.get(...) or []`` 讀，行為不變，只是把隱性的「當空」寫明。
+    - **不補** ``injected``：schema 以 MISSING 表示「早於注入 schema、不知道」，
+      補 ``[]`` 等於宣告這輪是乾淨語料，會污染校準。
+    - 缺 ``repo_root``：``infer_repo_root`` 推得出就用，推不出寫 None——推不出的判準是
+      存檔留著以候選 root 為前綴的絕對路徑，證明寫入當時 root 就是 None，
+      這正是 ``build_episode`` 在 root 為 None 時寫的值。
+    - ``ended_at`` 早於 ``started_at``：``_time_span`` 修正前取首尾而非最早／最晚，
+      meta 回合記錄不按時間寫入（實測差 1–11ms）。兩個值都是該輪真實出現過的時間戳，
+      交給現行 ``_time_span`` 取最早／最晚，即修正後的寫法套在這兩個端點上。
+    """
+    from transcript import _time_span, normalize_path
+
+    applied: list[str] = []
+    if "files_touched" in rec:
+        touched = rec.pop("files_touched") or []
+        if "files_edited" not in rec:
+            root = rec.get("repo_root")
+            base = Path(root) if root else None
+            edited: list[str] = []
+            for raw in touched:
+                path = normalize_path(str(raw), base)
+                if path and path not in edited:
+                    edited.append(path)
+            rec["files_edited"] = edited
+        applied.append("files_touched→files_edited")
+    for name in ("files_edited", "files_read", "symbols_edited"):
+        if name not in rec:
+            rec[name] = []
+            applied.append(f"{name}=[]")
+    if "repo_root" not in rec:
+        rec["repo_root"] = infer_repo_root(rec)
+        applied.append("repo_root=" + ("推導" if rec["repo_root"] else "None"))
+    started, ended = rec.get("started_at"), rec.get("ended_at")
+    if isinstance(started, str) and isinstance(ended, str):
+        earliest, latest = _time_span([started, ended])
+        if (earliest, latest) != (started, ended):
+            rec["started_at"], rec["ended_at"] = earliest, latest
+            applied.append("時間端點交換")
+    return applied
+
+
+def _rewrite_lines(path: Path, lines: list[str]) -> None:
+    """逐行原樣寫回（tmp + fsync + replace）。沒改的行保留原字串，不重新序列化。"""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8", newline="\n") as f:
+        for line in lines:
+            f.write(line + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def repair_schema(episode_dir: Path, *, dry_run: bool = False,
+                  backup_dir: Path | None = None) -> dict[str, Any]:
+    """``--repair-schema``：把 schema 不合法的舊輪次修成服務端收得下的形狀。
+
+    只動初始驗證失敗的行；合法的行一個位元都不改（它們可能已在服務端，
+    內容一變重送就是 conflict）。修完在記憶體內重驗，仍不合法就維持原樣、計入無法修。
+    transcript 還在的 session 也不走 ``--repair``：那會重建整檔、連帶改到已推上服務的輪次。
+
+    寫入前把整個原檔複製到 ``backup_dir``（預設 ``episode_dir`` 同層的
+    ``episode_backups/schema-<時間>/``，不放進 episode 目錄以免被 ``*.jsonl`` 撿到）。
+    """
+    import shutil
+
+    files = sorted(episode_dir.glob("*.jsonl")) if episode_dir.exists() else []
+    if backup_dir is None:
+        backup_dir = (episode_dir.parent / "episode_backups"
+                      / time.strftime("schema-%Y%m%d-%H%M%S"))
+    stats: dict[str, Any] = {
+        "lines": 0, "invalid": 0, "fixed": 0, "unfixable": 0, "files_changed": 0,
+        "by_reason": {}, "unfixable_by_reason": {}, "fixes": {}, "backup_dir": None,
+    }
+    for fp in files:
+        try:
+            lines = fp.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            print(f"[repair-schema] {fp.stem[:8]} 讀取失敗 {exc}", file=sys.stderr)
+            continue
+        out: list[str] = []
+        changed = False
+        for line in lines:
+            if not line.strip():
+                out.append(line)
+                continue
+            stats["lines"] += 1
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                out.append(line)
+                continue
+            reason = episode_schema_problem(rec) if isinstance(rec, dict) else "非物件"
+            if reason is None:
+                out.append(line)
+                continue
+            stats["invalid"] += 1
+            stats["by_reason"][reason] = stats["by_reason"].get(reason, 0) + 1
+            fixed = dict(rec)
+            applied = _fix_schema(fixed) if isinstance(rec, dict) else []
+            after = episode_schema_problem(fixed) if applied else reason
+            if after is not None:
+                stats["unfixable"] += 1
+                stats["unfixable_by_reason"][after] = stats["unfixable_by_reason"].get(after, 0) + 1
+                out.append(line)
+                continue
+            stats["fixed"] += 1
+            for tag in applied:
+                stats["fixes"][tag] = stats["fixes"].get(tag, 0) + 1
+            out.append(json.dumps(fixed, ensure_ascii=False))
+            changed = True
+        if not changed:
+            continue
+        stats["files_changed"] += 1
+        if dry_run:
+            continue
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(fp, backup_dir / fp.name)
+        stats["backup_dir"] = str(backup_dir)
+        _rewrite_lines(fp, out)
+
+    print(f"[repair-schema] {len(files)} 個檔、{stats['lines']} 行：不合法 {stats['invalid']}、"
+          f"修好 {stats['fixed']}、無法修 {stats['unfixable']}（{stats['files_changed']} 個檔要改）"
+          + ("（dry-run，未寫入）" if dry_run else
+             (f"，備份在 {stats['backup_dir']}" if stats["backup_dir"] else "")),
+          file=sys.stderr)
+    for reason, n in sorted(stats["by_reason"].items(), key=lambda kv: -kv[1]):
+        print(f"  invalid  {n:6d}  {reason}", file=sys.stderr)
+    for tag, n in sorted(stats["fixes"].items(), key=lambda kv: -kv[1]):
+        print(f"  fix      {n:6d}  {tag}", file=sys.stderr)
+    for reason, n in sorted(stats["unfixable_by_reason"].items(), key=lambda kv: -kv[1]):
+        print(f"  unfixable {n:5d}  {reason}", file=sys.stderr)
+    return stats
+
+
+def backfill_spool(episode_dir: Path, *, dry_run: bool = False,
+                   cache_dir: Path | None = None) -> dict[str, Any]:
+    """``--backfill-spool``：把 spool 上線前就寫進 jsonl、從未推過的輪次補進 spool。
+
+    寫入走 ``spool_written``（與 Stop hook 同一條路，machine／vault 在這裡凍結）。排除：
+
+    - 服務快取（``episode_cache/service.jsonl``）已有的鍵：服務端只在內容與 vault 完全相同時
+      回 duplicate，之後被 ``--repair``／``--backfill-repo-root`` 改過的輪次重送會變 conflict
+    - spool 的 pending／rejected 已有的 spool_id：重跑不重複排隊，被拒收過的不會每跑一次又回 pending
+    - 本地 schema 驗證不過的輪次：服務端必回 invalid，只計數回報，不寫進 spool
+
+    回傳計數（dry-run 同樣算出來，只是不寫檔）。
+    """
+    from episode_source import load_local, load_service_log, spooled_ids
+    from lore_vault.hooks import spool as lv_spool
+
+    spool_dir = spool_dir_for(episode_dir)
+    cache_dir = cache_dir if cache_dir is not None else episode_cache_dir_for(episode_dir)
+    local = load_local(episode_dir)
+    service_keys = set(load_service_log(cache_dir))
+    spooled = spooled_ids(spool_dir)
+    machine = current_machine()
+    vault_cache: dict[str, str] = {}
+
+    stats: dict[str, Any] = {
+        "local": len(local), "in_service": 0, "already_spooled": 0, "invalid": 0,
+        "to_spool": 0, "written": 0, "no_repo_root": 0, "folder_fallback": 0,
+        "by_vault": {}, "invalid_by_reason": {},
+    }
+    candidates: list[dict[str, Any]] = []
+    for key, rec in local.items():
+        if key in service_keys:
+            stats["in_service"] += 1
+            continue
+        if lv_spool.spool_id(rec) in spooled:
+            stats["already_spooled"] += 1
+            continue
+        reason = episode_schema_problem(rec, machine)
+        if reason is not None:
+            stats["invalid"] += 1
+            stats["invalid_by_reason"][reason] = stats["invalid_by_reason"].get(reason, 0) + 1
+            continue
+        vault = lv_spool.derive_vault(rec.get("repo_root"), rec.get("repo"), vault_cache)
+        if not rec.get("repo_root"):
+            stats["no_repo_root"] += 1
+        if vault.startswith("folder/"):
+            stats["folder_fallback"] += 1
+        stats["by_vault"][vault] = stats["by_vault"].get(vault, 0) + 1
+        candidates.append(rec)
+    stats["to_spool"] = len(candidates)
+    if candidates and not dry_run:
+        stats["written"] = spool_written(spool_dir, candidates)
+
+    print(f"[backfill-spool] 本機 {stats['local']} 輪（spool 鍵去重後）："
+          f"服務快取已有 {stats['in_service']}、spool 已有 {stats['already_spooled']}、"
+          f"schema 不合法 {stats['invalid']}、待寫入 {stats['to_spool']}"
+          + ("（dry-run，未寫入）" if dry_run else f"，實際寫入 {stats['written']}"),
+          file=sys.stderr)
+    print(f"[backfill-spool] 沒有 repo_root {stats['no_repo_root']}、"
+          f"vault 為 folder/*（服務端未註冊者改進 misc）{stats['folder_fallback']}",
+          file=sys.stderr)
+    for vault, n in sorted(stats["by_vault"].items(), key=lambda kv: (-kv[1], kv[0])):
+        print(f"  {n:6d}  {vault}", file=sys.stderr)
+    for reason, n in sorted(stats["invalid_by_reason"].items(), key=lambda kv: -kv[1]):
+        print(f"  invalid {n:6d}  {reason}", file=sys.stderr)
+    return stats
 
 
 def repair(transcript: Path, episode_dir: Path, session_id: str,
@@ -599,6 +846,7 @@ def doctor(episode_dir: Path) -> int:
     stored_pairs: set[tuple[str, str]] = set()
     legacy_schema = 0
     legacy_unfixable = 0
+    schema_invalid: dict[str, int] = {}
 
     for fp in files:
         session_id = fp.stem
@@ -616,6 +864,11 @@ def doctor(episode_dir: Path) -> int:
                 legacy_here += 1
             elif rec.get("injected"):
                 stored_injected.add((str(rec.get("session_id")), str(rec.get("prompt_id"))))
+            # 服務端 schema 收不下的輪次永遠進不了 spool（--backfill-spool 只計數跳過），
+            # 不對帳就只會在 backfill 的輸出裡一閃而過
+            schema_reason = episode_schema_problem(rec)
+            if schema_reason is not None:
+                schema_invalid[schema_reason] = schema_invalid.get(schema_reason, 0) + 1
             repos[rec.get("repo") or "?"] = repos.get(rec.get("repo") or "?", 0) + 1
             origins[rec.get("origin") or "?"] = origins.get(rec.get("origin") or "?", 0) + 1
             agents[rec.get("agent") or "(未標記)"] = agents.get(rec.get("agent") or "(未標記)", 0) + 1
@@ -727,6 +980,13 @@ def doctor(episode_dir: Path) -> int:
 
     if legacy_unfixable:
         print(f"  （{legacy_unfixable} 輪停在舊 schema 且來源已消失，重建不了）", file=out)
+    if schema_invalid:
+        # 警示而非問題：語料本身照常可讀，只是推不上服務；修不了的殘留不該讓 doctor 永遠是紅的
+        warnings.append(
+            f"{sum(schema_invalid.values())} 輪不符服務端 Episode schema，推不上服務"
+            f"——跑 --repair-schema（先 --dry-run）：" + "；".join(
+                f"{n} {reason}" for reason, n in sorted(schema_invalid.items(), key=lambda kv: -kv[1]))
+        )
     if legacy_schema:
         problems.append(
             f"{legacy_schema} 輪沒有 injected 欄位（早於這個 schema）——跑 --repair-all 補上"
@@ -876,6 +1136,8 @@ def main() -> int:
     parser.add_argument("--repair-all", action="store_true", help="對所有既有 session 全量重建（schema 變更後使用）")
     parser.add_argument("--backfill-repo-root", action="store_true",
                         help="一次性回填 repo_root 欄位（從 repo + cwd 推導，不碰檔案系統）")
+    parser.add_argument("--repair-schema", action="store_true",
+                        help="修正服務端 schema 不合法的舊輪次（先備份、原子寫回；搭配 --dry-run 只計數）")
     parser.add_argument("--sync", type=Path, help="手動同步指定的 transcript")
     parser.add_argument("--repair", type=Path, help="全量重建，修復殘缺紀錄")
     parser.add_argument("--episode-dir", type=Path, default=DEFAULT_EPISODE_DIR)
@@ -883,6 +1145,8 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="只解析不寫入")
     parser.add_argument("--push", action="store_true",
                         help="把本地 spool 推到服務（推到清空或失敗為止）")
+    parser.add_argument("--backfill-spool", action="store_true",
+                        help="把 spool 上線前寫入、服務端沒有的舊輪次補進 spool（不推送；推送用 --push）")
     args = parser.parse_args()
 
     for stream in (sys.stdout, sys.stderr):
@@ -898,6 +1162,14 @@ def main() -> int:
 
     if args.push:
         return push_command(args.episode_dir, dry_run=args.dry_run)
+
+    if args.backfill_spool:
+        backfill_spool(args.episode_dir, dry_run=args.dry_run)
+        return 0
+
+    if args.repair_schema:
+        stats = repair_schema(args.episode_dir, dry_run=args.dry_run)
+        return 1 if stats["unfixable"] else 0
 
     if args.sync_all:
         return sync_all(args.episode_dir)
