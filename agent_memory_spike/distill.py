@@ -376,13 +376,82 @@ def emit(episodes: list[dict[str, Any]], task_path: Path, *, control: int = 0,
 GLOBAL_LITERALS = {"null", "none", "global", "*"}
 
 
-def resolve_scope(concept: dict[str, Any], task: dict[str, Any]) -> str | None:
+def scope_from_anchors(anchors: Any) -> str | None:
+    """從檔案路徑型的錨點抓出開頭那一段（repo／子專案名）。
+
+    anchors 是蒸餾者對「這條記憶真正關於什麼」的具體標注，顆粒度比自由文字的
+    `scope` 更細、更貼近單一子專案——monorepo 底下尤其如此（一個 repo 裡有
+    `JSAI-API`、`JSAI-Functions` 等各自是獨立 vault 的子專案）。`scope` 則是
+    LLM 看完一組候選（可能跨兩個子專案）後自己總結的字串，沒有驗證機制。
+
+    2026-10-02 事故：一組候選同時碰到 `JSAI-Functions/` 與 `JSAI-API/`，
+    LLM 把兩條 concept 的 `scope` 都填成不存在的上位名稱 `'JSAI'`，
+    兩條都對不上任何 vault，推送整批被拒。但每條自己的 anchors 其實已經
+    明確指向正確的子專案——只是沒人拿來驗證 `scope`。
+
+    多個路徑型錨點開頭不一致 → 歧義，回傳 None（不猜、不覆蓋）。
+    """
+    heads: set[str] = set()
+    for anchor in anchors or []:
+        if not isinstance(anchor, str) or "/" not in anchor:
+            continue
+        head = anchor.split("/", 1)[0].strip()
+        if head:
+            heads.add(head)
+    if len(heads) == 1:
+        return next(iter(heads))
+    return None
+
+
+# 一個 scope 要被當作「已知合法 vault」，至少要有幾個**不同**候選組掛它——
+# 不能只看出現次數：一組候選一次就能產出 2-3 條 concept，同一個蒸餾錯誤
+# （例如 2026-10-02 的 'JSAI'）會讓同一個錯字串在池子裡出現兩次以上，
+# 看起來像「有共識」，但其實只是同一次錯誤的分身
+MIN_DISTINCT_CANDIDATES = 2
+
+
+def known_repos_from_concepts(concepts: list[dict[str, Any]]) -> frozenset[str]:
+    """既有池子裡「被多個不同候選組獨立用過」的 scope 字串，當作已知合法
+    vault 名稱的名單。
+
+    這個名單只用來**擋**，不用來猜：沒出現過的子資料夾名稱（例如一個檔案
+    anchor 的開頭段落剛好是 `workers`、`src`、`tests` 之類的目錄，不是
+    repo／子專案）不該被誤認成新 vault。見 ``resolve_scope`` 的覆蓋條件。
+    """
+    candidates_by_scope: dict[str, set[str]] = {}
+    for c in concepts:
+        if not isinstance(c, dict):
+            continue
+        scope = c.get("scope")
+        if not isinstance(scope, str) or not scope.strip():
+            continue
+        scope = scope.strip()
+        cand = c.get("source_candidate")
+        key = cand if isinstance(cand, str) and cand else f"id:{c.get('id')}"
+        candidates_by_scope.setdefault(scope, set()).add(key)
+    return frozenset(
+        scope
+        for scope, cands in candidates_by_scope.items()
+        if len(cands) >= MIN_DISTINCT_CANDIDATES
+    )
+
+
+def resolve_scope(
+    concept: dict[str, Any],
+    task: dict[str, Any],
+    known_repos: frozenset[str] | None = None,
+) -> str | None:
     """決定一條 concept 的 scope，區分「填了 null」與「沒有這個鍵」。
 
     蒸餾指示要求「跨專案通用則填 null」，所以 `scope: null` 是**明確表態**，
     而缺這個鍵才是「沒說」。原本這裡是 `concept.get("scope") or task.get("repo")`，
     `None` 是假值 → 每一條通用知識都被靜默改標成當時觀察到的那個 repo
     （實測 780 條原始輸出裡 47 條中招，池子裡 global 的數量因此是精確的零）。
+
+    ``known_repos``：既有池子的 scope 名單（見 ``known_repos_from_concepts``）。
+    用來擋 ``scope_from_anchors`` 誤判——實測直接拿 anchor 開頭段落覆蓋
+    scope（不設名單時）在真實池子裡誤判了 398/1573 筆（例如把合法的
+    `scope='Eternity'` 改成 anchor 裡剛好同名的目錄 `'workers'`）。
     """
     if "scope" not in concept:
         # 沒說 → 退回觀察到它的 repo。這是保守的一邊：標窄了只是召不到，
@@ -398,6 +467,20 @@ def resolve_scope(concept: dict[str, Any], task: dict[str, Any]) -> str | None:
         return task.get("repo")
     if scope.lower() in GLOBAL_LITERALS:
         return None
+    # 自由文字 scope 與這條自己的 anchors 不一致時，anchors 可能更可信——但只有
+    # 「anchor 指的名字是已知合法 vault、而宣稱的 scope 不是」才算得上證據
+    # （2026-10-02 事故：scope='JSAI' 不在任何已知名單裡，anchor 指向的
+    # 'JSAI-Functions'／'JSAI-API' 在）。兩邊都已知、或 anchor 那個不在已知
+    # 名單裡，都不夠格覆蓋——寧可標錯，不要用猜的去蓋掉一個可能本來就對的值。
+    if known_repos:
+        anchor_scope = scope_from_anchors(concept.get("anchors"))
+        if (
+            anchor_scope
+            and anchor_scope != scope
+            and anchor_scope in known_repos
+            and scope not in known_repos
+        ):
+            return anchor_scope
     return scope
 
 
@@ -516,6 +599,8 @@ def _ingest_locked(entries: list[dict[str, Any]], tasks: dict[str, Any],
         existing = json.loads(concept_path.read_text(encoding="utf-8"))
     # 全量模式也從歷來最大號往上配：被覆寫掉的舊檔 id 可能還留在注入紀錄與服務端
     ids = IdAllocator(concept_path, existing)
+    # 已知合法 vault 名單：見 resolve_scope 的覆蓋條件說明
+    known_repos = known_repos_from_concepts(existing)
 
     if append and concept_path.exists():
         # 增量收回：接在既有 concept 之後，並把既有的陳述納入去重比對，
@@ -547,7 +632,7 @@ def _ingest_locked(entries: list[dict[str, Any]], tasks: dict[str, Any],
                 "kind": concept.get("kind"),
                 # None 代表跨專案通用，三條注入路徑都會放行。
                 # 不可寫成 `concept.get("scope") or task.get("repo")`——見 resolve_scope
-                "scope": resolve_scope(concept, task),
+                "scope": resolve_scope(concept, task, known_repos),
                 # 檢索索引的是 cue 不是 statement——見 experiment/phase2-retrieval.md。
                 # 舊語料沒有這個欄位，退回 probe（形狀相近，是當初驗證這個方向時用的代理）
                 "cue": concept.get("cue") or concept.get("probe"),

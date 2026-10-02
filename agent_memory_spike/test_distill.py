@@ -18,9 +18,27 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from concept_ids import load_high_water, save_high_water, state_path  # noqa: E402
-from distill import ingest, resolve_scope  # noqa: E402
+from distill import (  # noqa: E402
+    ingest,
+    known_repos_from_concepts,
+    resolve_scope,
+    scope_from_anchors,
+)
 
 TASK = {"repo": "Eternity"}
+
+# 「已知合法 vault」要有 >= 2 個不同候選組掛過才算——見
+# known_repos_from_concepts。這裡造兩個不同 source_candidate 讓
+# JSAI-Functions／JSAI-API 都通過門檻，模擬真實池子裡「這兩個子專案本來就
+# 常態出現」的狀態。
+KNOWN_REPOS = known_repos_from_concepts(
+    [
+        {"scope": "JSAI-Functions", "source_candidate": "cand-a"},
+        {"scope": "JSAI-Functions", "source_candidate": "cand-b"},
+        {"scope": "JSAI-API", "source_candidate": "cand-c"},
+        {"scope": "JSAI-API", "source_candidate": "cand-d"},
+    ]
+)
 
 
 # --- resolve_scope：三態 ---------------------------------------------------
@@ -55,6 +73,103 @@ def test_global_literals_normalize_to_none():
 
 def test_scope_is_trimmed():
     assert resolve_scope({"scope": " Eternity "}, TASK) == "Eternity"
+
+
+# --- scope_from_anchors／anchors 覆蓋自由文字 scope（2026-10-02 事故）--------
+#
+# 一組候選同時碰到 monorepo 底下兩個子專案（JSAI-Functions、JSAI-API），
+# LLM 把兩條 concept 的 scope 都填成不存在的上位名稱 'JSAI'，兩條都對不上
+# 任何 vault，推送整批被服務端拒收。每條自己的 anchors 其實已經指向正確的
+# 子專案——resolve_scope 必須拿 anchors 糾正，不能照抄 LLM 的自由文字。
+
+
+def test_scope_from_anchors_single_head():
+    anchors = [
+        "JSAI-Functions/src/functions/inspection-fill-reminder.ts",
+        "JSAI-Functions/src/functions/inspection-overdue-reminder.ts",
+    ]
+    assert scope_from_anchors(anchors) == "JSAI-Functions"
+
+
+def test_scope_from_anchors_ignores_non_path_anchors():
+    anchors = ["JSAI-API/src/routes/departments/departments.ts", "container.replace", "patch"]
+    assert scope_from_anchors(anchors) == "JSAI-API"
+
+
+def test_scope_from_anchors_is_none_when_no_path_anchor():
+    assert scope_from_anchors(["container.replace", "patch"]) is None
+    assert scope_from_anchors([]) is None
+    assert scope_from_anchors(None) is None
+
+
+def test_scope_from_anchors_is_none_when_ambiguous():
+    """兩個路徑型錨點開頭不一致——真的跨兩個子專案，不猜。"""
+    anchors = ["JSAI-Functions/src/a.ts", "JSAI-API/src/b.ts"]
+    assert scope_from_anchors(anchors) is None
+
+
+def test_resolve_scope_is_corrected_by_disagreeing_anchors():
+    """根因回歸測試：拿掉 anchors 覆蓋這段保護，這個斷言會變紅。"""
+    task = {"repo": "AI-Website"}
+    concept = {
+        "scope": "JSAI",
+        "anchors": [
+            "JSAI-Functions/src/functions/inspection-fill-reminder.ts",
+            "JSAI-Functions/src/functions/inspection-overdue-reminder.ts",
+        ],
+    }
+    assert resolve_scope(concept, task, KNOWN_REPOS) == "JSAI-Functions"
+
+
+def test_resolve_scope_is_corrected_by_disagreeing_anchors_other_subproject():
+    task = {"repo": "AI-Website"}
+    concept = {
+        "scope": "JSAI",
+        "anchors": ["JSAI-API/src/routes/departments/departments.ts", "container.replace", "patch"],
+    }
+    assert resolve_scope(concept, task, KNOWN_REPOS) == "JSAI-API"
+
+
+def test_resolve_scope_keeps_scope_when_anchors_agree():
+    concept = {"scope": "JSAI-API", "anchors": ["JSAI-API/src/x.ts"]}
+    assert resolve_scope(concept, TASK, KNOWN_REPOS) == "JSAI-API"
+
+
+def test_resolve_scope_keeps_scope_when_anchors_ambiguous():
+    """anchors 本身歧義時不猜——寧可維持原 scope（即便可能還是錯的，
+    但至少不是用猜的去蓋掉一個可能本來就對的值）。"""
+    concept = {"scope": "JSAI", "anchors": ["JSAI-Functions/a.ts", "JSAI-API/b.ts"]}
+    assert resolve_scope(concept, TASK, KNOWN_REPOS) == "JSAI"
+
+
+def test_resolve_scope_keeps_scope_when_no_path_anchors():
+    concept = {"scope": "Eternity", "anchors": ["container.replace"]}
+    assert resolve_scope(concept, TASK, KNOWN_REPOS) == "Eternity"
+
+
+def test_resolve_scope_does_not_override_without_known_repos():
+    """沒有已知名單（或 anchor 指的名字不在名單裡）時絕不猜——這是
+    2026-10-02 事故教訓的另一半：單純『anchor 跟 scope 不一樣』不是證據，
+    『anchor 指的名字本身是已知合法 vault』才是。"""
+    concept = {
+        "scope": "JSAI",
+        "anchors": ["JSAI-Functions/src/functions/inspection-fill-reminder.ts"],
+    }
+    assert resolve_scope(concept, TASK) == "JSAI"
+    assert resolve_scope(concept, TASK, frozenset()) == "JSAI"
+
+
+def test_resolve_scope_does_not_override_unestablished_anchor_name():
+    """anchor 開頭段落只是個目錄名（例如 'workers'），沒有在已知名單裡
+    出現過兩次以上——不當作合法 vault，不覆蓋。"""
+    known = known_repos_from_concepts(
+        [
+            {"scope": "Eternity", "source_candidate": "cand-a"},
+            {"scope": "Eternity", "source_candidate": "cand-b"},
+        ]
+    )
+    concept = {"scope": "Eternity", "anchors": ["workers/queue.ts"]}
+    assert resolve_scope(concept, TASK, known) == "Eternity"
 
 
 # --- 端到端：收料寫進 concepts.json ----------------------------------------

@@ -19,6 +19,7 @@ from lore_vault.storage import ui_login as storage_ui_login
 
 from .backup_check import backup_recent
 from .concept_push_check import concept_push_lag
+from .concept_scope_check import concept_scope_anchor_agreement
 from .concept_snapshot_check import (
     concept_snapshot_age,
     concept_snapshot_path_agreement,
@@ -638,6 +639,14 @@ def default_registry() -> Registry:
             "episode_pull",
             episode_pull_status,
             "管線上次從服務拉取 episode 成功、快取與服務端筆數一致、服務端沒有少資料",
+        )
+    )
+    registry.add(
+        Check(
+            "concept_scope.anchor_agreement",
+            "concept_scope",
+            concept_scope_anchor_agreement,
+            "concept 的 scope 與自己的 anchors 一致，不是蒸餾時猜錯的上位名稱",
         )
     )
     return registry
