@@ -36,3 +36,16 @@ def test_real_decisions_file():
     assert result["D6"] is False
     assert result["D12"] is True
     assert result["D13"] is True
+
+
+def test_partial_ruling_with_pending_items_is_unresolved():
+    text = (
+        "### D15 任務層\n\n**待裁決**：\n\n1. a\n2. b\n\n"
+        "**已裁決（艾斯維爾 2026-10-08）**：第 1 項\n"
+    )
+    assert parse_decisions(text) == {"D15": False}
+
+
+@pytest.mark.skipif(not REAL.is_file(), reason="docs/hidden 不進版控")
+def test_real_decisions_d15_partial_is_unresolved():
+    assert load_decisions(REAL)["D15"] is False

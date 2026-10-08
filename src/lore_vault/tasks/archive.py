@@ -149,19 +149,52 @@ def _summary_body(
     return "\n".join(parts)
 
 
-def _chain_head(client: VaultClient, vault: str, space: str, key: str) -> str | None:
+def _lookup_requirement(
+    client: VaultClient, vault: str, space: str, key: str, change_name: str
+) -> tuple[str | None, str | None]:
+    """回傳 (本 change 已寫過的 note id, 鏈頭 id)。
+
+    前一次 archive 若在 HTTP write 成功、本機回寫 metadata 前中斷，服務端會留一則
+    同時帶 `change:<name>` 與 `req:` topic 的 note；採用它，不再重寫成孤兒。"""
     topic = specs.requirement_topic(key)
-    heads = [
-        item["id"]
-        for item in client.list_topic(vault, space, topic)
-        if not item.get("superseded_by")
+    items = client.list_topic(vault, space, topic)
+    mine = [
+        i["id"]
+        for i in items
+        if specs.change_topic(change_name) in (i.get("topics") or [])
     ]
+    if len(mine) > 1:
+        raise ArchiveError(
+            f"{key}：服務端已有多則本 change 的 note，無法決定採用哪一則",
+            [f"note：{', '.join(mine)}"],
+        )
+    if mine:
+        return mine[0], None
+    heads = [item["id"] for item in items if not item.get("superseded_by")]
     if len(heads) > 1:
         raise ArchiveError(
             f"{key}：同一 requirement 的鏈頭不只一則，無法決定 supersedes",
             [f"鏈頭：{', '.join(heads)}（請先以 update 修正 supersedes 鏈）"],
         )
-    return heads[0] if heads else None
+    return None, (heads[0] if heads else None)
+
+
+def _existing_summary(
+    client: VaultClient, vault: str, space: str, change_name: str
+) -> str | None:
+    """本 change 已寫過的總結 note（帶 change topic、無 req: topic、總結標題）。"""
+    prefix = f"變更 {change_name}："
+    found = [
+        i["id"]
+        for i in client.list_topic(vault, space, specs.change_topic(change_name))
+        if str(i.get("title", "")).startswith(prefix)
+        and not any(str(t).startswith("req:") for t in i.get("topics") or [])
+    ]
+    if len(found) > 1:
+        raise ArchiveError(
+            f"服務端已有多則 {change_name} 的總結 note", [", ".join(found)]
+        )
+    return found[0] if found else None
 
 
 def _resolve_vault(
@@ -196,7 +229,9 @@ def archive_change(
 
     # 2. 本機全驗
     resumed_merge = bool(meta.get("spec_applied"))
-    if not resumed_merge:
+    # 已寫回主 spec 的 capability（併主 spec 中途失敗時記錄）
+    applied_caps: list[str] = list(meta.get("spec_applied_caps") or [])
+    if not resumed_merge and not applied_caps:
         errors = validate_change(change, ws, ws.active())
         if errors:
             raise ArchiveError(f"{name} 未通過 validate", errors)
@@ -205,7 +240,7 @@ def archive_change(
         raise ArchiveError(f"{name} 狀態為「{status}」，不可封存", reasons)
     merged: dict[str, str] = {}
     if not resumed_merge and not meta.get("skip_specs"):
-        merged, merge_errors = trial_merge(change, ws)
+        merged, merge_errors = trial_merge(change, ws, skip=applied_caps)
         if merge_errors:
             raise ArchiveError(f"{name} delta 併回試算失敗", merge_errors)
 
@@ -223,7 +258,17 @@ def archive_change(
             )
         meta["vault"] = vault_key
         pending = [it for it in _requirement_items(change) if it[0] not in notes]
-        heads = {key: _chain_head(client, vault_key, space, key) for key, *_ in pending}
+        heads: dict[str, str | None] = {}
+        for key, *_ in list(pending):
+            existing, heads[key] = _lookup_requirement(
+                client, vault_key, space, key, name
+            )
+            if existing:
+                notes[key] = existing
+                meta["notes"] = dict(notes)
+                change.save()
+                result.skipped.append(key)
+        pending = [it for it in pending if it[0] not in notes]
 
         # 4. 逐則寫入，每則立即回寫 metadata
         for key, op, _cap, raw in pending:
@@ -240,7 +285,12 @@ def archive_change(
             meta["notes"] = dict(notes)
             change.save()
             result.written.append(key)
-        result.skipped = [k for k, *_ in _requirement_items(change) if k in already]
+        result.skipped += [k for k, *_ in _requirement_items(change) if k in already]
+        if SUMMARY_KEY not in notes:
+            existing = _existing_summary(client, vault_key, space, name)
+            if existing:
+                notes[SUMMARY_KEY] = existing
+                meta["notes"] = dict(notes)
         if SUMMARY_KEY not in notes:
             req_notes = {k: notes[k] for k, *_ in _requirement_items(change)}
             summary_id = client.write(
@@ -271,8 +321,12 @@ def archive_change(
 
     # 5. 併主 spec → 搬目錄
     if not resumed_merge:
+        # 每寫完一個 capability 就記下，中途失敗重跑只補未寫的
         for cap, text in merged.items():
             atomic_write_text(ws.main_spec_path(cap), text)
+            applied_caps.append(cap)
+            meta["spec_applied_caps"] = list(applied_caps)
+            change.save()
         meta["spec_applied"] = True
         change.save()
     stamp = (now or _dt.datetime.now(_dt.UTC)).astimezone(_dt.UTC)

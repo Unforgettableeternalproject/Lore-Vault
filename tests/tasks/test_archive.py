@@ -162,3 +162,68 @@ def test_archive_refuses_blocked(tasks_dir: TasksDir, vault):
     code, out = _archive(tasks_dir, "c1", vault.client)
     assert code == 1 and "被擋住" in out
     assert vault.requests == []
+
+
+def test_spec_merge_failure_midway_resumes_per_capability(
+    tasks_dir: TasksDir, vault, monkeypatch
+):
+    """兩個 capability（alpha 含 REMOVED）：alpha 寫完、beta 寫入前失敗，重跑要收斂。"""
+    from lore_vault.tasks import archive as archive_mod
+
+    tasks_dir.write_main("alpha", SPEC_A.replace("demo", "alpha", 1))
+    tasks_dir.write_main("beta", SPEC_A.replace("demo", "beta", 1))
+    tasks_dir.propose(
+        "c1",
+        deltas={
+            "alpha": delta(removed=["封存"]),
+            "beta": delta(modified=[MOD_ROOT]),
+        },
+    )
+    real_write = archive_mod.atomic_write_text
+    calls = []
+
+    def flaky(path, text):
+        calls.append(path)
+        if len(calls) == 2:
+            raise OSError("模擬寫入 beta 時中斷")
+        real_write(path, text)
+
+    monkeypatch.setattr(archive_mod, "atomic_write_text", flaky)
+    try:
+        _archive(tasks_dir, "c1", vault.client)
+    except OSError:
+        pass
+    meta = tasks_dir.meta("c1")
+    assert meta["spec_applied_caps"] == ["alpha"]
+    assert "spec_applied" not in meta
+    assert "### Requirement: 封存" not in tasks_dir.main_spec("alpha")
+    assert "~/.x/" not in tasks_dir.main_spec("beta")
+    monkeypatch.setattr(archive_mod, "atomic_write_text", real_write)
+    count = len(vault.notes)
+    code, out = _archive(tasks_dir, "c1", vault.client)
+    assert code == 0, out
+    assert len(vault.notes) == count
+    assert "### Requirement: 封存" not in tasks_dir.main_spec("alpha")
+    assert "### Requirement: 資料根目錄" in tasks_dir.main_spec("alpha")
+    assert "~/.x/" in tasks_dir.main_spec("beta")
+    assert tasks_dir.meta("c1")["spec_applied"] is True
+
+
+def test_orphan_notes_from_lost_metadata_are_adopted(tasks_dir: TasksDir, vault):
+    """HTTP write 成功但本機回寫前中斷：服務端已有本 change 的 note，重跑不得再寫。"""
+    _setup_two_reqs(tasks_dir)
+    ids = {
+        key: vault.add(
+            title=f"req:{key}",
+            topics=["change:c1", f"req:{key}"],
+        )
+        for key in ("demo/新功能", "demo/資料根目錄")
+    }
+    ids["summary"] = vault.add(title="變更 c1：x", topics=["change:c1"])
+    assert tasks_dir.meta("c1")["notes"] == {}
+    code, out = _archive(tasks_dir, "c1", vault.client)
+    assert code == 0, out
+    assert vault.writes == 0
+    meta = tasks_dir.meta("c1")
+    assert meta["notes"] == ids
+    assert meta["note_id"] == ids["summary"]

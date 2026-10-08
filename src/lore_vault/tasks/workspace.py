@@ -16,7 +16,7 @@ import datetime as _dt
 import os
 import re
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -414,11 +414,17 @@ def record_base(change: Change, ws: Workspace, *, overwrite: bool) -> list[str]:
     return changed
 
 
-def trial_merge(change: Change, ws: Workspace) -> tuple[dict[str, str], list[str]]:
-    """delta 併回試算：回傳 ({capability: 新主 spec 全文（沿用原行尾）}, errors)。"""
+def trial_merge(
+    change: Change, ws: Workspace, *, skip: Collection[str] = ()
+) -> tuple[dict[str, str], list[str]]:
+    """delta 併回試算：回傳 ({capability: 新主 spec 全文（沿用原行尾）}, errors)。
+
+    `skip`：已寫回主 spec 的 capability（archive 續跑），不再試算。"""
     merged: dict[str, str] = {}
     errors: list[str] = []
     for cap, plan in change.plans().items():
+        if cap in skip:
+            continue
         if not NAME_RE.match(cap):
             errors.append(f"capability 名稱 {cap!r} 只能用小寫英數與 -")
             continue

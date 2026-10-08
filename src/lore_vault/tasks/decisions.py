@@ -5,6 +5,8 @@
 - 小節內出現「已裁決」「已定案」或「YYYY-MM-DD 裁決」
   （如「艾斯維爾 2026-09-27 裁決：」）即視為已解除；
   其餘（如 D6「不在本次範圍」）一律未解除
+- 但小節內只要出現「待裁決」（部分裁決，如 D15 列出待裁決子項）就判為未解除，
+  即使同時有裁決標記
 - 檔案不存在 → `None`，呼叫端標「無法判定」，不當成解除
 """
 
@@ -16,6 +18,7 @@ from pathlib import Path
 _HEADER = re.compile(r"^###\s+(D\d+)\b")
 _BOUNDARY = re.compile(r"^#{2,3}\s")
 _RESOLVED = re.compile(r"已裁決|已定案|\d{4}-\d{2}-\d{2}\s*裁決")
+_PENDING = "待裁決"
 DECISION_ID = re.compile(r"^D\d+$")
 
 
@@ -27,7 +30,8 @@ def parse_decisions(text: str) -> dict[str, bool]:
 
     def flush() -> None:
         if current is not None:
-            result[current] = bool(_RESOLVED.search("\n".join(buf)))
+            body = "\n".join(buf)
+            result[current] = _PENDING not in body and bool(_RESOLVED.search(body))
 
     in_fence = False
     for line in text.replace("\r\n", "\n").split("\n"):
