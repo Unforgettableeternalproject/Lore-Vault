@@ -282,40 +282,51 @@ def _remote_snapshot(
 
 
 def snapshot_sync(ctx: DoctorContext) -> CheckResult:
-    """本機重算的快照與服務端側載逐位元組相同（雜湊比對）。
+    """每個涉及的 vault：本機依 vault 分份重算的快照與服務端側載逐位元組相同
+    （雜湊比對；分份規則同 `sync`，見 `snapshot.vault_payloads`）。
 
     不同步只代表 UI 看到舊資料（本機永遠是真相來源），所以是 warn 不是 fail；
     快照超過服務端上限、根本推不上去才是 fail。"""
     ws = _workspace(ctx)
+    client = _client(ctx)
     try:
-        local = snapshot.snapshot_bytes(ws)
+        payloads = snapshot.vault_payloads(ws, client, ctx.settings.get("vault"))
     except snapshot.SnapshotTooLarge as exc:
         return CheckResult.fail(str(exc))
-    try:
-        vault, remote = _remote_snapshot(ctx, ws)
     except ServiceError as exc:
         return _service_error(exc)
-    except ValueError:
+    counts = {
+        "vaults": len(payloads),
+        "local_bytes": sum(len(d) for d in payloads.values()),
+    }
+    problems: list[str] = []
+    details: list[str] = []
+    for vault, local in payloads.items():
+        try:
+            remote = client.get_blob(vault, "dev", snapshot.SNAPSHOT_KEY)
+        except ServiceError as exc:
+            return _service_error(exc)
+        except ValueError:
+            return CheckResult.warn(
+                f"{vault} 的服務端快照無法解碼，執行 sync 重推",
+                details=["見 tasks.snapshot_shape"],
+                counts=counts,
+            )
+        if remote is None:
+            problems.append(f"{vault} 尚未同步任務快照（UI 任務畫面看不到），執行 sync")
+        elif snapshot.digest(remote["content"]) != snapshot.digest(local):
+            problems.append(
+                f"{vault} 的任務快照與本機不同（本機改過但未重推），執行 sync"
+            )
+            details.append(f"{vault}：服務端同步於 {remote.get('updated')}")
+        else:
+            details.append(f"{vault}：同步於 {remote.get('updated')}")
+    if problems:
         return CheckResult.warn(
-            "服務端快照無法解碼，執行 sync 重推", details=["見 tasks.snapshot_shape"]
-        )
-    counts = {"local_bytes": len(local)}
-    if remote is None:
-        return CheckResult.warn(
-            f"{vault} 尚未同步任務快照（UI 任務畫面看不到），執行 sync",
-            counts=counts,
-        )
-    counts["remote_bytes"] = len(remote["content"])
-    if snapshot.digest(remote["content"]) != snapshot.digest(local):
-        return CheckResult.warn(
-            f"{vault} 的任務快照與本機不同（本機改過但未重推），執行 sync",
-            details=[f"服務端同步於 {remote.get('updated')}"],
-            counts=counts,
+            "；".join(problems), details=problems + details, counts=counts
         )
     return CheckResult.ok(
-        f"{vault} 的任務快照與本機一致",
-        details=[f"同步於 {remote.get('updated')}"],
-        counts=counts,
+        f"{'、'.join(payloads)} 的任務快照與本機一致", details=details, counts=counts
     )
 
 

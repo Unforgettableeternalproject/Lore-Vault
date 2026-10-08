@@ -61,7 +61,7 @@ class ArchiveResult:
     note_id: str
     written: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
-    # 實際寫入的 vault（正式 key）；結尾的快照推送沿用它，不另以 binding 推算
+    # 實際寫入的 vault（正式 key，也記在 metadata；快照推送依 metadata 分份）
     vault: str = ""
 
 

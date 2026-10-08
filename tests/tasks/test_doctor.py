@@ -301,6 +301,21 @@ def test_snapshot_sync(tasks_dir: TasksDir, vault):
     assert _sync_status(tasks_dir, vault) == "pass"
 
 
+def test_snapshot_sync_checks_every_involved_vault(tasks_dir: TasksDir, vault):
+    """change 記了別的 vault：doctor 逐 vault 比對，該 vault 沒同步也要 warn。"""
+    tasks_dir.propose("c1", "--skip-specs")
+    tasks_dir.propose("c2", "--skip-specs")
+    assert tasks_dir.run("sync", "--vault", VAULT, client=vault.client)[0] == 0
+    assert _sync_status(tasks_dir, vault) == "pass"
+    tasks_dir.set_meta("c2", vault="vault-b")
+    report = _report(tasks_dir, vault.client, "--vault", VAULT)["tasks.snapshot_sync"]
+    assert report["status"] == "warn"
+    assert "vault-b 尚未同步" in report["summary"]
+    assert f"{VAULT} 的任務快照與本機不同" in report["summary"]
+    assert tasks_dir.run("sync", "--vault", VAULT, client=vault.client)[0] == 0
+    assert _sync_status(tasks_dir, vault) == "pass"
+
+
 def test_snapshot_sync_service_unreachable_is_warn(tasks_dir: TasksDir):
     tasks_dir.propose("c1", "--skip-specs")
     status = _status(

@@ -10,6 +10,7 @@ import json
 
 import pytest
 
+from lore_vault.binding import resolve_binding
 from lore_vault.tasks import snapshot
 from lore_vault.tasks.workspace import load_workspace
 
@@ -43,8 +44,8 @@ def _write_why(tasks_dir: TasksDir, name: str, why: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def _remote(vault) -> bytes:
-    hit = vault.blobs[(VAULT, snapshot.SNAPSHOT_KEY)]
+def _remote(vault, key: str = VAULT) -> bytes:
+    hit = vault.blobs[(key, snapshot.SNAPSHOT_KEY)]
     assert hit["mime"] == "application/json"
     return base64.b64decode(hit["content_base64"])
 
@@ -213,7 +214,7 @@ def test_each_command_pushes(tasks_dir: TasksDir, vault):
     code, _ = tasks_dir.run("propose", "c1", "--skip-specs", client=vault.client)
     assert code == 0 and vault.blob_puts == 1
     key = next(iter(vault.blobs))
-    assert key[1] == "tasks-snapshot"
+    assert key[1] == "tasks-snapshot" and key[0] != VAULT
     tasks_dir.check_all_tasks("c1")
     for command in (("list",), ("validate", "c1")):
         before = vault.blob_puts
@@ -222,9 +223,11 @@ def test_each_command_pushes(tasks_dir: TasksDir, vault):
     before = vault.blob_puts
     code, out = tasks_dir.run("archive", "c1", "--vault", VAULT, client=vault.client)
     assert code == 0, out
-    assert vault.blob_puts == before + 1
+    # 封存到 VAULT：binding 的 vault 重推（移除 c1）、VAULT 推一份
+    assert vault.blob_puts == before + 2
     entry = json.loads(_remote(vault))["changes"][0]
     assert entry["status"] == "已完成" and entry["note_id"]
+    assert json.loads(_remote(vault, key[0]))["changes"] == []
 
 
 def test_failed_propose_and_refused_archive_do_not_push(tasks_dir: TasksDir, vault):
@@ -252,4 +255,31 @@ def test_archive_pushes_to_the_vault_it_archived_into(tasks_dir: TasksDir, vault
     assert code == 0, out
     written = {r["body"]["vault"] for r in vault.requests if r["path"] == "/v1/write"}
     assert written == {recorded}
-    assert list(vault.blobs) == [(recorded, snapshot.SNAPSHOT_KEY)]
+    names = {
+        v: [c["name"] for c in json.loads(_remote(vault, v))["changes"]]
+        for v, _ in vault.blobs
+    }
+    # binding 的 vault 也重推：c1 已改記在 recorded，從預設 vault 的快照移除
+    assert names == {recorded: ["c1"], resolve_binding(tasks_dir.project).key: []}
+
+
+def test_sync_splits_snapshot_by_recorded_vault(tasks_dir: TasksDir, vault):
+    """同一 workspace 的 change 封存到不同 vault：每個 vault 只收自己的 change。"""
+    tasks_dir.propose("stay", "--skip-specs")
+    tasks_dir.propose("moved", "--skip-specs")
+    tasks_dir.propose("alias", "--skip-specs")
+    tasks_dir.set_meta("alias", vault=VAULT)
+    code, out = tasks_dir.run(
+        "archive", "moved", "--vault", "vault-b", client=vault.client
+    )
+    assert code == 0, out
+    vault.blobs.clear()
+    code, out = tasks_dir.run("sync", "--vault", VAULT, client=vault.client)
+    assert code == 0, out
+    names = {
+        v: sorted(c["name"] for c in json.loads(_remote(vault, v))["changes"])
+        for v, _ in vault.blobs
+    }
+    assert names == {VAULT: ["alias", "stay"], "vault-b": ["moved"]}
+    assert "已同步 2 個 change 到 folder/demo" in out
+    assert "已同步 1 個 change 到 vault-b" in out

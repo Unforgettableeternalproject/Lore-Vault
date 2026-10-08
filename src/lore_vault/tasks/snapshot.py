@@ -20,13 +20,18 @@
 - 內容是確定性的（不含產生時間、鍵排序固定）：同一份本機狀態永遠得到同一組位元組，
   doctor `tasks.snapshot_sync` 以雜湊比對；同步時間由服務端側載的 `updated` 提供
 - 超過服務端上限（64KB）時先拿掉已封存 change 的 `why`，仍超過就拒絕推送（不截斷）
+- 依 vault 分份：每個 vault 只收 metadata `vault` 解析後等於它的 change，加上沒記
+  vault 的 change（歸到預設 vault：明確指定或專案目錄 binding）。一次推送對所有涉及的
+  vault 各推一份——change 封存到別的 vault 後，原 vault 的快照同時更新、把它移除
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from lore_vault.binding import resolve_binding
@@ -120,7 +125,10 @@ def _change_entry(
     }
 
 
-def build_snapshot(ws: Workspace) -> dict[str, Any]:
+def build_snapshot(
+    ws: Workspace, include: Callable[[Change], bool] | None = None
+) -> dict[str, Any]:
+    """`include`：只放通過的 change（依 vault 分份用）；None 為全部。"""
     archived = ws.archived()
     archived_names = {c.name for c in archived}
     decisions = ws.decisions()
@@ -129,6 +137,7 @@ def build_snapshot(ws: Workspace) -> dict[str, Any]:
         "changes": [
             _change_entry(c, ws, archived_names, decisions)
             for c in ws.active() + archived
+            if include is None or include(c)
         ],
     }
 
@@ -139,8 +148,13 @@ def encode(snapshot: dict[str, Any]) -> bytes:
     ).encode("utf-8")
 
 
-def snapshot_bytes(ws: Workspace, *, max_bytes: int = MAX_BYTES) -> bytes:
-    snapshot = build_snapshot(ws)
+def snapshot_bytes(
+    ws: Workspace,
+    *,
+    max_bytes: int = MAX_BYTES,
+    include: Callable[[Change], bool] | None = None,
+) -> bytes:
+    snapshot = build_snapshot(ws, include)
     data = encode(snapshot)
     if len(data) <= max_bytes:
         return data
@@ -165,6 +179,33 @@ def resolve_vault(client: VaultClient, ws: Workspace, vault: str | None) -> str:
     return client.resolve_vault(str(key), SPACE_DEV)
 
 
+def vault_payloads(
+    ws: Workspace, client: VaultClient, vault: str | None = None
+) -> dict[str, bytes]:
+    """{目的 vault: 該 vault 的快照位元組}，預設 vault 排第一。
+
+    預設 vault（`vault` 或專案目錄 binding）一定在內，沒記 vault 的 change 歸它；
+    其餘為各 change metadata `vault` 經服務解析後的正式 key（可能是別名，逐一解析）。"""
+    default = resolve_vault(client, ws, vault)
+    resolved: dict[str, str] = {}
+    owners: dict[Path, str] = {}
+    for change in ws.active() + ws.archived():
+        key = change.meta.get("vault")
+        if isinstance(key, str) and key.strip():
+            if key not in resolved:
+                resolved[key] = client.resolve_vault(key, SPACE_DEV)
+            owners[change.path] = resolved[key]
+        else:
+            owners[change.path] = default
+    targets = [default, *sorted(set(owners.values()) - {default})]
+    return {
+        target: snapshot_bytes(
+            ws, include=lambda c, t=target: owners.get(c.path, default) == t
+        )
+        for target in targets
+    }
+
+
 @dataclass(frozen=True)
 class PushResult:
     vault: str
@@ -173,16 +214,20 @@ class PushResult:
     changes: int
 
 
-def push(ws: Workspace, client: VaultClient, *, vault: str | None = None) -> PushResult:
-    """整份覆寫服務端側載。失敗拋 `ServiceError`／`SnapshotTooLarge`，由呼叫端決定
-    要中止還是只警告。"""
-    data = snapshot_bytes(ws)
-    vault_key = resolve_vault(client, ws, vault)
-    updated = client.put_blob(
-        vault_key, SPACE_DEV, SNAPSHOT_KEY, data, mime=SNAPSHOT_MIME
-    )
-    changes = len(json.loads(data)["changes"])
-    return PushResult(vault_key, updated, len(data), changes)
+def push(
+    ws: Workspace, client: VaultClient, *, vault: str | None = None
+) -> list[PushResult]:
+    """對每個涉及的 vault 整份覆寫它的側載（見 `vault_payloads`）。失敗拋
+    `ServiceError`／`SnapshotTooLarge`，由呼叫端決定要中止還是只警告；
+    所有分份都先算完才開始推，超過上限時一份都不推。"""
+    results = []
+    for vault_key, data in vault_payloads(ws, client, vault).items():
+        updated = client.put_blob(
+            vault_key, SPACE_DEV, SNAPSHOT_KEY, data, mime=SNAPSHOT_MIME
+        )
+        changes = len(json.loads(data)["changes"])
+        results.append(PushResult(vault_key, updated, len(data), changes))
+    return results
 
 
 def shape_errors(data: bytes) -> list[str]:

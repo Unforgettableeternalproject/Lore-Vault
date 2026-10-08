@@ -357,7 +357,7 @@ def _push(
     client_factory: Callable[[], VaultClient] | None,
     *,
     vault: str | None = None,
-) -> snapshot.PushResult:
+) -> list[snapshot.PushResult]:
     root = resolve_root(args.root, env.environ, env.cwd)
     if root is None or not root.is_dir():
         raise ServiceError("找不到任務目錄")
@@ -381,8 +381,8 @@ def _auto_sync(
 ) -> None:
     """子指令結尾的快照推送：任何失敗只在 stderr 警告，不影響 exit code。
 
-    `vault`：archive 實際寫入的 vault（與封存 note 同一個）；其餘指令為 None，
-    由 `snapshot.resolve_vault` 以專案目錄 binding 推算。"""
+    `vault`：沒記 vault 的 change 歸屬的預設 vault；None 由專案目錄 binding 推算。
+    archive 寫入的 vault 已記在該 change 的 metadata，推送依 metadata 分份涵蓋。"""
     try:
         _push(args, env, client_factory, vault=vault)
     except _PUSH_ERRORS as exc:
@@ -400,14 +400,15 @@ def _sync(
     if _workspace(args, env) is None:
         return EXIT_FAIL
     try:
-        result = _push(args, env, client_factory, vault=args.vault)
+        results = _push(args, env, client_factory, vault=args.vault)
     except _PUSH_ERRORS as exc:
         env.print(f"sync 失敗：{_detail(exc)}")
         return EXIT_FAIL
-    env.print(
-        f"已同步 {result.changes} 個 change 到 {result.vault}"
-        f"（{result.size_bytes} 位元組，{result.updated}）"
-    )
+    for result in results:
+        env.print(
+            f"已同步 {result.changes} 個 change 到 {result.vault}"
+            f"（{result.size_bytes} 位元組，{result.updated}）"
+        )
     return EXIT_OK
 
 
@@ -416,11 +417,10 @@ def _archive(
     env: _Env,
     client_factory: Callable[[], VaultClient] | None,
     now: _dt.datetime | None,
-) -> tuple[int, str | None]:
-    """回傳 (exit code, 實際寫入的 vault)；被拒絕時 vault 為 None。"""
+) -> int:
     ws = _workspace(args, env)
     if ws is None:
-        return EXIT_FAIL, None
+        return EXIT_FAIL
     try:
         result = archive_change(
             ws,
@@ -434,9 +434,9 @@ def _archive(
         )
     except ArchiveError as exc:
         env.print(f"archive 中止：{exc}", *(f"    {d}" for d in exc.details))
-        return EXIT_FAIL, None
+        return EXIT_FAIL
     env.print(*describe_result(result))
-    return EXIT_OK, result.vault or None
+    return EXIT_OK
 
 
 def _doctor(
@@ -490,7 +490,6 @@ def main(
         return _sync(args, env, client_factory)
     if args.command == "doctor":
         return _doctor(args, env, client_factory)
-    sync_vault: str | None = None
     if args.command == "propose":
         code = _propose(args, env, today)
     elif args.command == "list":
@@ -498,9 +497,11 @@ def main(
     elif args.command == "validate":
         code = _validate(args, env)
     else:
-        code, sync_vault = _archive(args, env, client_factory, now)
+        # archive 寫入的 vault 已記進該 change 的 metadata：推送依 metadata 分份，
+        # 原本收它的預設 vault 也會重推、把它移除
+        code = _archive(args, env, client_factory, now)
     if _should_sync(args, env, code):
-        _auto_sync(args, env, client_factory, vault=sync_vault)
+        _auto_sync(args, env, client_factory)
     return code
 
 
