@@ -222,6 +222,10 @@ const COUNT_LABEL: Record<string, string> = {
   document_chunks: '文件段落',
   chunk_fts: '段落全文索引',
   document_chunk_embeddings: '段落向量',
+  // 通用側載（不檢索的小型機器狀態，例如任務層快照）：刪除計數與換 space 的改寫欄位
+  sidecar_blobs: '側載狀態',
+  'sidecar_blobs.vault': '側載狀態（vault）',
+  'sidecar_blobs.space': '側載狀態（space）',
 };
 
 function Meta({ label, value }: { label: string; value: ComponentChildren }) {

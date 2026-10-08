@@ -410,6 +410,10 @@ button { font: inherit; }
 .lv-toasts { position: fixed; right: 24px; bottom: 24px; }
 .lv-dialog-overlay { position: fixed; }
 .lv-dialog { max-width: 30rem; }
+/* 內容太長（例如刪除規劃的計數清單）時只捲動訊息區，標題與按鈕留在視窗內 */
+.lv-dialog { display: flex; flex-direction: column; max-height: calc(100vh - 32px); max-height: calc(100dvh - 32px); }
+.lv-dialog .uep-dialog__message { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.lv-dialog .uep-dialog__title, .lv-dialog .uep-dialog__actions { flex: none; }
 .lv-dialog--danger .uep-dialog__accent { background: var(--status-error); }
 .lv-dialog__btn--danger {
   background: color-mix(in srgb, var(--status-error) 14%, transparent);

@@ -1,23 +1,29 @@
-// 任務層畫面：`/v1/blob_get` 以 page.route 攔截回模擬快照（契約見 docs/hidden/design/TASK_LAYER_UI.md §3），
-// vault 與封存 note 由真實服務建立，讓 VaultPicker、vault 顯示名稱與 note 連結走真實路徑。
-// 涵蓋：尚未同步（全部 vault 空清單、單一 vault 404 not_found）、混合四態列表與篩選、過時提示、
-// 封存 change 的 note 連結、服務錯誤、非 dev space 守門、鍵盤可達與深淺色 axe。
+// 任務層畫面：快照以 bearer 直接呼叫真實的 `/v1/blob_put` 建立（與任務層 CLI 推送同一條路徑），
+// vault 與封存 note 也由真實服務建立。只有「服務錯誤」無法自然重現，以 page.route 攔截 blob_get 回 500。
+// 涵蓋：尚未同步（全部 vault 空清單、單一 vault 404 not_found）、混合四態列表與篩選、過時提示（以 page.clock
+// 把瀏覽器時間往後推）、格式錯誤的快照、封存 change 的 note 連結、服務錯誤、非 dev space 守門、鍵盤可達與深淺色 axe。
 // 設 E2E_SCREENSHOT_DIR 時另存截圖供人工審查（不設就不存）。
+//
+// 側載是服務端共用狀態：第一個測試先斷言本 space 還沒有任何快照，之後的測試才寫入（workers=1、依檔案順序執行）。
 import { join } from 'node:path';
 
-import { expect, test, type Page, type Route } from '@playwright/test';
+import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
 
+import { E2E_TOKEN } from './constants';
 import { axeViolations, createVault, login, presetTheme, watchPage, writeNote } from './helpers';
 
+const BEARER = { Authorization: `Bearer ${E2E_TOKEN}` };
 const REPO = { key: 'github.com/unforgettableeternalproject/u.e.p-tasks-layer-e2e-long-repository', display: 'E2E 任務層' };
 const OTHER = { key: 'folder/e2e-tasks-other', display: 'E2E 任務層乙' };
+const BAD = { key: 'folder/e2e-tasks-bad', display: 'E2E 任務層壞快照' };
+const EMPTY = { key: 'folder/e2e-tasks-empty', display: 'E2E 任務層未同步' };
 const SHOT_DIR = process.env.E2E_SCREENSHOT_DIR;
 
 let noteId = '';
+let seeded = false;
 
 test.beforeAll(async ({ request }) => {
-  await createVault(request, REPO.key, REPO.display);
-  await createVault(request, OTHER.key, OTHER.display);
+  for (const v of [REPO, OTHER, BAD, EMPTY]) await createVault(request, v.key, v.display);
   noteId = await writeNote(request, {
     vault: REPO.key,
     title: '變更 add-sidecar：通用側載封存總結',
@@ -25,12 +31,6 @@ test.beforeAll(async ({ request }) => {
     topics: ['change:add-sidecar'],
   });
 });
-
-const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString();
-
-function b64(value: unknown): string {
-  return Buffer.from(JSON.stringify(value), 'utf-8').toString('base64');
-}
 
 function changes() {
   const base = {
@@ -58,11 +58,21 @@ function changes() {
     { ...base, name: 'auth-change', status: '待授權', requires_authorization: true, tasks: { done: 5, total: 5 } },
     {
       ...base,
+      name: 'needs-sidecar',
+      status: '被擋住',
+      reasons: ['依賴 ghost-change 未封存'],
+      depends_on: [
+        { name: 'add-sidecar', archived: true },
+        { name: 'ghost-change', archived: false },
+      ],
+    },
+    {
+      ...base,
       name: 'add-sidecar',
       status: '已完成',
       tasks: { done: 7, total: 7 },
       note_id: noteId,
-      archived_at: hoursAgo(40),
+      archived_at: '2026-10-07T01:45:00Z',
       specs: [
         { capability: 'sidecar', requirement: '單列覆寫語意', op: 'ADDED' },
         { capability: 'vault', requirement: '刪除連帶清除側載', op: 'MODIFIED' },
@@ -71,39 +81,27 @@ function changes() {
   ];
 }
 
-interface MockOptions {
-  /** 全部 vault 的回應項目；預設 REPO 一份（新鮮）＋ OTHER 一份（30 小時前） */
-  items?: { vault: string; updated: string; changes: unknown[] }[];
-  status?: number;
+async function blobPut(request: APIRequestContext, vault: string, text: string) {
+  const resp = await request.post('/v1/blob_put', {
+    headers: BEARER,
+    data: {
+      space: 'dev',
+      vault,
+      key: 'tasks-snapshot',
+      mime: 'application/json',
+      content_base64: Buffer.from(text, 'utf-8').toString('base64'),
+    },
+  });
+  expect(resp.status(), await resp.text()).toBe(200);
 }
 
-/** 攔截 blob_get：省略 vault 回清單；帶 vault 時有資料回單筆、沒有回 404 not_found（契約 §3）。 */
-async function mockBlobs(page: Page, options: MockOptions = {}) {
-  const items = options.items ?? [
-    { vault: REPO.key, updated: hoursAgo(1), changes: changes() },
-    { vault: OTHER.key, updated: hoursAgo(30), changes: [{ ...changes()[0]!, name: 'other-ready' }] },
-  ];
-  await page.route('**/v1/blob_get', async (route: Route) => {
-    if (options.status) {
-      await route.fulfill({ status: options.status, json: { error: { code: 'internal_error', message: '服務內部錯誤' } } });
-      return;
-    }
-    const body = route.request().postDataJSON() as { space: string; vault?: string; key: string };
-    expect(body.key).toBe('tasks-snapshot');
-    expect(body.space).toBe('dev');
-    const record = (it: (typeof items)[number]) => ({
-      mime: 'application/json',
-      content_base64: b64({ schema: 1, changes: it.changes }),
-      updated: it.updated,
-    });
-    if (body.vault === undefined) {
-      await route.fulfill({ json: { items: items.map((it) => ({ vault: it.vault, ...record(it) })) } });
-      return;
-    }
-    const found = items.find((it) => it.vault === body.vault);
-    if (found) await route.fulfill({ json: record(found) });
-    else await route.fulfill({ status: 404, json: { error: { code: 'not_found', message: '找不到' } } });
-  });
+/** 寫入測試快照（只寫一次）：REPO 混合五態、OTHER 一筆、BAD 一份壞 JSON；EMPTY 刻意不寫。 */
+async function seed(request: APIRequestContext) {
+  if (seeded) return;
+  await blobPut(request, REPO.key, JSON.stringify({ schema: 1, changes: changes() }));
+  await blobPut(request, OTHER.key, JSON.stringify({ schema: 1, changes: [{ ...changes()[0]!, name: 'other-ready' }] }));
+  await blobPut(request, BAD.key, '{"schema": 1, "changes": [');
+  seeded = true;
 }
 
 async function shot(page: Page, name: string) {
@@ -115,54 +113,64 @@ async function openTasks(page: Page) {
   await expect(page.getByRole('heading', { name: '任務', level: 1 })).toBeVisible();
 }
 
+async function pickVault(page: Page, key: string) {
+  const picker = page.getByRole('combobox', { name: 'vault 篩選' });
+  await picker.click();
+  await picker.fill(key);
+  await expect(page.getByRole('listbox').getByRole('option')).toHaveCount(1);
+  await picker.press('Enter');
+}
+
 function list(page: Page) {
   return page.getByRole('list', { name: 'change 列表' });
 }
 
-test('尚未同步：全部 vault 空清單與單一 vault 404 都顯示空狀態，不是錯誤白屏', async ({ page }) => {
-  await mockBlobs(page, { items: [] });
+test('尚未同步：全部 vault 空清單與單一 vault 404 都顯示空狀態，不是錯誤白屏', async ({ page, request }) => {
   await login(page);
   await openTasks(page);
-  await expect(page.getByTestId('tasks-not-synced')).toContainText('尚未同步');
+  await expect(page.getByTestId('tasks-not-synced')).toContainText('這個 space 還沒有任何 repo 推送');
   await expect(page.getByRole('main').getByRole('alert')).toHaveCount(0);
   await shot(page, 'tasks-not-synced');
 
-  const picker = page.getByRole('combobox', { name: 'vault 篩選' });
-  await picker.click();
-  await picker.fill(OTHER.key);
-  await expect(page.getByRole('listbox').getByRole('option')).toHaveCount(1);
-  await picker.press('Enter');
+  // 有其他 vault 的快照後，沒推送過的 vault 仍是「尚未同步」（blob_get 帶 vault → 404 not_found）
+  await seed(request);
+  await pickVault(page, EMPTY.key);
   await expect(page.getByTestId('tasks-not-synced')).toContainText('這個 vault 還沒有推送');
   await expect(page.getByRole('main').getByRole('alert')).toHaveCount(0);
 });
 
-test('混合四態列表：篩選、過時提示、無法判定標示，鍵盤進詳情並開啟封存 note', async ({ page }) => {
+test('混合四態列表：篩選、無法判定標示、格式錯誤快照，鍵盤進詳情並開啟封存 note', async ({ page, request }) => {
+  await seed(request);
   const watch = await watchPage(page);
-  await mockBlobs(page);
   await login(page);
   await openTasks(page);
 
-  // 預設隱藏已完成；排序 可開工 → 待授權 → 被擋住
-  await expect(list(page).getByRole('link')).toHaveText(['ready-change', 'other-ready', 'auth-change', 'blocked-change', 'unknown-change']);
-  // 30 小時前同步的 vault 標「可能已過時」，1 小時前的不標
+  // 預設隱藏已完成；排序 可開工 → 待授權 → 被擋住（同組維持 vault 與快照內順序）
+  const rows = list(page).getByRole('link');
+  await expect(rows).toHaveCount(6);
+  await expect(list(page).getByRole('link', { name: 'add-sidecar' })).toHaveCount(0);
+  // 剛同步：不標過時
   const syncs = page.getByTestId('task-syncs');
-  await expect(syncs.locator('[data-stale="true"]')).toHaveCount(1);
-  await expect(syncs.locator('[data-stale="true"]')).toContainText(OTHER.display);
-  await expect(syncs.locator('[data-stale="true"]').getByTestId('task-stale')).toHaveText('可能已過時');
-  await expect(syncs.locator('[data-stale="false"]').getByTestId('task-stale')).toHaveCount(0);
+  await expect(syncs.getByTestId('task-stale')).toHaveCount(0);
+  // 壞 JSON 的 vault 以錯誤橫幅呈現，其他 vault 照常列出
+  await expect(page.getByTestId('task-snapshot-invalid')).toContainText('不是有效的 JSON');
   await shot(page, 'tasks-list');
 
   const chips = page.getByRole('group', { name: 'change 狀態' });
-  await chips.getByRole('button', { name: '被擋住 2' }).click();
-  await expect(list(page).getByRole('link')).toHaveText(['blocked-change', 'unknown-change']);
+  await chips.getByRole('button', { name: '被擋住 3' }).click();
+  await expect(rows).toHaveText(['blocked-change', 'unknown-change', 'needs-sidecar']);
   const unknownStatus = list(page).getByRole('listitem').filter({ hasText: 'unknown-change' }).getByTestId('task-status');
   await expect(unknownStatus).toHaveText('無法判定');
   await expect(unknownStatus.locator('xpath=..')).toHaveClass(/lv-badge--error/);
+  await chips.getByRole('button', { name: '可開工 2' }).click();
+  // vault 之間的順序由服務決定，只比對集合
+  await expect(rows).toHaveCount(2);
+  expect((await rows.allTextContents()).sort()).toEqual(['other-ready', 'ready-change']);
   await chips.getByRole('button', { name: '已完成 1' }).click();
-  await expect(list(page).getByRole('link')).toHaveText(['add-sidecar']);
+  await expect(rows).toHaveText(['add-sidecar']);
   await shot(page, 'tasks-filter-done');
 
-  // 鍵盤：Tab 到 change 連結、Enter 進詳情
+  // 鍵盤：焦點在 change 連結、Enter 進詳情
   const link = list(page).getByRole('link', { name: 'add-sidecar' });
   await link.focus();
   await expect(link).toBeFocused();
@@ -180,8 +188,22 @@ test('混合四態列表：篩選、過時提示、無法判定標示，鍵盤�
   await watch.assertClean();
 });
 
-test('無法判定的 change 詳情：原因以錯誤橫幅呈現', async ({ page }) => {
-  await mockBlobs(page);
+test('同步超過 24 小時：列表與詳情都標「可能已過時」', async ({ page, request }) => {
+  await seed(request);
+  // 側載的 updated 由服務寫入當下時間；把瀏覽器時間推到 30 小時後模擬久未同步
+  await page.clock.setFixedTime(new Date(Date.now() + 30 * 3_600_000));
+  await login(page);
+  await openTasks(page);
+  const syncs = page.getByTestId('task-syncs');
+  await expect(syncs.locator('[data-stale="true"]')).toHaveCount(3);
+  await expect(syncs.getByTestId('task-stale').first()).toHaveText('可能已過時');
+  await shot(page, 'tasks-list-stale');
+  await list(page).getByRole('link', { name: 'ready-change' }).click();
+  await expect(page.getByRole('main').getByTestId('task-stale')).toHaveText('可能已過時');
+});
+
+test('詳情：無法判定的原因以錯誤橫幅呈現；依賴可導航到同快照的 change', async ({ page, request }) => {
+  await seed(request);
   await login(page);
   await page.goto(`/ui/tasks/${encodeURIComponent(REPO.key)}/unknown-change`);
   const reasons = page.getByTestId('task-reasons');
@@ -189,10 +211,18 @@ test('無法判定的 change 詳情：原因以錯誤橫幅呈現', async ({ pag
   await expect(reasons).toContainText('D999');
   await expect(page.getByTestId('task-note-none')).toBeVisible();
   await shot(page, 'tasks-detail-unknown');
+
+  await page.goto(`/ui/tasks/${encodeURIComponent(REPO.key)}/needs-sidecar`);
+  const deps = page.getByTestId('task-deps');
+  await expect(deps.getByRole('link', { name: 'ghost-change' })).toHaveCount(0);
+  await deps.getByRole('link', { name: 'add-sidecar' }).click();
+  await expect(page.getByRole('heading', { name: 'add-sidecar', level: 1 })).toBeVisible();
 });
 
-test('服務錯誤：顯示錯誤與重試', async ({ page }) => {
-  await mockBlobs(page, { status: 500 });
+test('服務錯誤：顯示錯誤與重試（以攔截重現 500）', async ({ page }) => {
+  await page.route('**/v1/blob_get', (route) =>
+    route.fulfill({ status: 500, json: { error: { code: 'internal_error', message: '服務內部錯誤' } } }),
+  );
   await login(page);
   await openTasks(page);
   const alert = page.getByRole('main').getByRole('alert');
@@ -200,8 +230,8 @@ test('服務錯誤：顯示錯誤與重試', async ({ page }) => {
   await expect(alert.getByRole('button', { name: '重試' })).toBeVisible();
 });
 
-test('非 dev space：只顯示說明，可切回 DEV', async ({ page }) => {
-  await mockBlobs(page);
+test('非 dev space：只顯示說明，可切回 DEV', async ({ page, request }) => {
+  await seed(request);
   await login(page);
   await page.getByRole('button', { name: /DEV · 專案開發/ }).click();
   await page.getByRole('menuitemradio', { name: /LORE · 世界觀/ }).click();
@@ -213,16 +243,16 @@ test('非 dev space：只顯示說明，可切回 DEV', async ({ page }) => {
 });
 
 for (const theme of ['dark', 'light'] as const) {
-  test(`axe：任務列表與詳情 · ${theme}`, async ({ page }) => {
+  test(`axe：任務列表與詳情 · ${theme}`, async ({ page, request }) => {
+    await seed(request);
     await presetTheme(page, theme);
     await page.emulateMedia({ reducedMotion: 'reduce' });
-    await mockBlobs(page);
     await login(page);
     const found: unknown[] = [];
     const scan = async (ctx: string) => found.push(...(await axeViolations(page, `${theme} · ${ctx}`)));
     await openTasks(page);
     await page.getByRole('checkbox', { name: '含已完成' }).check();
-    await expect(list(page).getByRole('link')).toHaveCount(6);
+    await expect(list(page).getByRole('link')).toHaveCount(7);
     await scan('任務列表（含已完成）');
     await shot(page, `tasks-list-all-${theme}`);
     await list(page).getByRole('link', { name: 'add-sidecar' }).click();
