@@ -41,14 +41,16 @@ def _status(tasks_dir: TasksDir, name: str, client=None, *extra: str) -> str:
     return _report(tasks_dir, client, *extra)[name]["status"]
 
 
-def _archived(tasks_dir: TasksDir, vault, name="c1", block=MOD_ROOT, minutes=0) -> None:
+def _archived(
+    tasks_dir: TasksDir, vault, name="c1", block=MOD_ROOT, minutes=0, key=VAULT
+) -> None:
     """`minutes`：封存時間偏移，讓先後順序由 archived_at 決定、不靠目錄名。"""
     if not (tasks_dir.root / "specs" / "demo" / "spec.md").exists():
         tasks_dir.write_main("demo", SPEC_A)
     tasks_dir.propose(name, deltas={"demo": delta(modified=[block])})
     now = NOW + dt.timedelta(minutes=minutes)
     code, out = tasks_dir.run(
-        "archive", name, "--vault", VAULT, client=vault.client, now=now
+        "archive", name, "--vault", key, client=vault.client, now=now
     )
     assert code == 0, out
 
@@ -184,6 +186,31 @@ def test_supersedes_chain(tasks_dir: TasksDir, vault):
     vault.notes[second]["supersedes"] = first
     assert _status(tasks_dir, "tasks.supersedes_chain", vault.client) == "pass"
     vault.add(title="req:demo/資料根目錄", topics=["req:demo/資料根目錄"])
+    assert _status(tasks_dir, "tasks.supersedes_chain", vault.client) == "fail"
+
+
+def test_supersedes_chain_is_checked_per_vault(tasks_dir: TasksDir, vault):
+    """同一 requirement 在兩個 vault 各有獨立的鏈：各自完整就 pass，
+    不可攤平成一條比相鄰關係；同一 vault 內斷了仍要 fail。"""
+    mod2 = requirement(
+        "資料根目錄", "資料 SHALL 存放於 `~/.y/`。", scenarios=("讀取資料根",)
+    )
+    mod3 = requirement(
+        "資料根目錄", "資料 SHALL 存放於 `~/.w/`。", scenarios=("讀取資料根",)
+    )
+    _archived(tasks_dir, vault, "z1", key="vault-a")
+    _archived(tasks_dir, vault, "a2", mod2, minutes=5, key="vault-b")
+    first = tasks_dir.meta("z1")["notes"]["demo/資料根目錄"]
+    second = tasks_dir.meta("a2")["notes"]["demo/資料根目錄"]
+    # 兩則各是自己 vault 的鏈頭，互不 supersedes
+    assert vault.notes[second]["supersedes"] is None
+    assert _status(tasks_dir, "tasks.supersedes_chain", vault.client) == "pass"
+    _archived(tasks_dir, vault, "m3", mod3, minutes=10, key="vault-a")
+    third = tasks_dir.meta("m3")["notes"]["demo/資料根目錄"]
+    assert vault.notes[third]["supersedes"] == first
+    assert _status(tasks_dir, "tasks.supersedes_chain", vault.client) == "pass"
+    # vault-a 內的鏈斷了
+    vault.notes[third]["supersedes"] = None
     assert _status(tasks_dir, "tasks.supersedes_chain", vault.client) == "fail"
 
 

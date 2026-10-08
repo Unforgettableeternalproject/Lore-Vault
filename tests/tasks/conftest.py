@@ -274,6 +274,9 @@ class FakeVault:
                 {**n, "superseded_by": self.superseded_by(n["id"])}
                 for n in self.notes.values()
                 if not wanted or wanted & set(n["topics"])
+                # 同真實服務只列該 vault；測試用 add() 直接塞、
+                # 沒帶 vault 的 note 各 vault 都看得到
+                if n.get("vault") in (None, body.get("vault"))
             ]
             start = int(body.get("cursor") or 0)
             page = hits[start : start + self.list_page]

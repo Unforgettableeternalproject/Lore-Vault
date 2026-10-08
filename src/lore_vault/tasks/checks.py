@@ -166,6 +166,33 @@ def _requirement_history(ws: Workspace) -> dict[str, list[Change]]:
     return history
 
 
+def _chain_fails(
+    client: VaultClient, vault: str, space: str, key: str, changes: list[Change]
+) -> list[str]:
+    """同一 (vault, space) 內：依封存順序相鄰的 note 要逐則 supersedes，
+    且鏈頭只有一則。"""
+    ids = [str(c.meta["notes"][key]) for c in changes]
+    found, _ = client.get_meta(vault, space, ids)
+    fails: list[str] = []
+    for prev, cur, change in zip(ids, ids[1:], changes[1:], strict=False):
+        item = found.get(cur)
+        if item is None:
+            fails.append(f"{key}：{change.name} 的 note {cur} 不存在")
+        elif item.get("supersedes") != prev:
+            fails.append(
+                f"{key}：{change.name} 的 note 應 supersedes {prev}，"
+                f"實際為 {item.get('supersedes')}"
+            )
+    heads = [
+        i["id"]
+        for i in client.list_topic(vault, space, specs.requirement_topic(key))
+        if not i.get("superseded_by")
+    ]
+    if len(heads) > 1:
+        fails.append(f"{key}（{vault}）：鏈頭不只一則（{', '.join(heads)}）")
+    return fails
+
+
 def supersedes_chain(ctx: DoctorContext) -> CheckResult:
     ws = _workspace(ctx)
     history = _requirement_history(ws)
@@ -175,32 +202,14 @@ def supersedes_chain(ctx: DoctorContext) -> CheckResult:
     fails: list[str] = []
     try:
         for key, changes in history.items():
-            ids = [str(c.meta["notes"][key]) for c in changes]
-            by_vault: dict[tuple[str, str], list[str]] = {}
-            for c, i in zip(changes, ids, strict=True):
-                vault = (str(c.meta.get("vault")), str(c.meta.get("space") or "dev"))
-                by_vault.setdefault(vault, []).append(i)
-            found: dict[str, Any] = {}
-            for (vault, space), vids in by_vault.items():
-                got, _ = client.get_meta(vault, space, vids)
-                found.update(got)
-            for prev, cur, change in zip(ids, ids[1:], changes[1:], strict=False):
-                item = found.get(cur)
-                if item is None:
-                    fails.append(f"{key}：{change.name} 的 note {cur} 不存在")
-                elif item.get("supersedes") != prev:
-                    fails.append(
-                        f"{key}：{change.name} 的 note 應 supersedes {prev}，"
-                        f"實際為 {item.get('supersedes')}"
-                    )
-            vault, space = next(iter(by_vault))
-            heads = [
-                i["id"]
-                for i in client.list_topic(vault, space, specs.requirement_topic(key))
-                if not i.get("superseded_by")
-            ]
-            if len(heads) > 1:
-                fails.append(f"{key}：鏈頭不只一則（{', '.join(heads)}）")
+            # 鏈是各 (vault, space) 各自一條：不同 vault 的 note 不會互相 supersedes，
+            # 攤平比較會把兩條獨立的鏈誤判成斷裂
+            groups: dict[tuple[str, str], list[Change]] = {}
+            for c in changes:
+                group = (str(c.meta.get("vault")), str(c.meta.get("space") or "dev"))
+                groups.setdefault(group, []).append(c)
+            for (vault, space), members in groups.items():
+                fails += _chain_fails(client, vault, space, key, members)
     except ServiceError as exc:
         return _service_error(exc)
     counts = {"requirements": len(history)}
