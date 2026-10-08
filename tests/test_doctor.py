@@ -213,7 +213,14 @@ def test_hook_imports_check_turns_red_via_framework(tmp_path):
     hooks.mkdir(parents=True)
     (pkg / "__init__.py").write_text("", encoding="utf-8")
     (hooks / "__init__.py").write_text("import numpy\n", encoding="utf-8")
-    ctx = DoctorContext(settings={"hooks_dir": hooks})
+    # 不指定 spike_dir 會落回真實 repo 的 agent_memory_spike/——但這裡的 package_root
+    # 是 tmp_path，掃到該目錄裡合法的 lazy `from lore_vault.schema import ...` 時會
+    # 誤判成「lore_vault.schema 不存在」而多算一筆違規。明確指到一個乾淨的 spike
+    # 目錄（放一個空白 hook_*.py，滿足 glob 要求）才能孤立這個測試。
+    spike_dir = tmp_path / "spike"
+    spike_dir.mkdir()
+    (spike_dir / "hook_dummy.py").write_text("", encoding="utf-8")
+    ctx = DoctorContext(settings={"hooks_dir": hooks, "spike_dir": spike_dir})
     report = default_registry().run(ctx, categories=["hooks"])
     result = report.outcomes[0].result
     assert result.status is Status.FAIL
