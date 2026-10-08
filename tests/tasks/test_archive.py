@@ -261,6 +261,88 @@ def test_resume_rejects_stale_base_of_unapplied_capability(
     assert tasks_dir.change_dir("c1").is_dir()
 
 
+def _crash_after_writing_alpha(tasks_dir: TasksDir, vault, monkeypatch) -> None:
+    """alpha（CRLF）主 spec 已原子寫入，記進 spec_applied_caps 前程序中斷。"""
+    import hashlib
+
+    from lore_vault.tasks import archive as archive_mod
+
+    tasks_dir.write_main(
+        "alpha", SPEC_A.replace("demo", "alpha", 1).replace("\n", "\r\n")
+    )
+    tasks_dir.write_main("beta", SPEC_A.replace("demo", "beta", 1))
+    tasks_dir.propose(
+        "c1",
+        deltas={
+            "alpha": delta(removed=["封存"]),
+            "beta": delta(modified=[MOD_ROOT]),
+        },
+    )
+    real_write = archive_mod.atomic_write_text
+
+    def crash_after_write(path, text):
+        real_write(path, text)
+        raise KeyboardInterrupt("模擬寫完主 spec 後、記錄前中斷")
+
+    monkeypatch.setattr(archive_mod, "atomic_write_text", crash_after_write)
+    try:
+        _archive(tasks_dir, "c1", vault.client)
+    except KeyboardInterrupt:
+        pass
+    monkeypatch.setattr(archive_mod, "atomic_write_text", real_write)
+    meta = tasks_dir.meta("c1")
+    assert "spec_applied_caps" not in meta
+    alpha_bytes = (tasks_dir.root / "specs" / "alpha" / "spec.md").read_bytes()
+    assert (
+        b"\r\n" in alpha_bytes and "### Requirement: 封存".encode() not in alpha_bytes
+    )
+    # 記錄的是實際落地位元組（含 CRLF）的雜湊
+    assert meta["spec_applying"] == {"alpha": hashlib.sha256(alpha_bytes).hexdigest()}
+
+
+def test_resume_after_spec_written_but_not_recorded_converges(
+    tasks_dir: TasksDir, vault, monkeypatch
+):
+    """主 spec 寫入與 spec_applied_caps 回寫之間中斷：續跑以 spec_applying 雜湊認出
+    alpha 已套用、補記後略過驗證，不把自己寫的結果當成外部修改而卡死。"""
+    _crash_after_writing_alpha(tasks_dir, vault, monkeypatch)
+    alpha_before = (tasks_dir.root / "specs" / "alpha" / "spec.md").read_bytes()
+    count = len(vault.notes)
+    code, out = _archive(tasks_dir, "c1", vault.client)
+    assert code == 0, out
+    meta = tasks_dir.meta("c1")
+    assert meta["spec_applied"] is True
+    assert meta["spec_applied_caps"] == ["alpha", "beta"]
+    assert "spec_applying" not in meta
+    assert len(vault.notes) == count
+    assert (tasks_dir.root / "specs" / "alpha" / "spec.md").read_bytes() == alpha_before
+    assert "~/.x/" in tasks_dir.main_spec("beta")
+
+
+def test_resume_rejects_external_edit_after_spec_applying(
+    tasks_dir: TasksDir, vault, monkeypatch
+):
+    """spec_applying 有記錄，但中斷期間主 spec 被外部改成別的內容：雜湊不符，
+    照常驗證並以 base 過時拒絕，檔案與 metadata 都不動。"""
+    _crash_after_writing_alpha(tasks_dir, vault, monkeypatch)
+    alpha_path = tasks_dir.root / "specs" / "alpha" / "spec.md"
+    alpha_path.write_bytes(
+        alpha_path.read_bytes().replace(
+            "`~/.demo/`。".encode(), "`~/.外部/`。".encode(), 1
+        )
+    )
+    alpha_before = alpha_path.read_bytes()
+    beta_before = (tasks_dir.root / "specs" / "beta" / "spec.md").read_bytes()
+    meta_before = tasks_dir.meta("c1")
+    code, out = _archive(tasks_dir, "c1", vault.client)
+    assert code == 1
+    assert "alpha/" in out and "base 過時" in out
+    assert alpha_path.read_bytes() == alpha_before
+    assert (tasks_dir.root / "specs" / "beta" / "spec.md").read_bytes() == beta_before
+    assert tasks_dir.meta("c1") == meta_before
+    assert tasks_dir.change_dir("c1").is_dir()
+
+
 def test_orphan_notes_from_lost_metadata_are_adopted(tasks_dir: TasksDir, vault):
     """HTTP write 成功但本機回寫前中斷：服務端已有本 change 的 note，重跑不得再寫。"""
     _setup_two_reqs(tasks_dir)

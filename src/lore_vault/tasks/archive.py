@@ -10,12 +10,15 @@
    鏈頭多於一則就停，此時尚未寫入任何 note
 4. 逐則寫 note，每寫成一則立刻把 id 寫回 `.openspec.yaml` 的 `notes`；中途失敗
    change 留在原處，重跑跳過已寫的項目
-5. 全部 note 寫完、`note_id` 回填後，才寫主 spec（`spec_applied: true`），最後搬目錄
+5. 全部 note 寫完、`note_id` 回填後，才寫主 spec（`spec_applied: true`），最後搬目錄；
+   每個 capability 寫入前先記 `spec_applying: {cap: sha256}`（write-ahead），寫完才移進
+   `spec_applied_caps`，兩者之間中斷時續跑以雜湊認出已套用、不當成外部修改
 """
 
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -251,6 +254,8 @@ def archive_change(
     resumed_merge = bool(meta.get("spec_applied"))
     # 已寫回主 spec 的 capability（併主 spec 中途失敗時記錄）
     applied_caps: list[str] = list(meta.get("spec_applied_caps") or [])
+    if not resumed_merge and _reconcile_applying(change, ws, applied_caps):
+        change.save()
     # 續跑時只略過已套用的 capability；未套用的仍要驗 base 與 overlap，
     # 否則中斷期間被外部改過的主 spec 會被過時 delta 覆蓋
     if not resumed_merge:
@@ -345,10 +350,15 @@ def archive_change(
     # 5. 併主 spec → 搬目錄
     if not resumed_merge:
         # 每寫完一個 capability 就記下，中途失敗重跑只補未寫的
+        # write-ahead：寫之前先記下即將寫入內容的雜湊，寫完與 spec_applied_caps
+        # 之間中斷時，續跑才認得出主 spec 已是這次的結果（見 _reconcile_applying）
         for cap, text in merged.items():
+            meta[SPEC_APPLYING_KEY] = {cap: _digest(text.encode("utf-8"))}
+            change.save()
             atomic_write_text(ws.main_spec_path(cap), text)
             applied_caps.append(cap)
             meta["spec_applied_caps"] = list(applied_caps)
+            meta.pop(SPEC_APPLYING_KEY, None)
             change.save()
         meta["spec_applied"] = True
         change.save()
@@ -363,6 +373,39 @@ def archive_change(
     result.destination = str(destination)
     result.note_id = str(meta["note_id"])
     return result
+
+
+SPEC_APPLYING_KEY = "spec_applying"
+
+
+def _digest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _reconcile_applying(change: Change, ws: Workspace, applied_caps: list[str]) -> bool:
+    """續跑：`spec_applying` 記的 capability 若主 spec 位元組雜湊等於記錄值，代表上次
+    已寫入、只差沒記進 `spec_applied_caps`——補記並清掉 `spec_applying`，回傳 True。
+
+    雜湊不同（尚未寫入，或中斷後被外部改過）就不動 metadata，交給後面的
+    base／試算驗證照常處理。雜湊對的是實際落地的位元組：`atomic_write_text`
+    以 `newline=""` 寫入、行尾已由 `trial_merge` 決定，
+    故比對 `text.encode("utf-8")`。"""
+    applying = change.meta.get(SPEC_APPLYING_KEY)
+    if not isinstance(applying, dict) or not applying:
+        return False
+    done = []
+    for cap, digest in applying.items():
+        path = ws.main_spec_path(str(cap))
+        if path.is_file() and _digest(path.read_bytes()) == digest:
+            done.append(str(cap))
+    if len(done) != len(applying):
+        return False
+    for cap in done:
+        if cap not in applied_caps:
+            applied_caps.append(cap)
+    change.meta["spec_applied_caps"] = list(applied_caps)
+    change.meta.pop(SPEC_APPLYING_KEY, None)
+    return True
 
 
 def describe_result(result: ArchiveResult) -> list[str]:
