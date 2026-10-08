@@ -77,7 +77,7 @@ from paths import CLIENT_ENV_PATH, CONCEPT_PATH  # noqa: E402
 from paths import EPISODE_CACHE_DIR  # noqa: E402
 
 import episode_source as ep_source  # noqa: E402
-from calibrate import VERDICT_SCORES  # noqa: E402
+from calibrate import VERDICT_SCORES, answer_usable  # noqa: E402
 
 # 鎖過期時間。程序被 kill 掉時鎖不會被清掉，沒有這個機制管線會永遠停擺；
 # 訂在 6 小時是因為單輪最慢的階段（校準）實測也遠短於此
@@ -453,6 +453,9 @@ def stage_calibrate(ctx: dict[str, Any]) -> tuple[bool, str]:
         WORK_DIR / "verdicts_auto" / "verdicts-00.json")
     if not ok:
         return False, f"判卷失敗: {reply_judge}"
+    # 只收回這輪有作答的題目：判卷者對沒作答（或只有空白）的題目給的判定不算數，
+    # 那幾題留在未校準池、下輪再測
+    _keep_ids(WORK_DIR / "verdicts_auto" / "verdicts-00.json", answered)
 
     ok, out = run_tool([
         "agent_memory_spike/calibrate.py", "--ingest", str(WORK_DIR / "verdicts_auto"),
@@ -506,12 +509,6 @@ def judge_prompt(start: int, end: int, answer_dir: Path) -> str:
 EMPTY_RESULT_REASON = "回覆的 JSON 沒有任何一筆對上這批的 id"
 
 
-def _answer_usable(item: dict[str, Any]) -> bool:
-    """受測記錄要有非空字串 answer（show_judge 只判有作答的題目）。"""
-    answer = item.get("answer")
-    return isinstance(answer, str) and bool(answer.strip())
-
-
 def _verdict_usable(item: dict[str, Any]) -> bool:
     """判卷記錄的 verdict 要是 calibrate.ingest 認得的判定，否則 ingest 會略過。"""
     return item.get("verdict") in VERDICT_SCORES
@@ -520,7 +517,7 @@ def _verdict_usable(item: dict[str, Any]) -> bool:
 # 依 label 驗收每筆記錄的欄位；只有 id 沒有內容的記錄視同缺漏，
 # 否則 `[{"id": "c-001"}]` 會被當成功、拆批重試永遠不會發生
 ITEM_CHECKS: dict[str, Callable[[dict[str, Any]], bool]] = {
-    "受測": _answer_usable,
+    "受測": answer_usable,
     "判卷": _verdict_usable,
 }
 
@@ -549,13 +546,26 @@ def _probe_task_ids(path: Path) -> list[str | None]:
 
 
 def _answered_ids(path: Path) -> set[str]:
-    """作答檔裡有非空答案的 id（與 show_judge 會印出的題目一致）。"""
+    """作答檔裡有非空答案的 id（與 show_judge 會印出的題目一致，同用 answer_usable）。"""
     try:
         items = _answer_items(json.loads(path.read_text(encoding="utf-8"))) or []
     except (OSError, json.JSONDecodeError):
         return set()
     return {x["id"] for x in items
-            if isinstance(x, dict) and isinstance(x.get("id"), str) and x.get("answer")}
+            if isinstance(x, dict) and isinstance(x.get("id"), str) and answer_usable(x)}
+
+
+def _keep_ids(path: Path, ids: set[str]) -> None:
+    """把逐題陣列檔過濾成只剩 id 在 ``ids`` 裡的記錄（讀不到或不是陣列就不動）。"""
+    try:
+        items = _answer_items(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError):
+        return
+    if items is None:
+        return
+    kept = [x for x in items if isinstance(x, dict) and x.get("id") in ids]
+    if len(kept) != len(items):
+        path.write_text(json.dumps(kept, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _adjudicate_checked(label: str, prompt: str, path: Path,

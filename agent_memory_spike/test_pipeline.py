@@ -182,7 +182,8 @@ def calibrate_env(tmp_path, monkeypatch):
                 return env["fail"][(ids[0], ids[-1])]
             return True, "```json\n" + json.dumps(
                 [{"id": i, "answer": f"答 {i}"} for i in ids]) + "\n```"
-        # 判卷：同 show_judge，只判範圍內有作答的題目
+        # 判卷：刻意寫成「天真」的判卷者——作答檔裡範圍內有 answer 欄位的題目都判，
+        # 連只有空白的也判；pipeline 必須自己擋下這種判定、不讓它進 ingest
         ids = _range_ids(prompt, "--show-judge")
         env["judge_calls"].append(f"{ids[0]}..{ids[-1]}")
         if (ids[0], ids[-1]) in env["judge_fail"]:
@@ -266,6 +267,38 @@ def test_calibrate_blank_answers_fail_with_a_diagnosable_reason(calibrate_env):
     ok, summary = _calibrate()
     assert not ok and "受測失敗" in summary and "拆批重試後仍全部失敗" in summary
     assert calibrate_env["judge_calls"] == []
+
+
+def test_calibrate_blank_answer_in_a_mixed_reply_stays_pending(calibrate_env):
+    """一筆有效、一筆只有空白：空白那題不送判卷、判定不進 ingest，留在未校準池。
+    拿掉 _answered_ids 的 strip 判斷，c-001 會被當成已作答、判定被收回。"""
+    calibrate_env["fail"][("c-000", "c-003")] = (True, json.dumps(
+        [{"id": "c-000", "answer": "答 c-000"}, {"id": "c-001", "answer": " \n\t"}]))
+    ok, summary = _calibrate()
+    assert ok, summary
+    assert calibrate_env["calls"] == ["c-000..c-003"]  # 有一筆有效，不拆批
+    assert calibrate_env["ingested"] == ["c-000"]
+    verdicts = json.loads((pipeline.WORK_DIR / "verdicts_auto" / "verdicts-00.json")
+                          .read_text(encoding="utf-8"))
+    assert [v["id"] for v in verdicts] == ["c-000"]
+
+
+def test_show_judge_skips_blank_answers(tmp_path, capsys):
+    """判卷材料不印只有空白的回答（與 pipeline 的 answer_usable 同一判斷）。"""
+    import calibrate
+
+    probes = [{"id": f"c-{i:03d}", "probe": f"q{i}", "statement": "s"} for i in range(3)]
+    probe_path = tmp_path / "probe_tasks.json"
+    probe_path.write_text(json.dumps({"probes": probes, "judge_instructions": "準則"}),
+                          encoding="utf-8")
+    answer_path = tmp_path / "answers.json"
+    answer_path.write_text(json.dumps([
+        {"id": "c-000", "answer": "答"}, {"id": "c-001", "answer": "   "},
+        {"id": "c-002"}]), encoding="utf-8")
+    assert calibrate.show_judge(probe_path, answer_path, "0-2") == 0
+    out = capsys.readouterr().out
+    assert "### c-000" in out
+    assert "### c-001" not in out and "### c-002" not in out
 
 
 def test_calibrate_judge_with_illegal_verdicts_splits(calibrate_env, capsys):

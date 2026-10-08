@@ -229,13 +229,23 @@ def show_probes(probe_path: Path, spec: str) -> int:
     return 0
 
 
+def answer_usable(item: dict[str, Any]) -> bool:
+    """受測記錄要有非空字串 answer 才算作答；只有空白的視同沒作答。
+
+    判卷（show_judge）與 pipeline 決定「哪些題已作答、要送判卷」都用這一個判斷，
+    否則只有空白的回答會被判卷、判定再被 ingest 進校準分數。"""
+    answer = item.get("answer")
+    return isinstance(answer, str) and bool(answer.strip())
+
+
 def show_judge(probe_path: Path, answer_path: Path, spec: str) -> int:
     """印出判卷所需的三件事：陳述、題目、受測者的回答。"""
     payload = json.loads(probe_path.read_text(encoding="utf-8"))
     answers: dict[str, str] = {}
     for source in sorted(answer_path.glob("*.json")) if answer_path.is_dir() else [answer_path]:
         for item in load_agent_json(source):
-            answers[item["id"]] = item.get("answer") or ""
+            if answer_usable(item):
+                answers[item["id"]] = item["answer"]
 
     start, _, end = spec.partition("-")
     probes = payload["probes"][int(start):int(end or start) + 1]
