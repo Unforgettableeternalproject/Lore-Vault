@@ -137,6 +137,22 @@ def test_archive_note_agreement_warns_half_written(tasks_dir: TasksDir, vault):
     assert _status(tasks_dir, "tasks.archive_note_agreement", vault.client) == "warn"
 
 
+def test_archive_note_agreement_warns_half_written_without_digests(
+    tasks_dir: TasksDir, vault
+):
+    """舊 metadata 沒有 note_digests：續跑維持原行為，doctor 另外點名。"""
+    tasks_dir.propose("half", "--skip-specs")
+    tasks_dir.set_meta(
+        "half", notes={"demo/a": "n1", "summary": "n2"}, note_digests={"demo/a": "x"}
+    )
+    report = _report(tasks_dir, vault.client)["tasks.archive_note_agreement"]
+    assert report["status"] == "warn"
+    assert any("note_digests" in d and "summary" in d for d in report["details"])
+    tasks_dir.set_meta("half", note_digests={"demo/a": "x", "summary": "y"})
+    report = _report(tasks_dir, vault.client)["tasks.archive_note_agreement"]
+    assert not any("note_digests" in d for d in report["details"])
+
+
 def test_service_checks_skipped_without_client(tasks_dir: TasksDir, vault):
     _archived(tasks_dir, vault)
     code, out = tasks_dir.run("doctor", "--json", "--offline")

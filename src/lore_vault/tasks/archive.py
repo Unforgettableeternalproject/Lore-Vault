@@ -13,6 +13,10 @@
 5. 全部 note 寫完、`note_id` 回填後，才寫主 spec（`spec_applied: true`），最後搬目錄；
    每個 capability 寫入前先記 `spec_applying: {cap: sha256}`（write-ahead），寫完才移進
    `spec_applied_caps`，兩者之間中斷時續跑以雜湊認出已套用、不當成外部修改
+6. 每則 note 寫入前先記它依據內容的雜湊（`note_digests`，write-ahead）：requirement
+   是 delta 區塊正規化內容、總結是總結內文；續跑時已寫入（含從服務端採用）的項目
+   雜湊與目前內容不符就拒絕——部分封存已開始，delta 不可再改。舊 metadata 沒有
+   雜湊時維持原行為（doctor `tasks.archive_note_agreement` 給 warn）
 """
 
 from __future__ import annotations
@@ -41,6 +45,7 @@ from .workspace import (
 
 DEFAULT_AUTHOR = "lore-vault-tasks"
 _MAX_SECTION = 4000
+NOTE_DIGESTS_KEY = "note_digests"
 
 
 class ArchiveError(Exception):
@@ -159,6 +164,62 @@ def _summary_body(
     return "\n".join(parts)
 
 
+def _requirement_digests(change: Change) -> dict[str, str]:
+    """每條待寫 requirement 的 delta 區塊正規化內容 sha256。"""
+    return {
+        key: specs.block_hash(raw) for key, _op, _cap, raw in _requirement_items(change)
+    }
+
+
+def _summary_digest(change: Change, notes: dict[str, str]) -> str:
+    """總結 note 依據內容的 sha256：總結內文（不含授權行——續跑可不重帶
+    `--authorized-by`）；requirement 集合變了時 `req_notes` 跟著變，雜湊也不同。"""
+    req_notes = {k: notes.get(k, "") for k, *_ in _requirement_items(change)}
+    body = _summary_body(change, req_notes, None)
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _digest_mismatch(
+    change: Change, key: str, notes: dict[str, str], current: dict[str, str]
+) -> bool:
+    """已記雜湊且與目前內容不符；沒記雜湊（舊 metadata）回 False，維持原行為。"""
+    recorded = (change.meta.get(NOTE_DIGESTS_KEY) or {}).get(key)
+    if recorded is None:
+        return False
+    if key == SUMMARY_KEY:
+        return recorded != _summary_digest(change, notes)
+    return recorded != current.get(key)
+
+
+def _reject_changed(name: str, keys: list[str]) -> ArchiveError:
+    return ArchiveError(
+        f"{name} 的部分封存已開始，delta 不可再改：已寫入的 note 與目前內容不符",
+        [
+            f"內容已變更：{'、'.join(keys)}",
+            "請還原 delta（及 proposal）到第一次 archive 時的內容，或人工處理"
+            "已寫入的 note 與 metadata 後再重跑",
+        ],
+    )
+
+
+def _check_written_digests(change: Change, notes: dict[str, str]) -> None:
+    if not notes or not change.meta.get(NOTE_DIGESTS_KEY):
+        return
+    current = _requirement_digests(change)
+    changed = [k for k in notes if _digest_mismatch(change, k, notes, current)]
+    if changed:
+        raise _reject_changed(change.name, changed)
+
+
+def _record_digest(change: Change, key: str, digest: str) -> None:
+    """write-ahead：寫 note 前先落地雜湊，HTTP 成功、回寫 notes 前中斷時，
+    續跑採用服務端那則 note 也比得出內容是否被改過。"""
+    digests = dict(change.meta.get(NOTE_DIGESTS_KEY) or {})
+    digests[key] = digest
+    change.meta[NOTE_DIGESTS_KEY] = digests
+    change.save()
+
+
 def _lookup_requirement(
     client: VaultClient, vault: str, space: str, key: str, change_name: str
 ) -> tuple[str | None, str | None]:
@@ -270,6 +331,8 @@ def archive_change(
         merged, merge_errors = trial_merge(change, ws, skip=applied_caps)
         if merge_errors:
             raise ArchiveError(f"{name} delta 併回試算失敗", merge_errors)
+    # 已寫入的 note 與目前內容須一致（服務呼叫之前；主 spec 已併的續跑也查）
+    _check_written_digests(change, dict(meta.get("notes") or {}))
 
     # 3. 服務：vault、鏈頭
     space = str(meta.get("space") or "dev")
@@ -286,12 +349,15 @@ def archive_change(
         meta["vault"] = vault_key
         result.vault = vault_key
         pending = [it for it in _requirement_items(change) if it[0] not in notes]
+        current = _requirement_digests(change)
         heads: dict[str, str | None] = {}
         for key, *_ in list(pending):
             existing, heads[key] = _lookup_requirement(
                 client, vault_key, space, key, name
             )
             if existing:
+                if _digest_mismatch(change, key, notes, current):
+                    raise _reject_changed(name, [key])
                 notes[key] = existing
                 meta["notes"] = dict(notes)
                 change.save()
@@ -300,6 +366,7 @@ def archive_change(
 
         # 4. 逐則寫入，每則立即回寫 metadata
         for key, op, _cap, raw in pending:
+            _record_digest(change, key, current[key])
             note_id = client.write(
                 vault_key,
                 space,
@@ -317,10 +384,13 @@ def archive_change(
         if SUMMARY_KEY not in notes:
             existing = _existing_summary(client, vault_key, space, name)
             if existing:
+                if _digest_mismatch(change, SUMMARY_KEY, notes, current):
+                    raise _reject_changed(name, [SUMMARY_KEY])
                 notes[SUMMARY_KEY] = existing
                 meta["notes"] = dict(notes)
         if SUMMARY_KEY not in notes:
             req_notes = {k: notes[k] for k, *_ in _requirement_items(change)}
+            _record_digest(change, SUMMARY_KEY, _summary_digest(change, notes))
             summary_id = client.write(
                 vault_key,
                 space,

@@ -24,6 +24,7 @@ from lore_vault.doctor.framework import (
 )
 
 from . import snapshot, specs
+from .archive import NOTE_DIGESTS_KEY
 from .isolation import DEFAULT_PACKAGE_ROOT, check_core_isolation
 from .vault_client import ServiceError, VaultClient
 from .workspace import SUMMARY_KEY, Change, Workspace, requirement_overlap
@@ -73,6 +74,16 @@ def archive_note_agreement(ctx: DoctorContext) -> CheckResult:
         "（archive 半途，重跑續寫）"
         for c in half
     ]
+    # 舊版 archive 沒記 note_digests：續跑無法偵測 delta 在兩次執行之間被改過
+    for c in half:
+        digests = c.meta.get(NOTE_DIGESTS_KEY) or {}
+        missing = [k for k in c.meta["notes"] if k not in digests]
+        if missing:
+            warns.append(
+                f"{c.name}：已寫的 note 沒記 {NOTE_DIGESTS_KEY}"
+                f"（{'、'.join(missing)}），續跑偵測不到 delta 被改過；"
+                "確認 delta 未改後再重跑"
+            )
     to_check: list[tuple[Change, str]] = []
     legacy = 0
     for change in archived:

@@ -447,3 +447,102 @@ def test_resume_honours_first_allow_incomplete(tasks_dir: TasksDir):
         meta = tasks_dir.meta("c1")
         assert meta["incomplete_at_archive"] == 2
         assert "封存時未完成：2 項" in flaky.notes[meta["note_id"]]["body"]
+
+
+# ── note_digests：部分封存開始後 delta 不可再改 ──
+
+
+def _edit_new_feature(tasks_dir: TasksDir, name: str = "c1") -> None:
+    path = tasks_dir.change_dir(name) / "specs" / "demo" / "spec.md"
+    text = path.read_text(encoding="utf-8")
+    assert "系統 SHALL 運作。" in text
+    path.write_text(text.replace("系統 SHALL 運作。", "系統 SHALL 改過。"), "utf-8")
+
+
+def _first_note_only(tasks_dir: TasksDir) -> FakeVault:
+    """第 2 次 write 起失敗：只寫成 ADDED「新功能」那則。"""
+    _setup_two_reqs(tasks_dir)
+    flaky = FakeVault(fail_write_at=2).__enter__()
+    assert _archive(tasks_dir, "c1", flaky.client)[0] == 1
+    meta = tasks_dir.meta("c1")
+    assert list(meta["notes"]) == ["demo/新功能"]
+    assert set(meta["note_digests"]) >= {"demo/新功能"}
+    flaky.fail_write_at = None
+    return flaky
+
+
+def test_resume_rejects_delta_changed_after_note_written(tasks_dir: TasksDir):
+    flaky = _first_note_only(tasks_dir)
+    try:
+        spec_before = tasks_dir.main_spec("demo")
+        _edit_new_feature(tasks_dir)
+        writes = flaky.writes
+        code, out = _archive(tasks_dir, "c1", flaky.client)
+        assert code == 1 and "delta 不可再改" in out and "demo/新功能" in out
+        assert flaky.writes == writes
+        assert tasks_dir.main_spec("demo") == spec_before
+        assert tasks_dir.change_dir("c1").is_dir()
+        # 還原 delta 後續跑成功，note 與主 spec 一致
+        path = tasks_dir.change_dir("c1") / "specs" / "demo" / "spec.md"
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(
+                "系統 SHALL 改過。", "系統 SHALL 運作。"
+            ),
+            "utf-8",
+        )
+        code, out = _archive(tasks_dir, "c1", flaky.client)
+        assert code == 0, out
+        assert "系統 SHALL 運作。" in tasks_dir.main_spec("demo")
+    finally:
+        flaky.__exit__(None, None, None)
+
+
+def test_resume_rejects_changed_delta_for_adopted_server_note(tasks_dir: TasksDir):
+    """HTTP 寫成、回寫 notes 前中斷（notes 遺失，write-ahead 雜湊還在）：
+    採用服務端那則 note 前同樣比對雜湊。"""
+    flaky = _first_note_only(tasks_dir)
+    try:
+        tasks_dir.set_meta("c1", notes={})
+        _edit_new_feature(tasks_dir)
+        writes = flaky.writes
+        code, out = _archive(tasks_dir, "c1", flaky.client)
+        assert code == 1 and "delta 不可再改" in out
+        assert flaky.writes == writes
+        assert tasks_dir.meta("c1")["notes"] == {}
+    finally:
+        flaky.__exit__(None, None, None)
+
+
+def test_resume_rejects_changed_summary_basis(tasks_dir: TasksDir, vault):
+    """總結 note 已寫、搬目錄前中斷；proposal 被改過 → 拒絕。"""
+    _setup_two_reqs(tasks_dir)
+    blocker = tasks_dir.root / "changes" / "archive" / "2026-10-08-c1"
+    blocker.mkdir(parents=True)
+    code, out = _archive(tasks_dir, "c1", vault.client)
+    assert code == 1 and "封存目錄已存在" in out
+    assert tasks_dir.meta("c1")["spec_applied"] is True
+    blocker.rmdir()
+    proposal = tasks_dir.change_dir("c1") / "proposal.md"
+    original = proposal.read_text(encoding="utf-8")
+    proposal.write_text(original.replace("（為什麼要做）", "改過的理由"), "utf-8")
+    code, out = _archive(tasks_dir, "c1", vault.client)
+    assert code == 1 and "delta 不可再改" in out and "summary" in out
+    proposal.write_text(original, "utf-8")
+    code, out = _archive(tasks_dir, "c1", vault.client)
+    assert code == 0, out
+
+
+def test_resume_without_digests_keeps_legacy_behaviour(tasks_dir: TasksDir):
+    """舊 metadata 沒有 note_digests：維持原行為（續跑照用已寫的 note）。"""
+    flaky = _first_note_only(tasks_dir)
+    try:
+        meta = tasks_dir.meta("c1")
+        tasks_dir.set_meta("c1", note_digests=None)
+        _edit_new_feature(tasks_dir)
+        code, out = _archive(tasks_dir, "c1", flaky.client)
+        assert code == 0, out
+        assert (
+            tasks_dir.meta("c1")["notes"]["demo/新功能"] == meta["notes"]["demo/新功能"]
+        )
+    finally:
+        flaky.__exit__(None, None, None)
