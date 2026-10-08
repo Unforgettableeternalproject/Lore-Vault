@@ -218,7 +218,23 @@ def adjudicate(prompt: str, *, timeout: int = ADJUDICATION_TIMEOUT) -> tuple[boo
         )
     except subprocess.TimeoutExpired:
         return False, f"裁決逾時（{timeout}s）"
-    return result.returncode == 0, result.stdout or result.stderr or ""
+    output = result.stdout or result.stderr or ""
+    if not output.strip():
+        # 實測：題目碰到權限／資安主題時安全分類器撤回回答、fallback 到別的模型，
+        # fallback 的答案沒進 stdout，於是 exit 0 而 stdout/stderr 全空。
+        # 不明講的話下游只會印出「沒有可解析的 JSON: 」加一段空白，無從追查
+        if result.returncode == 0:
+            return False, EMPTY_OUTPUT_REASON
+        return False, f"claude CLI 失敗（exit {result.returncode}）且沒有任何輸出"
+    if result.returncode != 0:
+        return False, f"claude CLI 失敗（exit {result.returncode}）: {output}"
+    return True, output
+
+
+# adjudicate 在 exit 0 卻沒有輸出時回的原因。校準的拆批重試靠它辨認這類失敗，改字要一起改
+EMPTY_OUTPUT_REASON = "claude CLI 正常結束（exit 0）但沒有輸出，可能是安全分類器介入、回答被撤回"
+# adjudicate_to_file 抽不出 JSON 時的原因前綴，同上
+NO_JSON_REASON = "回覆裡沒有可解析的 JSON"
 
 
 _FENCE = "```"
@@ -273,7 +289,8 @@ def adjudicate_to_file(prompt: str, path: Path, *,
         return False, reply[-300:]
     payload = extract_json(reply)
     if payload is None:
-        return False, f"回覆裡沒有可解析的 JSON: {reply[-300:]}"
+        tail = reply[-300:].strip() or "（回覆是空的）"
+        return False, f"{NO_JSON_REASON}: {tail}"
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -419,35 +436,22 @@ def stage_calibrate(ctx: dict[str, Any]) -> tuple[bool, str]:
     if pending == 0:
         return True, "沒有待校準的條目"
 
+    probe_ids = _probe_task_ids(WORK_DIR / "probe_tasks.json")
     answer_dir = WORK_DIR / "probe_out_auto"
-    probe_prompt = (
-        AUTO_PREAMBLE + "這批是同事丟過來的開發問題，需要你逐題作答。在這個 repo 底下執行：\n\n"
-        f'"{TOOL_PYTHON}" agent_memory_spike/calibrate.py --show-probes 0-{pending - 1}\n\n'
-        "那份輸出開頭有作答須知，照著做。**除了那一個指令之外不要執行任何其他指令、"
-        "不要讀取任何檔案、不要 grep、不要搜尋**——這些專案不在你手上，查了也找不到對的東西。\n"
-        "**不要寫任何檔案**——把作答結果直接以一個 ```json 區塊回覆給我，"
-        '格式 [{"id": "c-000", "answer": "..."}]。'
-    )
-    ok, reply = adjudicate_to_file(probe_prompt, answer_dir / "answers-00.json")
+    answer_path = answer_dir / "answers-00.json"
+    ok, reply_answers = adjudicate_split("受測", probe_prompt, probe_ids, answer_path)
     if not ok:
-        return False, f"受測失敗: {reply}"
+        return False, f"受測失敗: {reply_answers}"
 
-    # 信封格式同樣要釘死（理由見 stage_distill）：第一次自動實跑判卷者
-    # 回了 {"c-689": {...}} 這種以 id 為鍵的 dict，ingest 期望的是
-    # [{"id": ..., "verdict": ...}]，更新 0 條而摘要被 report 的
-    # 「已校準 214」蓋住，看起來像正常跑完
-    judge_prompt = (
-        AUTO_PREAMBLE + "判卷任務。在這個 repo 底下執行：\n\n"
-        f'"{TOOL_PYTHON}" agent_memory_spike/calibrate.py '
-        f"--show-judge 0-{pending - 1} --answer-path {answer_dir}\n\n"
-        "輸出開頭是判卷準則，逐題照著判，判定要嚴格。\n"
-        "**不要寫任何檔案**——把結果直接以一個 ```json 區塊回覆給我。\n"
-        "回覆格式是一個 JSON 陣列，每題一個元素、id 原樣照抄：\n"
-        '[{"id": "c-000", "verdict": "...", "evidence": "...", "note": "..."}, ...]'
-    )
-    ok, reply = adjudicate_to_file(judge_prompt, WORK_DIR / "verdicts_auto" / "verdicts-00.json")
+    # 判卷只判有作答的題目（show_judge 會跳過沒作答的），預期 id 依此縮小；
+    # 受測拆批後一半失敗時，那一半在判卷這邊直接略過、不算失敗
+    answered = _answered_ids(answer_path)
+    judge_ids = [i if i in answered else None for i in probe_ids]
+    ok, reply_judge = adjudicate_split(
+        "判卷", lambda start, end: judge_prompt(start, end, answer_dir), judge_ids,
+        WORK_DIR / "verdicts_auto" / "verdicts-00.json")
     if not ok:
-        return False, f"判卷失敗: {reply}"
+        return False, f"判卷失敗: {reply_judge}"
 
     ok, out = run_tool([
         "agent_memory_spike/calibrate.py", "--ingest", str(WORK_DIR / "verdicts_auto"),
@@ -456,7 +460,155 @@ def stage_calibrate(ctx: dict[str, Any]) -> tuple[bool, str]:
         # 判卷跑完卻一條都沒更新 = 收回端沒吃到判定，
         # 「已校準 N」那行是既有存量，不能拿來當這一輪的成功證據
         return False, "判卷結果一條都沒對上 concepts"
-    return ok, pick_summary(out, "更新", "已校準")
+    summary = pick_summary(out, "更新", "已校準")
+    for label, reply in (("受測", reply_answers), ("判卷", reply_judge)):
+        if "拆批重試" in reply:
+            # 拆批救回的那輪要留在 last_run 摘要裡，否則部分題目沒處理在 --status 看不到
+            summary += f"｜{label} {reply}"
+    return ok, summary
+
+
+def probe_prompt(start: int, end: int) -> str:
+    """受測作答的 prompt，題目範圍是 probe_tasks.json 的索引 start..end（含）。"""
+    return (
+        AUTO_PREAMBLE + "這批是同事丟過來的開發問題，需要你逐題作答。在這個 repo 底下執行：\n\n"
+        f'"{TOOL_PYTHON}" agent_memory_spike/calibrate.py --show-probes {start}-{end}\n\n'
+        "那份輸出開頭有作答須知，照著做。**除了那一個指令之外不要執行任何其他指令、"
+        "不要讀取任何檔案、不要 grep、不要搜尋**——這些專案不在你手上，查了也找不到對的東西。\n"
+        "**不要寫任何檔案**——把作答結果直接以一個 ```json 區塊回覆給我，"
+        '格式 [{"id": "c-000", "answer": "..."}]。'
+    )
+
+
+def judge_prompt(start: int, end: int, answer_dir: Path) -> str:
+    """判卷的 prompt，範圍同 probe_prompt（probe_tasks.json 的索引）。
+
+    信封格式同樣要釘死（理由見 stage_distill）：第一次自動實跑判卷者
+    回了 {"c-689": {...}} 這種以 id 為鍵的 dict，ingest 期望的是
+    [{"id": ..., "verdict": ...}]，更新 0 條而摘要被 report 的
+    「已校準 214」蓋住，看起來像正常跑完
+    """
+    return (
+        AUTO_PREAMBLE + "判卷任務。在這個 repo 底下執行：\n\n"
+        f'"{TOOL_PYTHON}" agent_memory_spike/calibrate.py '
+        f"--show-judge {start}-{end} --answer-path {answer_dir}\n\n"
+        "輸出開頭是判卷準則，逐題照著判，判定要嚴格。\n"
+        "**不要寫任何檔案**——把結果直接以一個 ```json 區塊回覆給我。\n"
+        "回覆格式是一個 JSON 陣列，每題一個元素、id 原樣照抄：\n"
+        '[{"id": "c-000", "verdict": "...", "evidence": "...", "note": "..."}, ...]'
+    )
+
+
+# 回覆是合法 JSON、卻沒有任何一筆對上這批的 id。10/07 實例：受測回了 `[]`，
+# 判卷材料因此一題都沒有、判卷也回 `[]`，直到 ingest 才以「一條都沒對上」浮現。
+# 拆批重試認得這個前綴，改字要一起改
+EMPTY_RESULT_REASON = "回覆的 JSON 沒有任何一筆對上這批的 id"
+
+
+def _split_retryable(reason: str) -> bool:
+    """拆批重試只救「空輸出」「抽不出 JSON」「JSON 裡零筆對上」：那是某幾題觸發安全分類器、
+    整批回答被撤回或掏空。逾時、找不到 CLI、非零 exit 拆小也不會好，照原樣失敗。"""
+    return reason.startswith((EMPTY_OUTPUT_REASON, NO_JSON_REASON, EMPTY_RESULT_REASON))
+
+
+def _answer_items(payload: Any) -> list[Any] | None:
+    """把回覆正規化成逐題陣列（calibrate.load_agent_json 接受的兩種形狀）。"""
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict) and isinstance(payload.get("results"), list):
+        return payload["results"]
+    return None
+
+
+def _probe_task_ids(path: Path) -> list[str | None]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    return [p.get("id") if isinstance(p, dict) else None for p in payload.get("probes") or []]
+
+
+def _answered_ids(path: Path) -> set[str]:
+    """作答檔裡有非空答案的 id（與 show_judge 會印出的題目一致）。"""
+    try:
+        items = _answer_items(json.loads(path.read_text(encoding="utf-8"))) or []
+    except (OSError, json.JSONDecodeError):
+        return set()
+    return {x["id"] for x in items
+            if isinstance(x, dict) and isinstance(x.get("id"), str) and x.get("answer")}
+
+
+def _adjudicate_checked(label: str, prompt: str, path: Path,
+                        expected: set[str]) -> tuple[list[Any] | None, str]:
+    """裁決一批並驗收：要是逐題陣列，且至少一筆 id 落在這批的預期 id 裡。"""
+    ok, reply = adjudicate_to_file(prompt, path)
+    if not ok:
+        return None, reply
+    try:
+        items = _answer_items(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError):
+        items = None
+    if items is None:
+        return None, f"{label}回覆不是 [{{id, ...}}] 陣列"
+    got = [x.get("id") for x in items if isinstance(x, dict)]
+    if not any(i in expected for i in got):
+        # 帶出兩邊的 id 樣本：分辨「空陣列」與「模型改寫了 id」
+        return None, (f"{EMPTY_RESULT_REASON}（收到 {len(items)} 筆，id 例 {got[:3]}；"
+                      f"預期 {len(expected)} 題，例 {sorted(expected)[:3]}）")
+    return items, reply
+
+
+def adjudicate_split(label: str, make_prompt: Callable[[int, int], str],
+                     ids: list[str | None], target: Path) -> tuple[bool, str]:
+    """校準的一次裁決（受測或判卷）；整批失敗屬可重試類時對半拆開**重試一次**，合併成單批格式。
+
+    根因：題目含權限／資安主題時安全分類器撤回回答（exit 0 空輸出、無 JSON 或回 ``[]``），
+    整批 72 題一起陪葬。拆開後只有含那幾題的半批會再失敗，另一半照常往下走。
+    兩半都只跑一次、不再遞迴；失敗的那半留在未校準池，摘要裡標明。
+    ``ids`` 是 probe_tasks.json 依索引的預期 id（None = 這題不用處理，例如沒作答的判卷）；
+    範圍用索引表示，與 ``--show-probes``／``--show-judge`` 的 ``a-b`` 一致，id 對得上。
+    合併結果寫回 ``target``（與單批同路徑、同為逐題陣列）。
+    """
+    pending = len(ids)
+    expected_all = {i for i in ids if i}
+    if not expected_all:
+        return False, f"{label}沒有任何待處理的題目"
+    items, reply = _adjudicate_checked(label, make_prompt(0, pending - 1), target, expected_all)
+    if items is not None:
+        return True, f"{len(items)} 筆 → {target.name}"
+    if pending < 2 or not _split_retryable(reply):
+        return False, reply
+
+    log = sys.stderr  # 排程把 stderr 重導進 pipeline log
+    middle = pending // 2
+    halves = [(0, middle - 1), (middle, pending - 1)]
+    print(f"[pipeline] {label}整批 0-{pending - 1} 失敗（{reply[:200]}），"
+          f"拆成 {halves[0][0]}-{halves[0][1]} / {halves[1][0]}-{halves[1][1]} 重試一次",
+          file=log)
+    split_dir = target.parent.parent / (target.parent.name + "_split")
+    merged: list[Any] = []
+    failures: list[str] = []
+    for index, (start, end) in enumerate(halves):
+        expected = {i for i in ids[start:end + 1] if i}
+        if not expected:
+            print(f"[pipeline] {label}拆批 {start}-{end} 沒有待處理的題目，略過", file=log)
+            continue
+        part = split_dir / f"{target.stem}-part{index}.json"
+        part_items, part_reply = _adjudicate_checked(label, make_prompt(start, end), part, expected)
+        if part_items is None:
+            failures.append(f"{start}-{end}")
+            print(f"[pipeline] {label}拆批 {start}-{end} 仍失敗：{part_reply[:200]}", file=log)
+            continue
+        merged.extend(part_items)
+        print(f"[pipeline] {label}拆批 {start}-{end} 成功：{len(part_items)} 筆", file=log)
+
+    if not merged:
+        return False, f"拆批重試後仍全部失敗（原因：{reply[:200]}）"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+    note = f"；{'、'.join(failures)} 仍失敗、留待下輪" if failures else ""
+    print(f"[pipeline] {label}拆批合併 {len(merged)} 筆 → {target.name}{note}", file=log)
+    return True, f"{len(merged)} 筆 → {target.name}（拆批重試{note}）"
 
 
 # 蒸餾的語料來源（D13）。預設從服務拉取全部機器的 episode、與本機 jsonl 合併去重；

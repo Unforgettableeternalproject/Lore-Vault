@@ -71,6 +71,66 @@ def test_pipeline_failure_is_reported(work):
     assert "health" in alerts[0] and "888" in alerts[0]
 
 
+def _daily_log(work, day: str, *runs: list[tuple[str, bool]]) -> None:
+    """造一份 run_pipeline.ps1 格式的每日 log；每個 run 是 [(stage, ok), ...]。"""
+    lines: list[str] = []
+    for run in runs:
+        lines.append(f"﻿=== pipeline start {day}T03:30:00+08:00 ===")
+        for stage, ok in run:
+            lines.append(f"\n[pipeline] === {stage} — 說明")
+            lines.append(f"[pipeline] {'OK ' if ok else 'FAIL'} {stage} (12s): 摘要")
+        lines.append("=== pipeline exit 1 ===")
+    (work / "logs" / f"pipeline-{day.replace('-', '')}.log").write_text(
+        "\n".join(lines), encoding="utf-8")
+
+
+def _failed_last_run(work, stage: str) -> None:
+    (work / "pipeline_state.json").write_text(json.dumps({"last_run": {"results": [
+        {"stage": "collect", "ok": True, "summary": "補上 0 輪"},
+        {"stage": stage, "ok": False, "summary": "受測失敗: 沒有輸出"},
+    ]}}), encoding="utf-8")
+
+
+CAL_FAIL = [("collect", True), ("calibrate", False)]
+ALL_OK = [("collect", True), ("calibrate", True)]
+
+
+def test_consecutive_failures_of_the_same_stage_are_counted(work):
+    """同一階段連續卡住才是「卡死」：最新三份 log 都卡 calibrate，前一天成功。"""
+    (work / "logs" / "pipeline-20260824.log").unlink()
+    _daily_log(work, "2026-10-04", ALL_OK)
+    _daily_log(work, "2026-10-05", CAL_FAIL)
+    _daily_log(work, "2026-10-06", CAL_FAIL)
+    # 同一天手動重跑過：只看最後一次
+    _daily_log(work, "2026-10-07", ALL_OK, CAL_FAIL)
+    _failed_last_run(work, "calibrate")
+    alerts = health.collect_alerts()
+    assert len(alerts) == 1
+    assert "連續失敗 3 次" in alerts[0] and "calibrate" in alerts[0]
+
+
+def test_single_failure_has_no_streak_note(work):
+    """N=1 不標：單次失敗本來就會報，加註只是噪音。"""
+    (work / "logs" / "pipeline-20260824.log").unlink()
+    _daily_log(work, "2026-10-06", ALL_OK)
+    _daily_log(work, "2026-10-07", CAL_FAIL)
+    _failed_last_run(work, "calibrate")
+    alerts = health.collect_alerts()
+    assert len(alerts) == 1 and "連續失敗" not in alerts[0]
+
+
+def test_streak_breaks_on_a_different_stage_and_skips_undecidable_logs(work):
+    """別的階段失敗會打斷連續；沒有任何階段結果的 log（鎖被占用）不算也不打斷。"""
+    (work / "logs" / "pipeline-20260824.log").unlink()
+    _daily_log(work, "2026-10-04", CAL_FAIL)
+    _daily_log(work, "2026-10-05", [("collect", True), ("health", False)])
+    _daily_log(work, "2026-10-06", CAL_FAIL)
+    _daily_log(work, "2026-10-07", [])
+    _daily_log(work, "2026-10-08", CAL_FAIL)
+    _failed_last_run(work, "calibrate")
+    assert "連續失敗 2 次" in health.collect_alerts()[0]
+
+
 def _with_push_record(work, record):
     state_path = work / "pipeline_state.json"
     state = json.loads(state_path.read_text(encoding="utf-8"))

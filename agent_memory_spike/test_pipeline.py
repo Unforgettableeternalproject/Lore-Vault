@@ -96,6 +96,42 @@ def test_adjudication_failure_writes_nothing(tmp_path, monkeypatch):
     assert "沒有可解析的 JSON" in reason
 
 
+def _fake_cli(monkeypatch, *, returncode: int, stdout: str = "", stderr: str = ""):
+    import subprocess
+
+    monkeypatch.setattr(pipeline, "claude_path", lambda: "claude")
+    monkeypatch.setattr(pipeline.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(
+        args=a, returncode=returncode, stdout=stdout, stderr=stderr))
+
+
+def test_empty_output_with_exit_zero_is_named(tmp_path, monkeypatch):
+    """安全分類器撤回回答時 CLI exit 0 而 stdout/stderr 全空。
+    以前的訊息是「沒有可解析的 JSON: 」接一段空白，夜間 log 無從追查。"""
+    _fake_cli(monkeypatch, returncode=0, stdout="\n", stderr="")
+    ok, reason = pipeline.adjudicate("...")
+    assert not ok
+    assert reason == pipeline.EMPTY_OUTPUT_REASON and "安全分類器" in reason
+
+    target = tmp_path / "out.json"
+    ok, reason = adjudicate_to_file("...", target)
+    assert not ok and not target.exists()
+    assert "沒有輸出" in reason and not reason.rstrip().endswith(":")
+
+
+def test_nonzero_exit_carries_the_exit_code(monkeypatch):
+    _fake_cli(monkeypatch, returncode=2)
+    assert pipeline.adjudicate("...") == (False, "claude CLI 失敗（exit 2）且沒有任何輸出")
+    _fake_cli(monkeypatch, returncode=1, stderr="boom")
+    ok, reason = pipeline.adjudicate("...")
+    assert not ok and "exit 1" in reason and "boom" in reason
+
+
+def test_no_json_reason_never_has_an_empty_tail(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline, "adjudicate", lambda prompt, timeout=0: (True, "   "))
+    ok, reason = adjudicate_to_file("...", tmp_path / "x.json")
+    assert not ok and reason == f"{pipeline.NO_JSON_REASON}: （回覆是空的）"
+
+
 def test_adjudication_lands_the_payload(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, "adjudicate",
                         lambda prompt, timeout=0: (True, '```json\n[{"id": "c-1"}]\n```'))
@@ -103,6 +139,172 @@ def test_adjudication_lands_the_payload(tmp_path, monkeypatch):
     ok, summary = adjudicate_to_file("...", target)
     assert ok and "1 筆" in summary
     assert json.loads(target.read_text(encoding="utf-8")) == [{"id": "c-1"}]
+
+
+# --- 校準：受測拆批重試 -----------------------------------------------------
+
+def _range_ids(prompt: str, flag: str) -> list[str] | None:
+    """從 prompt 的 `--show-probes a-b`／`--show-judge a-b` 推回題目 id（c-000 起算）。"""
+    import re
+
+    match = re.search(flag + r" (\d+)-(\d+)", prompt)
+    if not match:
+        return None
+    return [f"c-{i:03d}" for i in range(int(match.group(1)), int(match.group(2)) + 1)]
+
+
+@pytest.fixture()
+def calibrate_env(tmp_path, monkeypatch):
+    """隔離 WORK_DIR、假的 calibrate 工具與裁決者；`script` 決定哪些受測範圍會失敗。"""
+    monkeypatch.setattr(pipeline, "WORK_DIR", tmp_path)
+    probes = [{"id": f"c-{i:03d}", "probe": f"q{i}", "statement": "s", "scope": None}
+              for i in range(4)]
+    (tmp_path / "probe_tasks.json").write_text(
+        json.dumps({"probes": probes}), encoding="utf-8")
+    env = {"calls": [], "fail": {}, "judge_calls": [], "judge_fail": {}, "judged": None,
+           "ingested": None}
+
+    def fake_run_tool(args, timeout=600):
+        if "--ingest" in args:
+            verdicts = json.loads(
+                (tmp_path / "verdicts_auto" / "verdicts-00.json").read_text(encoding="utf-8"))
+            # 同 calibrate.ingest：只認對得上 concept id 的判定
+            env["ingested"] = [v["id"] for v in verdicts if v.get("id") in ALL_IDS]
+            return True, f"[calibrate] 更新 {len(env['ingested'])} 條 → x"
+        return True, ""
+
+    def fake_adjudicate(prompt, timeout=0):
+        ids = _range_ids(prompt, "--show-probes")
+        if ids is not None:
+            env["calls"].append(f"{ids[0]}..{ids[-1]}")
+            if (ids[0], ids[-1]) in env["fail"]:
+                return env["fail"][(ids[0], ids[-1])]
+            return True, "```json\n" + json.dumps(
+                [{"id": i, "answer": f"答 {i}"} for i in ids]) + "\n```"
+        # 判卷：同 show_judge，只判範圍內有作答的題目
+        ids = _range_ids(prompt, "--show-judge")
+        env["judge_calls"].append(f"{ids[0]}..{ids[-1]}")
+        if (ids[0], ids[-1]) in env["judge_fail"]:
+            return env["judge_fail"][(ids[0], ids[-1])]
+        answers = json.loads(
+            (tmp_path / "probe_out_auto" / "answers-00.json").read_text(encoding="utf-8"))
+        answered = [a["id"] for a in answers if a["id"] in ids]
+        env["judged"] = (env["judged"] or []) + answered
+        return True, json.dumps([{"id": i, "verdict": "KNEW"} for i in answered])
+
+    monkeypatch.setattr(pipeline, "run_tool", fake_run_tool)
+    monkeypatch.setattr(pipeline, "adjudicate", fake_adjudicate)
+    return env
+
+
+ALL_IDS = {f"c-{i:03d}" for i in range(4)}
+
+
+def _calibrate():
+    return pipeline.stage_calibrate({"dry_run": False, "calibrate_max": 4})
+
+
+def test_calibrate_retries_an_empty_answer_array(calibrate_env, capsys):
+    """10/07 實例：受測回了合法的 `[]`，判卷材料一題都沒有，直到 ingest 才以
+    「一條都沒對上 concepts」浮現。現在在受測當下就認出來並拆批重試。"""
+    calibrate_env["fail"][("c-000", "c-003")] = (True, "```json\n[]\n```")
+    ok, summary = _calibrate()
+    assert ok, summary
+    assert calibrate_env["calls"] == ["c-000..c-003", "c-000..c-001", "c-002..c-003"]
+    assert calibrate_env["ingested"] == sorted(ALL_IDS)
+    assert pipeline.EMPTY_RESULT_REASON in capsys.readouterr().err
+
+
+def test_calibrate_empty_answer_array_fails_with_a_diagnosable_reason(calibrate_env):
+    for span in [("c-000", "c-003"), ("c-000", "c-001"), ("c-002", "c-003")]:
+        calibrate_env["fail"][span] = (True, "[]")
+    ok, summary = _calibrate()
+    assert not ok and "受測失敗" in summary
+    assert pipeline.EMPTY_RESULT_REASON in summary and "收到 0 筆" in summary
+    assert calibrate_env["judge_calls"] == []  # 不再帶著零筆作答去判卷
+
+
+def test_calibrate_judge_splits_an_empty_reply(calibrate_env, capsys):
+    """判卷同樣會被分類器撤回：對半重試一次，合併後 ingest 吃得到全部判定。"""
+    calibrate_env["judge_fail"][("c-000", "c-003")] = (False, pipeline.EMPTY_OUTPUT_REASON)
+    ok, summary = _calibrate()
+    assert ok, summary
+    assert calibrate_env["judge_calls"] == ["c-000..c-003", "c-000..c-001", "c-002..c-003"]
+    assert calibrate_env["ingested"] == sorted(ALL_IDS)
+    assert "判卷 4 筆" in summary and "拆批重試" in summary
+    assert "判卷整批 0-3 失敗" in capsys.readouterr().err
+
+
+def test_calibrate_judge_with_rewritten_ids_names_both_sides(calibrate_env):
+    """模型改寫 id 時拆批救不回來，但訊息要帶出兩邊的 id 樣本，一眼看得出是格式問題。"""
+    rewritten = (True, json.dumps([{"id": "C000", "verdict": "KNEW"}]))
+    for span in [("c-000", "c-003"), ("c-000", "c-001"), ("c-002", "c-003")]:
+        calibrate_env["judge_fail"][span] = rewritten
+    ok, summary = _calibrate()
+    assert not ok and "判卷失敗" in summary
+    assert "C000" in summary and "c-000" in summary
+    assert len(calibrate_env["judge_calls"]) == 3
+
+
+def test_calibrate_judge_skips_the_half_without_answers(calibrate_env, capsys):
+    """受測後半失敗時，判卷拆批不去判那一半（沒有作答，判了也是空的）。"""
+    calibrate_env["fail"][("c-000", "c-003")] = (False, pipeline.EMPTY_OUTPUT_REASON)
+    calibrate_env["fail"][("c-002", "c-003")] = (False, pipeline.EMPTY_OUTPUT_REASON)
+    calibrate_env["judge_fail"][("c-000", "c-003")] = (True, "")
+    ok, summary = _calibrate()
+    assert ok, summary
+    assert calibrate_env["judge_calls"] == ["c-000..c-003", "c-000..c-001"]
+    assert calibrate_env["ingested"] == ["c-000", "c-001"]
+    assert "判卷拆批 2-3 沒有待處理的題目" in capsys.readouterr().err
+
+
+def test_calibrate_splits_an_empty_reply_and_merges_the_halves(calibrate_env, capsys):
+    """整批被安全分類器撤回（exit 0 空輸出）時對半拆開重試，合併成單批格式再判卷。
+    拿掉拆批重試，這條會在「受測失敗」紅掉。"""
+    calibrate_env["fail"][("c-000", "c-003")] = (False, pipeline.EMPTY_OUTPUT_REASON)
+    ok, summary = _calibrate()
+    assert ok, summary
+    assert calibrate_env["calls"] == ["c-000..c-003", "c-000..c-001", "c-002..c-003"]
+    # 合併後與單批同格式、id 全對得上，判卷看得到全部四題
+    assert calibrate_env["judged"] == ["c-000", "c-001", "c-002", "c-003"]
+    log = capsys.readouterr().err
+    assert "拆成 0-1 / 2-3 重試一次" in log and "合併 4 筆" in log
+    assert "拆批重試" in summary
+
+
+def test_calibrate_split_retries_only_once(calibrate_env, capsys):
+    """半批仍失敗不再遞迴；成功的那半照常判卷，失敗的範圍寫進 log 與摘要。"""
+    calibrate_env["fail"][("c-000", "c-003")] = (False, pipeline.EMPTY_OUTPUT_REASON)
+    calibrate_env["fail"][("c-002", "c-003")] = (True, "抱歉，我不能回答")
+    ok, summary = _calibrate()
+    assert ok, summary
+    assert len(calibrate_env["calls"]) == 3
+    assert calibrate_env["judged"] == ["c-000", "c-001"]
+    assert "2-3 仍失敗" in summary
+    assert "受測拆批 2-3 仍失敗" in capsys.readouterr().err
+
+
+def test_calibrate_fails_when_both_halves_fail(calibrate_env):
+    calibrate_env["fail"][("c-000", "c-003")] = (True, "")
+    calibrate_env["fail"][("c-000", "c-001")] = (False, pipeline.EMPTY_OUTPUT_REASON)
+    calibrate_env["fail"][("c-002", "c-003")] = (False, pipeline.EMPTY_OUTPUT_REASON)
+    ok, summary = _calibrate()
+    assert not ok and "受測失敗" in summary and "拆批重試後仍全部失敗" in summary
+    assert len(calibrate_env["calls"]) == 3
+
+
+def test_calibrate_does_not_split_on_timeout(calibrate_env):
+    """逾時拆小也不會好，照原樣失敗、不重試。"""
+    calibrate_env["fail"][("c-000", "c-003")] = (False, "裁決逾時（1800s）")
+    ok, summary = _calibrate()
+    assert not ok and "逾時" in summary
+    assert calibrate_env["calls"] == ["c-000..c-003"]
+
+
+def test_calibrate_without_failure_runs_a_single_batch(calibrate_env):
+    ok, summary = _calibrate()
+    assert ok and "拆批" not in summary
+    assert calibrate_env["calls"] == ["c-000..c-003"]
 
 
 # --- 階段編排 ---------------------------------------------------------------
