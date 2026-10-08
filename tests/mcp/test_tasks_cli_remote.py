@@ -31,7 +31,7 @@ from lore_vault.api import routes as api_routes
 from lore_vault.hooks.client_env import load_client_settings
 from lore_vault.storage import sidecar as storage_sidecar
 from lore_vault.storage.db import connect
-from lore_vault.tasks import cli, snapshot
+from lore_vault.tasks import cli, remote_ops, snapshot
 from lore_vault.tasks import remote_store as rs
 from lore_vault.tasks.vault_client import (
     ServiceRejected,
@@ -333,6 +333,47 @@ def test_cli_sync_mode_requires_ui_authorization(remote: Cli, db_path):
     assert auth["content_digest"] == rs.authorization_digest(doc)
     assert doc["meta"]["authorized_by"] == "艾斯維爾"
     assert all("授權：艾斯維爾" in n["body"] for n in notes(db_path))
+
+
+def test_cli_list_and_snapshot_follow_ui_approval(remote: Cli, db_path):
+    """同步模式：UI 核准（內容雜湊相符）後 list 與服務端快照為「可開工」並附核准資訊；
+    核准後內容再被修改則回到「待授權」（內容已修改）。原因文字與離線模式不同。"""
+    remote.ok("propose", "c1", "--skip-specs", "--requires-authorization")
+    rows = {r["change"]: r for r in json.loads(remote.ok("list", "--json"))}
+    assert rows["c1"]["status"] == "待授權"
+    assert rows["c1"]["reasons"] == [remote_ops.AUTH_REQUIRED_REASON]
+    assert "--authorized-by" not in remote_ops.AUTH_REQUIRED_REASON
+    entry = blob(db_path, "tasks-snapshot")["changes"][0]
+    assert entry["status"] == "待授權" and entry["approved"] is None
+    assert entry["reasons"] == [remote_ops.AUTH_REQUIRED_REASON]
+
+    put_authorization(db_path, "c1", blob(db_path, "task-change:c1")["_version"])
+    approved = "已由 艾斯維爾 核准（2026-10-08T12:00:00Z）"
+    rows = {r["change"]: r for r in json.loads(remote.ok("list", "--json"))}
+    assert rows["c1"]["status"] == "可開工"
+    assert rows["c1"]["reasons"] == [approved]
+    entry = blob(db_path, "tasks-snapshot")["changes"][0]
+    assert entry["status"] == "可開工"
+    assert entry["reasons"] == [approved]
+    assert entry["approved"] == {"by": "艾斯維爾", "at": "2026-10-08T12:00:00Z"}
+
+    remote.write("changes/c1/tasks.md", DONE_TASKS)
+    remote.ok("push", "c1")
+    rows = {r["change"]: r for r in json.loads(remote.ok("list", "--json"))}
+    assert rows["c1"]["status"] == "待授權"
+    assert rows["c1"]["reasons"] == [remote_ops.AUTH_STALE_REASON]
+    entry = blob(db_path, "tasks-snapshot")["changes"][0]
+    assert entry["status"] == "待授權" and entry["approved"] is None
+    assert entry["reasons"] == [remote_ops.AUTH_STALE_REASON]
+
+    # 離線（純本機）模式維持 --authorized-by 的文字
+    code, out = remote.run("list", "--offline", "--json")
+    assert code == 0, out
+    offline = {r["change"]: r for r in json.loads(out)}
+    assert offline["c1"]["status"] == "待授權"
+    assert offline["c1"]["reasons"] == [
+        "需艾斯維爾授權（archive 須帶 --authorized-by）"
+    ]
 
 
 def _forge_pending_apply(db_path: Path, name: str, merged: str) -> None:

@@ -7,10 +7,12 @@ import {
   fetchTaskSnapshots,
   filterRows,
   isStale,
+  liveApproval,
   parseSnapshot,
   statusGroup,
   statusView,
   TASKS_SNAPSHOT_KEY,
+  type ApprovalInfo,
   type TaskRow,
 } from './tasks';
 import type { TaskChange } from './types';
@@ -61,7 +63,18 @@ describe('parseSnapshot', () => {
       tasks: { done: 0, total: 0 },
       source: null,
       note_id: null,
+      approved: null,
     });
+  });
+
+  it('服務端快照的 approved：{by, at} 原樣保留', () => {
+    const approved = { by: '艾斯維爾', at: '2026-10-09T02:20:00Z' };
+    const parsed = parseSnapshot({
+      mime: 'application/json',
+      content_base64: b64({ schema: 1, changes: [{ name: 'x', status: '可開工', approved }] }),
+    });
+    if (typeof parsed === 'string') throw new Error(parsed);
+    expect(parsed.changes[0]!.approved).toEqual(approved);
   });
 
   it.each([
@@ -73,6 +86,7 @@ describe('parseSnapshot', () => {
     ['change 缺 name', b64({ schema: 1, changes: [{ status: '可開工' }] }), '缺少 name'],
     ['blocked_by 格式錯', b64({ schema: 1, changes: [{ name: 'a', status: '可開工', blocked_by: ['D6'] }] }), 'blocked_by'],
     ['tasks 格式錯', b64({ schema: 1, changes: [{ name: 'a', status: '可開工', tasks: '1/2' }] }), 'tasks'],
+    ['approved 格式錯', b64({ schema: 1, changes: [{ name: 'a', status: '可開工', approved: { by: 'x' } }] }), 'approved'],
   ])('%s → 回說明字串', (_label, content, fragment) => {
     const parsed = parseSnapshot({ mime: 'application/json', content_base64: content });
     expect(typeof parsed).toBe('string');
@@ -148,5 +162,23 @@ describe('fetchTaskSnapshots', () => {
     const [only] = await fetchTaskSnapshots(api, 'dev', '*');
     expect(only).toMatchObject({ vault: 'a', snapshot: null });
     expect(only!.error).toContain('JSON');
+  });
+});
+
+describe('liveApproval（快照待授權時的即時核准覆蓋）', () => {
+  const remote = { version: 3, state: 'active', requiresAuthorization: true, contentDigest: 'a'.repeat(64) };
+  const record = { changeVersion: 3, contentDigest: 'a'.repeat(64), authorizedBy: '艾斯維爾', authorizedAt: '2026-10-09T02:20:00Z' };
+  const approved: ApprovalInfo = { change: remote, record, approved: true, error: null };
+
+  it('快照待授權且服務端已核准目前內容：回核准人與時間', () => {
+    expect(liveApproval({ status: '待授權' }, approved)).toEqual({ by: '艾斯維爾', at: '2026-10-09T02:20:00Z' });
+  });
+
+  it('過期、未核准、已不在進行中、快照不是待授權或還沒有即時結果：不覆蓋', () => {
+    expect(liveApproval({ status: '待授權' }, { ...approved, approved: false })).toBeNull();
+    expect(liveApproval({ status: '待授權' }, { ...approved, record: null, approved: false })).toBeNull();
+    expect(liveApproval({ status: '待授權' }, { ...approved, change: { ...remote, state: 'pending_apply' } })).toBeNull();
+    expect(liveApproval({ status: '被擋住' }, approved)).toBeNull();
+    expect(liveApproval({ status: '待授權' }, null)).toBeNull();
   });
 });

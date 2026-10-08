@@ -34,7 +34,6 @@ from . import remote_ops
 from . import remote_store as rs
 from .vault_client import VaultClient
 from .workspace import (
-    STATUS_AUTH,
     STATUS_PENDING_APPLY,
     Workspace,
     derive_status,
@@ -56,7 +55,6 @@ CONFLICT_HINT = (
 )
 
 PENDING_REASON = "執行 sync-specs 落地本機 specs/"
-AUTH_REASON = "需艾斯維爾授權（請在 UI 任務頁核准）"
 AUTHORIZED_BY_REJECTED = (
     "archive 中止：服務端同步模式不接受 --authorized-by（需授權的 change 一律要在"
     " UI 任務頁核准）"
@@ -252,6 +250,7 @@ def list_rows(
         store = await open_store(client, ws, None)
         changes, archived = await store.list_changes(include_archived=True)
         rws = await remote_ops.remote_workspace(store, ws, changes, archived)
+        auth = await remote_ops.authorization_states(store, changes)
         rows = []
         live = [c for c in changes if c.state != rs.STATE_ARCHIVED]
         done = [c for c in changes if c.state == rs.STATE_ARCHIVED]
@@ -259,8 +258,10 @@ def list_rows(
             status, reasons = derive_status(change, rws)
             if change.state == rs.STATE_PENDING_APPLY:
                 status, reasons = STATUS_PENDING_APPLY, [PENDING_REASON]
-            elif status == STATUS_AUTH:
-                reasons = [AUTH_REASON]
+            else:
+                status, reasons = remote_ops.apply_authorization(
+                    status, reasons, auth.get(change.name)
+                )
             progress_done, total = change.tasks_progress()
             rows.append(
                 {

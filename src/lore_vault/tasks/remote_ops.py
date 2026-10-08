@@ -9,6 +9,10 @@ HTTP 為 None），不綁 MCP 的 `Shell`：
 - `check_authorization`：§3.3 授權閘門（MCP archive、CLI 同步模式 archive、段二
   `land` 共用）：`requires_authorization` 的 change 必須有 UI 核准紀錄，且其
   `content_digest` 等於目前內容雜湊
+- `authorization_states`／`apply_authorization`：同步模式的狀態推導（服務端快照、MCP 與
+  CLI 的 list）讀 UI 核准紀錄：核准有效時「待授權」改依其餘條件推導並附核准資訊，
+  沒有或過期時換成指向 UI 的原因（純本機模式沿用 `derive_status` 的 `--authorized-by`
+  文字）
 - `archive_plan`／`archive_execute`：archive 段一（§1.4）；授權閘門由呼叫端先做
 - `sync_specs`：archive 段二（落地），只能在有本機 repo 的 stdio 執行；落地前重查授權
 
@@ -47,7 +51,9 @@ from .vault_client import ServiceError as HookServiceError
 from .workspace import (
     META_FILE,
     SPACE_DEV,
+    STATUS_AUTH,
     STATUS_BLOCKED,
+    STATUS_READY,
     STATUS_UNKNOWN,
     Workspace,
     atomic_write_text,
@@ -218,6 +224,68 @@ async def check_authorization(
             current_version=change.version,
         )
     return record
+
+
+# 同步模式「待授權」的原因（純本機模式見 `workspace.derive_status`）
+AUTH_REQUIRED_REASON = "需艾斯維爾在 UI 任務頁核准"
+AUTH_STALE_REASON = "內容已修改，需重新核准"
+APPROVED_REASON = "已由 {by} 核准（{at}）"
+
+AUTH_MISSING = "missing"
+AUTH_STALE = "stale"
+
+# 一個 change 的核准狀態：有效紀錄、沒有（或格式不合格）、核准後內容已改過
+AuthState = rs.AuthorizationRecord | str
+
+
+async def authorization_states(
+    store: rs.RemoteStore, changes: Sequence[rs.RemoteChange]
+) -> dict[str, AuthState]:
+    """進行中且 `requires_authorization` 的 change → 核准狀態（判定同
+    `check_authorization`：紀錄的內容雜湊等於目前內容）。其他 change 不在結果內；
+    傳輸層錯誤照樣往上拋。"""
+    states: dict[str, AuthState] = {}
+    for change in changes:
+        if change.state != rs.STATE_ACTIVE:
+            continue
+        if not change.meta.get("requires_authorization"):
+            continue
+        try:
+            record = await check_authorization(store, change)
+        except rs.StoreError as exc:
+            states[change.name] = (
+                AUTH_STALE if exc.code == "authorization_stale" else AUTH_MISSING
+            )
+            continue
+        states[change.name] = record if record is not None else AUTH_MISSING
+    return states
+
+
+def approved_info(state: AuthState | None) -> dict[str, str] | None:
+    """快照條目的 `approved`：核准有效時 `{by, at}`，否則 None。"""
+    if isinstance(state, rs.AuthorizationRecord):
+        return {"by": state.authorized_by, "at": state.authorized_at}
+    return None
+
+
+def apply_authorization(
+    status: str, reasons: list[str], state: AuthState | None
+) -> tuple[str, list[str]]:
+    """把 `derive_status` 的結果套上 UI 核准狀態（同步模式）。
+
+    核准有效：「待授權」改為「可開工」（其餘條件已在 `derive_status` 排在前面），
+    並追加一條核准資訊；沒有核准或已過期：維持「待授權」，原因換成指向 UI 的文字。
+    `state` 為 None 視同沒有核准紀錄（不需授權的 change 本來就不會是「待授權」）。"""
+    if isinstance(state, rs.AuthorizationRecord):
+        if status == STATUS_AUTH:
+            status, reasons = STATUS_READY, []
+        note = APPROVED_REASON.format(by=state.authorized_by, at=state.authorized_at)
+        return status, [*reasons, note]
+    if status == STATUS_AUTH:
+        return status, [
+            AUTH_STALE_REASON if state == AUTH_STALE else AUTH_REQUIRED_REASON
+        ]
+    return status, reasons
 
 
 def reconcile_mirror_applying(

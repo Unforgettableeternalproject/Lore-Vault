@@ -18,6 +18,8 @@ import pytest
 from lore_vault.mcp.server import MODE_HTTP
 from lore_vault.storage import ui_login
 from lore_vault.storage.db import connect
+from lore_vault.tasks import remote_ops, snapshot
+from lore_vault.tasks import remote_store as rs
 
 from .conftest import TOKEN, add_vault, asgi
 from .test_tasks_archive_mcp import _archive, notes, setup_change
@@ -25,6 +27,7 @@ from .test_tasks_mcp import (
     MAIN_SPEC,
     VAULT,
     Tasks,
+    _direct_post,
     blob,
     client_for,
     make_app,
@@ -204,3 +207,76 @@ async def test_bearer_cannot_produce_an_accepted_authorization(db, spec_project)
         err = await http.err(action="archive", vault=VAULT, name="guarded")
         assert err["error"]["code"] == "authorization_required"
     assert blob(db, "task-authorization:guarded") is None
+
+
+async def _rows(http: Tasks) -> dict[str, dict]:
+    return {
+        r["name"]: r for r in (await http.ok(action="list", vault=VAULT))["changes"]
+    }
+
+
+async def _snapshot_entry(app, name: str) -> dict:
+    """服務端內容算出的快照（與 push_remote／doctor 同一算法）裡的某個 change。"""
+    store = rs.RemoteStore(_direct_post(app), VAULT)
+    data = json.loads(await snapshot.remote_snapshot_bytes(store))
+    return next(c for c in data["changes"] if c["name"] == name)
+
+
+async def test_ui_approval_turns_status_ready_in_list_and_snapshot(db, spec_project):
+    """UI 核准後，同步模式的 list 與服務端快照不再是「待授權」，並附核准資訊；
+    核准後內容被修改則回到「待授權」（內容已修改）。"""
+    app = make_app(db)
+    async with (
+        http_client(app) as ui,
+        client_for(make_shell(app, spec_project)) as sc,
+        client_for(make_shell(app, spec_project, MODE_HTTP)) as hc,
+    ):
+        await login(ui, db)
+        stdio, http = Tasks(sc), Tasks(hc)
+        await stdio.ok(action="init")
+        version = await setup_change(
+            stdio, http, "guarded", requires_authorization=True
+        )
+        before = (await _rows(http))["guarded"]
+        assert before["status"] == "待授權"
+        assert before["reasons"] == [remote_ops.AUTH_REQUIRED_REASON]
+        entry = await _snapshot_entry(app, "guarded")
+        assert entry["status"] == "待授權" and entry["approved"] is None
+        assert entry["reasons"] == [remote_ops.AUTH_REQUIRED_REASON]
+
+        assert (await approve(ui, "guarded")).status_code == 200
+        at = blob(db, "task-authorization:guarded")["authorized_at"]
+        approved_reason = f"已由 {UI_DISPLAY} 核准（{at}）"
+        row = (await _rows(http))["guarded"]
+        assert row["status"] == "可開工"
+        assert row["reasons"] == [approved_reason]
+        stdio_row = {r["name"]: r for r in (await stdio.ok(action="list"))["changes"]}[
+            "guarded"
+        ]
+        assert stdio_row["status"] == "可開工"
+        entry = await _snapshot_entry(app, "guarded")
+        assert entry["status"] == "可開工"
+        assert entry["reasons"] == [approved_reason]
+        assert entry["approved"] == {"by": UI_DISPLAY, "at": at}
+        assert not snapshot.shape_errors(
+            snapshot.encode({"schema": 1, "changes": [entry]})
+        )
+
+        # 核准後再改內容：核准失效，回到待授權（內容已修改）
+        await http.ok(
+            action="edit",
+            vault=VAULT,
+            name="guarded",
+            expected_version=version,
+            proposal_md="# Proposal\n\n核准後偷改\n",
+        )
+        row = (await _rows(http))["guarded"]
+        assert row["status"] == "待授權"
+        assert row["reasons"] == [remote_ops.AUTH_STALE_REASON]
+        entry = await _snapshot_entry(app, "guarded")
+        assert entry["status"] == "待授權" and entry["approved"] is None
+        assert entry["reasons"] == [remote_ops.AUTH_STALE_REASON]
+        # edit 成功後推送的快照就是這份計算結果
+        pushed = blob(db, "tasks-snapshot")
+        pushed_entry = next(c for c in pushed["changes"] if c["name"] == "guarded")
+        assert pushed_entry["reasons"] == [remote_ops.AUTH_STALE_REASON]

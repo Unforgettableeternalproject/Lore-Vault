@@ -22,15 +22,21 @@ import {
   fetchTaskSnapshots,
   filterRows,
   isStale,
+  liveApproval,
+  LIVE_APPROVAL_LIMIT,
+  LIVE_APPROVED_LABEL,
   statusGroup,
   statusView,
+  STATUS_AUTH,
   STATUS_DONE,
+  STATUS_READY,
   STATUS_UNKNOWN,
   taskRows,
   TASK_FILTER_IDS,
   TASK_FILTERS,
   TASK_STALE_HOURS,
   type ApprovalInfo,
+  type LiveApproval,
   type TaskFilter,
   type TaskGroup,
   type TaskRow,
@@ -126,6 +132,7 @@ function TaskList() {
   const shown = groups.reduce((n, g) => n + g.rows.length, 0);
   // 篩選後沒有項目的 vault 不顯示；快照格式不對的 vault 一律顯示（錯誤不能被篩掉）
   const visible = groups.filter((g) => g.rows.length > 0 || g.snap.error);
+  const live = useLiveApprovals(visible.flatMap((g) => g.rows));
   const filterLabel = TASK_FILTERS.find((f) => f.id === filter)?.label ?? '';
 
   return (
@@ -164,12 +171,48 @@ function TaskList() {
       {data && error === null && visible.length > 0 && (
         <div class="lv-task-groups" data-testid="tasks" aria-busy={loading}>
           {visible.map((g) => (
-            <TaskGroupView key={g.snap.vault} snap={g.snap} rows={g.rows} header={!single} />
+            <TaskGroupView key={g.snap.vault} snap={g.snap} rows={g.rows} header={!single} live={live} />
           ))}
         </div>
       )}
     </div>
   );
+}
+
+function rowKey(vault: string, name: string): string {
+  return `${vault}\u0000${name}`;
+}
+
+/**
+ * 列表的即時核准狀態：只替畫面上快照為「待授權」的列查 `/v1/tasks_authorization_status`（最多
+ * LIVE_APPROVAL_LIMIT 個），結果只覆蓋徽章呈現，不改篩選與排序（回應陸續到達時列不會跳動）。
+ * 單列查詢失敗就維持快照狀態，不打斷列表（詳情頁會顯示錯誤）。
+ */
+function useLiveApprovals(rows: TaskRow[]): Map<string, ApprovalInfo> {
+  const { api } = useApp();
+  const targets = rows
+    .filter((r) => r.change.status === STATUS_AUTH && r.change.requires_authorization)
+    .slice(0, LIVE_APPROVAL_LIMIT)
+    .map((r) => rowKey(r.vault, r.change.name));
+  // 以字串代表這組列：同一組列重新渲染時不重查
+  const signature = targets.join('\u0001');
+  const [live, setLive] = useState<Map<string, ApprovalInfo>>(() => new Map());
+  useEffect(() => {
+    if (!signature) return;
+    const ctrl = new AbortController();
+    for (const key of signature.split('\u0001')) {
+      const [vault, name] = key.split('\u0000') as [string, string];
+      fetchApproval(api, vault, name, ctrl.signal)
+        .then((info) => {
+          if (!ctrl.signal.aborted) setLive((prev) => new Map(prev).set(key, info));
+        })
+        .catch(() => {
+          // 即時狀態只是補充：讀不到就沿用快照
+        });
+    }
+    return () => ctrl.abort();
+  }, [api, signature]);
+  return live;
 }
 
 function sortRows(rows: TaskRow[]): TaskRow[] {
@@ -178,7 +221,17 @@ function sortRows(rows: TaskRow[]): TaskRow[] {
 
 /** 單一 vault 的區塊：標頭（vault 名、同步時間、過時標示）、格式錯誤橫幅、該 vault 的 change。
  *  只看單一 vault 時不另加標頭，同步資訊以一行 metadata 呈現。 */
-function TaskGroupView({ snap, rows, header }: { snap: VaultSnapshot; rows: TaskRow[]; header: boolean }) {
+function TaskGroupView({
+  snap,
+  rows,
+  header,
+  live,
+}: {
+  snap: VaultSnapshot;
+  rows: TaskRow[];
+  header: boolean;
+  live: Map<string, ApprovalInfo>;
+}) {
   const { vaults } = useApp();
   const stale = isStale(snap.updated);
   const name = vaultName({ vaults }, snap.vault);
@@ -210,7 +263,7 @@ function TaskGroupView({ snap, rows, header }: { snap: VaultSnapshot; rows: Task
       {rows.length > 0 && (
         <ul class="lv-tasks" aria-label={`${name} 的 change 列表`}>
           {rows.map((r) => (
-            <TaskRowView key={r.change.name} row={r} />
+            <TaskRowView key={r.change.name} row={r} approval={liveApproval(r.change, live.get(rowKey(r.vault, r.change.name)))} />
           ))}
         </ul>
       )}
@@ -226,7 +279,20 @@ function StaleBadge() {
   );
 }
 
-function StatusBadge({ status }: { status: string }) {
+/** `live`：快照仍是「待授權」但服務端已核准目前內容——以即時結果呈現，並註明快照尚未同步 */
+function StatusBadge({ status, live }: { status: string; live?: LiveApproval | null }) {
+  if (live) {
+    return (
+      <>
+        <Badge tone="ready" label="狀態（即時核准）" testId="task-status">
+          {LIVE_APPROVED_LABEL}
+        </Badge>
+        <Badge tone="plain" label="快照同步" title="狀態取自即時核准紀錄；快照要等任務層下一次推送才會更新" testId="task-live-note">
+          快照尚未同步
+        </Badge>
+      </>
+    );
+  }
   const view = statusView(status);
   return (
     <Badge tone={view.tone} label="狀態" testId="task-status">
@@ -264,12 +330,12 @@ function BlockerBadges({ change }: { change: TaskChange }) {
   );
 }
 
-function TaskRowView({ row }: { row: TaskRow }) {
+function TaskRowView({ row, approval }: { row: TaskRow; approval: LiveApproval | null }) {
   const { navigate } = useApp();
   const { change } = row;
   const href = routePath('tasks', [row.vault, change.name]);
   return (
-    <li class="lv-task" data-status={change.status}>
+    <li class="lv-task" data-status={change.status} data-live-approved={approval ? 'true' : undefined}>
       <div class="lv-task__main">
         <a
           class="lv-task__name"
@@ -282,7 +348,7 @@ function TaskRowView({ row }: { row: TaskRow }) {
           {change.name}
         </a>
         <div class="lv-concept__meta">
-          <StatusBadge status={change.status} />
+          <StatusBadge status={change.status} live={approval} />
           {change.requires_authorization && change.status !== STATUS_DONE && (
             <Badge tone="auth" label="授權">
               需授權
@@ -361,10 +427,16 @@ function TaskDetail({ vaultKey, name }: { vaultKey: string; name: string }) {
 function ChangeBody({ change, updated, vaultKey }: { change: TaskChange; updated: string; vaultKey: string }) {
   const view = statusView(change.status);
   const stale = isStale(updated);
+  // 核准狀態在這裡讀一次，同時給頁首徽章、狀態說明與核准區塊；核准成功後 reload，頁首立即反映
+  const approval = useApproval(vaultKey, change.name, change.requires_authorization && change.status !== STATUS_DONE);
+  const live = liveApproval(change, approval.info);
+  const reasons = live ? [`已由 ${live.by} 核准（${live.at ? formatTime(live.at) : '時間不明'}）`] : change.reasons;
+  // 可開工（含快照已記錄核准）或即時已核准：說明是資訊，不是阻擋
+  const informational = live !== null || change.status === STATUS_READY;
   return (
     <>
       <div class="lv-meta-line">
-        <StatusBadge status={change.status} />
+        <StatusBadge status={change.status} live={live} />
         {change.requires_authorization && (
           <Badge tone="auth" label="授權">
             需授權
@@ -378,22 +450,31 @@ function ChangeBody({ change, updated, vaultKey }: { change: TaskChange; updated
         {stale && <StaleBadge />}
       </div>
 
-      {change.reasons.length > 0 && (
+      {reasons.length > 0 && (
         <Banner
-          tone={view.tone === 'error' ? 'error' : 'warn'}
-          label={change.status === STATUS_UNKNOWN || view.unrecognized ? 'UNRESOLVED' : 'BLOCKED'}
+          tone={informational ? 'info' : view.tone === 'error' ? 'error' : 'warn'}
+          label={
+            live ? 'APPROVED' : informational ? 'NOTE' : change.status === STATUS_UNKNOWN || view.unrecognized ? 'UNRESOLVED' : 'BLOCKED'
+          }
           title={change.status === STATUS_UNKNOWN ? '狀態無法判定，需要人介入' : '狀態說明'}
           testId="task-reasons"
         >
           <ul class="lv-plain-list">
-            {change.reasons.map((r) => (
+            {reasons.map((r) => (
               <li key={r}>{r}</li>
             ))}
           </ul>
+          {live && (
+            <p class="lv-small lv-muted" data-testid="task-live-reason">
+              快照尚未同步：快照仍記錄「{change.status}」，狀態以即時核准紀錄為準；任務層下一次推送後快照會更新。
+            </p>
+          )}
         </Banner>
       )}
 
-      {change.requires_authorization && change.status !== STATUS_DONE && <Approval vaultKey={vaultKey} name={change.name} />}
+      {change.requires_authorization && change.status !== STATUS_DONE && (
+        <Approval vaultKey={vaultKey} name={change.name} info={approval.info} error={approval.error} reload={approval.reload} />
+      )}
 
       <section class="lv-task-section" aria-labelledby="task-why">
         <h2 id="task-why" class="lv-side-block__label">
@@ -566,15 +647,15 @@ function ArchiveNote({ change }: { change: TaskChange }) {
  * 核准綁定服務端目前的內容（內容雜湊；archive 的簿記寫入不算修改），之後內容再改即過期，要重新核准。
  * 顯示條件是「需授權且未完成」而不只「待授權」：快照的推導狀態日後可能把已核准的 change 算成別的狀態。
  */
-function Approval({ vaultKey, name }: { vaultKey: string; name: string }) {
-  const { api, toast } = useApp();
+/** 讀服務端核准狀態（`enabled` 為 false 時不發請求）；`reload` 重讀。 */
+function useApproval(vaultKey: string, name: string, enabled: boolean) {
+  const { api } = useApp();
   const [info, setInfo] = useState<ApprovalInfo | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [tick, setTick] = useState(0);
-  const [confirming, setConfirming] = useState(false);
-  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
+    if (!enabled) return;
     const ctrl = new AbortController();
     setError(null);
     fetchApproval(api, vaultKey, name, ctrl.signal)
@@ -586,9 +667,28 @@ function Approval({ vaultKey, name }: { vaultKey: string; name: string }) {
         setError(err);
       });
     return () => ctrl.abort();
-  }, [api, vaultKey, name, tick]);
+  }, [api, vaultKey, name, tick, enabled]);
 
-  const reload = () => setTick((t) => t + 1);
+  return { info: enabled ? info : null, error: enabled ? error : null, reload: () => setTick((t) => t + 1) };
+}
+
+function Approval({
+  vaultKey,
+  name,
+  info,
+  error,
+  reload,
+}: {
+  vaultKey: string;
+  name: string;
+  info: ApprovalInfo | null;
+  error: unknown;
+  reload: () => void;
+}) {
+  const { api, toast } = useApp();
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+
   const version = info?.change?.version;
   const approve = async () => {
     setBusy(true);

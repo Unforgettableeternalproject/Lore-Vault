@@ -36,6 +36,11 @@
 - 服務端計算的每筆 change 多一個 `state`（`active`／`pending_apply`／`archived`；
   UI 可忽略未知欄位，schema 仍是 v1）。`pending_apply` 的 status 為
   「已封存（待落地）」、帶 note_id／archived_at；`archived` 為「已完成」。
+  另多一個 `approved`（`{"by", "at"}` 或 null）：進行中的需授權 change 讀 UI 核准紀錄
+  （`remote_ops.authorization_states`，內容雜湊相符才算），核准有效時 status 依其餘條件
+  推導（通常是「可開工」）並在 reasons 附「已由 … 核准（…）」；沒有核准或已過期維持
+  「待授權」，原因指向 UI 任務頁。本機目錄計算的快照沒有這個欄位（離線模式仍是
+  `--authorized-by` 的文字）。核准只寫授權紀錄、不會觸發推送：要等下一次推送才進快照。
   索引標 `archived` 但沒有 change 文件的（遷移的舊封存）只有名稱與狀態
 - DECISIONS 判定：本機有 DECISIONS.md 以本機為準，否則用服務端鏡像
   `task-decisions`，都沒有為 None（「無法判定」）
@@ -52,8 +57,8 @@ from typing import Any
 
 from lore_vault.binding import resolve_binding
 
+from . import remote_ops, specs
 from . import remote_store as rs
-from . import specs
 from .archive import _read, _section
 from .vault_client import VaultClient
 from .workspace import (
@@ -262,10 +267,17 @@ def push(
 
 
 def _remote_entry(
-    change: rs.RemoteChange, rws: rs.RemoteWorkspace, archived_names: set[str]
+    change: rs.RemoteChange,
+    rws: rs.RemoteWorkspace,
+    archived_names: set[str],
+    auth: remote_ops.AuthState | None,
 ) -> dict[str, Any]:
     entry = _change_entry(change, rws, archived_names, rws.decisions())
     entry["state"] = change.state
+    entry["status"], entry["reasons"] = remote_ops.apply_authorization(
+        entry["status"], entry["reasons"], auth
+    )
+    entry["approved"] = remote_ops.approved_info(auth)
     if change.state != rs.STATE_ACTIVE:
         apply = change.doc.get("apply") or {}
         stamp = change.meta.get("archived_at") or apply.get("archived_at")
@@ -295,6 +307,7 @@ def _index_only_entry(name: str) -> dict[str, Any]:
         "note_id": None,
         "archived_at": None,
         "state": rs.STATE_ARCHIVED,
+        "approved": None,
     }
 
 
@@ -302,8 +315,10 @@ def build_remote_snapshot(
     changes: list[rs.RemoteChange],
     archived_names: set[str],
     decisions: dict[str, bool] | None,
+    auth: dict[str, remote_ops.AuthState] | None = None,
 ) -> dict[str, Any]:
     """`changes`：`list_changes(include_archived=True)` 的結果（含已落地的文件）。
+    `auth`：`remote_ops.authorization_states` 的結果（沒列到的 change 視為未核准）。
     順序：進行中（active／pending_apply，依名稱）在前，已落地依封存時間。"""
     rws = rs.RemoteWorkspace(
         root=Path("remote"),
@@ -313,8 +328,9 @@ def build_remote_snapshot(
     )
     live = [c for c in changes if c.state != rs.STATE_ARCHIVED]
     done = [c for c in changes if c.state == rs.STATE_ARCHIVED]
-    entries = [_remote_entry(c, rws, archived_names) for c in live]
-    finished = [_remote_entry(c, rws, archived_names) for c in done]
+    states = auth or {}
+    entries = [_remote_entry(c, rws, archived_names, states.get(c.name)) for c in live]
+    finished = [_remote_entry(c, rws, archived_names, None) for c in done]
     have = {c.name for c in changes}
     finished += [_index_only_entry(n) for n in sorted(archived_names - have)]
     finished.sort(key=lambda e: (e["archived_at"] or "", e["name"]))
@@ -335,7 +351,8 @@ async def remote_snapshot_bytes(
         decisions = local.decisions()
     if decisions is None and any(c.meta.get("blocked_by") for c in changes):
         decisions = await rs.resolve_decisions(store, None)
-    return _fit(build_remote_snapshot(changes, archived, decisions), max_bytes)
+    auth = await remote_ops.authorization_states(store, changes)
+    return _fit(build_remote_snapshot(changes, archived, decisions, auth), max_bytes)
 
 
 async def has_remote_index(store: rs.RemoteStore) -> bool:

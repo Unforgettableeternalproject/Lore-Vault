@@ -418,6 +418,97 @@ describe('任務層：核准', () => {
     expect(within(panel).getByTestId('task-approval-state').textContent).toBe('尚未核准');
   });
 
+  // 快照（服務端算的）仍記錄待授權：同步模式的原因指向 UI
+  const PENDING: TaskChange[] = [
+    change(),
+    change({ name: 'auth-one', status: '待授權', requires_authorization: true, reasons: ['需艾斯維爾在 UI 任務頁核准'] }),
+    change({ name: 'blocked-one', status: '被擋住', reasons: ['D6 未裁決'], blocked_by: [{ id: 'D6', resolved: false }] }),
+  ];
+
+  it('列表：快照待授權但即時已核准 → 徽章以即時結果為準並註明快照尚未同步；分組不變、只查待授權的列', async () => {
+    const { api, callsTo } = makeApi(
+      routes({ change: remoteChange(3), record: record(3) }, { '/v1/blob_get': () => json({ items: [{ vault: VAULT, ...blob(PENDING) }] }) }),
+    );
+    renderWithApp(<Tasks />, api);
+    await screen.findByTestId('tasks');
+    const row = () => screen.getByRole('link', { name: 'auth-one' }).closest('li')!;
+    await waitFor(() => expect(within(row()).getByTestId('task-status').textContent).toBe('可開工・已核准'));
+    expect(badgeOf(within(row()).getByTestId('task-status')).classList.contains('lv-badge--ready')).toBe(true);
+    expect(within(row()).getByTestId('task-live-note').textContent).toBe('快照尚未同步');
+    expect(callsTo('/v1/tasks_authorization_status').map((c) => c.body)).toEqual([{ space: 'dev', vault: VAULT, change: 'auth-one' }]);
+    // 篩選與排序仍依快照：待授權篩選下照樣列出
+    expect(names()).toEqual(['ready-one', 'auth-one', 'blocked-one']);
+    fireEvent.click(screen.getByRole('button', { name: '待授權' }));
+    expect(names()).toEqual(['auth-one']);
+    expect(within(row()).getByTestId('task-status').textContent).toBe('可開工・已核准');
+  });
+
+  it('列表：即時狀態是過期或未核准時維持快照的待授權', async () => {
+    const { api } = makeApi(
+      routes(
+        { change: remoteChange(4, { content_digest: DIGEST_B }), record: record(3) },
+        { '/v1/blob_get': () => json({ items: [{ vault: VAULT, ...blob(PENDING) }] }) },
+      ),
+    );
+    renderWithApp(<Tasks />, api);
+    await screen.findByTestId('tasks');
+    const row = screen.getByRole('link', { name: 'auth-one' }).closest('li')!;
+    await waitFor(() => expect(row.getAttribute('data-status')).toBe('待授權'));
+    expect(within(row).getByTestId('task-status').textContent).toBe('待授權');
+    expect(within(row).queryByTestId('task-live-note')).toBeNull();
+  });
+
+  it('詳情：核准成功後頁首徽章與狀態說明立即改用即時結果，不需重新整理', async () => {
+    const state: Status = { change: remoteChange(3), record: null };
+    const { api, callsTo } = makeApi(
+      routes(state, {
+        '/v1/blob_get': () => json(blob(PENDING)),
+        '/v1/tasks_authorize': () => {
+          state.record = record(3);
+          return json({ record: {}, version: 1, created: true });
+        },
+      }),
+    );
+    renderWithApp(<Tasks params={[VAULT, 'auth-one']} />, api);
+    const panel = await screen.findByTestId('task-approval');
+    await waitFor(() => expect(within(panel).getByTestId('task-approval-state').textContent).toBe('尚未核准'));
+    expect(screen.getByTestId('task-status').textContent).toBe('待授權');
+    expect(screen.getByTestId('task-reasons').textContent).toContain('需艾斯維爾在 UI 任務頁核准');
+
+    fireEvent.click(within(panel).getByRole('button', { name: '核准 v3' }));
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '確認核准' }));
+    await waitFor(() => expect(screen.getByTestId('task-status').textContent).toBe('可開工・已核准'));
+    expect(screen.getByTestId('task-live-note').textContent).toBe('快照尚未同步');
+    const reasons = screen.getByTestId('task-reasons');
+    expect(reasons.textContent).toContain('已由 艾斯維爾 核准');
+    expect(reasons.textContent).not.toContain('需艾斯維爾在 UI 任務頁核准（');
+    expect(screen.getByTestId('task-live-reason').textContent).toContain('快照尚未同步');
+    expect(reasons.classList.contains('lv-banner--info')).toBe(true);
+    // 沒有重讀快照：頁首的改變來自即時核准狀態
+    expect(callsTo('/v1/blob_get')).toHaveLength(1);
+  });
+
+  it('詳情：快照已同步核准（可開工＋approved）時直接顯示快照，說明為資訊而非阻擋', async () => {
+    const synced = change({
+      name: 'auth-one',
+      status: '可開工',
+      requires_authorization: true,
+      reasons: ['已由 艾斯維爾 核准（2026-10-08T12:00:00Z）'],
+      approved: { by: '艾斯維爾', at: '2026-10-08T12:00:00Z' },
+    });
+    const { api } = makeApi(
+      routes({ change: remoteChange(3), record: record(3) }, { '/v1/blob_get': () => json(blob([synced])) }),
+    );
+    renderWithApp(<Tasks params={[VAULT, 'auth-one']} />, api);
+    const panel = await screen.findByTestId('task-approval');
+    await waitFor(() => expect(within(panel).getByTestId('task-approval-state').textContent).toBe('已核准'));
+    expect(screen.getByTestId('task-status').textContent).toBe('可開工');
+    expect(screen.queryByTestId('task-live-note')).toBeNull();
+    const reasons = screen.getByTestId('task-reasons');
+    expect(reasons.classList.contains('lv-banner--info')).toBe(true);
+    expect(reasons.textContent).toContain('已由 艾斯維爾 核准');
+  });
+
   it('不需授權或已完成的 change 沒有核准區塊，也不讀核准狀態', async () => {
     const { api, callsTo } = makeApi({ '/v1/blob_get': () => json(blob(MIXED)) });
     renderWithApp(<Tasks params={[VAULT, 'ready-one']} />, api);

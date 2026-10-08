@@ -579,6 +579,8 @@ export interface TaskChange {
   /** 已封存且寫了總結 note 時的 note id */
   note_id: string | null;
   archived_at: string | null;
+  /** 服務端計算的快照才有：UI 核准有效（內容雜湊相符）時的核准人與時間，否則 null */
+  approved?: { by: string; at: string } | null;
 }
 
 export interface TaskSnapshot {

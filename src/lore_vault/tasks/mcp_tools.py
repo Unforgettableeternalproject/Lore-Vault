@@ -58,7 +58,6 @@ from .decisions import DECISION_ID
 from .workspace import (
     DEFAULT_DIR,
     SPACE_DEV,
-    STATUS_AUTH,
     STATUS_PENDING_APPLY,
     Workspace,
     default_meta,
@@ -100,7 +99,6 @@ PENDING_APPLY_NEXT_STEP = (
     "note 已寫入、服務端主 spec 鏡像已更新（已封存，待落地）；本機 specs/ 要等之後在"
     "有本機 repo 的機器以 stdio 殼同步（sync_specs）才會更新"
 )
-AUTH_REASON = "需艾斯維爾在 UI 任務頁核准後才能經 MCP archive"
 HTTP_INIT_NOTE = (
     "此裝置之後如需本機檔案，另在該機器以 stdio 殼執行 tasks(action='init')"
 )
@@ -261,13 +259,17 @@ def _content_view(change: rs.RemoteChange) -> dict[str, Any]:
     return view
 
 
-def _status(change: rs.RemoteChange, ws: rs.RemoteWorkspace) -> tuple[str, list[str]]:
+def _status(
+    change: rs.RemoteChange,
+    ws: rs.RemoteWorkspace,
+    auth: remote_ops.AuthState | None = None,
+) -> tuple[str, list[str]]:
+    """`auth`：`remote_ops.authorization_states` 給這個 change 的核准狀態
+    （None 視為未核准；剛建立的 change 不會有核准紀錄）。"""
     if change.state == rs.STATE_PENDING_APPLY:
         return STATUS_PENDING_APPLY, []
     status, reasons = derive_status(change, ws)
-    if status == STATUS_AUTH:
-        reasons = [AUTH_REASON]
-    return status, reasons
+    return remote_ops.apply_authorization(status, reasons, auth)
 
 
 def _str_list(value: Any, field: str) -> list[str]:
@@ -657,9 +659,10 @@ class TaskOps:
     async def _rows(self, target: Target) -> list[dict[str, Any]]:
         changes, archived = await target.store.list_changes()
         rws = await self._remote_workspace(target, changes, archived)
+        auth = await remote_ops.authorization_states(target.store, changes)
         rows = []
         for change in changes:
-            status, reasons = _status(change, rws)
+            status, reasons = _status(change, rws, auth.get(change.name))
             done, total = change.tasks_progress()
             rows.append(
                 {

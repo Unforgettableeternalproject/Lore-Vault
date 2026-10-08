@@ -93,6 +93,11 @@ def test_snapshot_fields_and_statuses(tasks_dir: TasksDir):
         {"name": "old", "archived": True},
     ]
     assert changes["auth"]["status"] == "待授權"
+    # 純本機（離線）模式：核准走 archive --authorized-by，與同步模式的 UI 文字分開
+    assert changes["auth"]["reasons"] == [
+        "需艾斯維爾授權（archive 須帶 --authorized-by）"
+    ]
+    assert "approved" not in changes["auth"]
     assert changes["auth"]["requires_authorization"] is True
     spec = changes["spec"]
     assert spec["specs"] == [

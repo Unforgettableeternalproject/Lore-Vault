@@ -124,6 +124,10 @@ function parseChange(raw: unknown, index: number): TaskChange | string {
   if (raw.requires_authorization !== undefined && typeof raw.requires_authorization !== 'boolean') {
     return `${at}（${name}）的 requires_authorization 格式不正確`;
   }
+  const approved = raw.approved ?? null;
+  if (approved !== null && !(isRecord(approved) && typeof approved.by === 'string' && typeof approved.at === 'string')) {
+    return `${at}（${name}）的 approved 格式不正確`;
+  }
   return {
     ...(raw as object),
     name,
@@ -138,6 +142,7 @@ function parseChange(raw: unknown, index: number): TaskChange | string {
     specs: specs as TaskChange['specs'],
     note_id: (raw.note_id as string | null | undefined) ?? null,
     archived_at: (raw.archived_at as string | null | undefined) ?? null,
+    approved: approved as TaskChange['approved'],
   };
 }
 
@@ -345,3 +350,25 @@ export function canApprove(change: RemoteChange | null): boolean {
 export async function approveChange(api: ApiClient, vault: string, name: string): Promise<void> {
   await api.post('/v1/tasks_authorize', { space: 'dev', vault, change: name });
 }
+
+// ── 即時核准覆蓋 ──
+// 快照只在任務層 CLI／MCP 推送時重算；UI 核准只寫授權紀錄、不會觸發推送。快照仍是「待授權」而服務端
+// 已核准目前內容時，徽章與狀態說明以即時結果為準，並註明快照尚未同步。只覆蓋呈現，不改篩選分組。
+
+/** 列表最多替幾個「待授權」的列查即時核准狀態（通常只有少數幾個；超過的維持快照狀態） */
+export const LIVE_APPROVAL_LIMIT = 20;
+
+export interface LiveApproval {
+  by: string;
+  at: string;
+}
+
+/** 快照為「待授權」而即時狀態已核准服務端目前內容（且仍在進行中、需授權）時回核准資訊，否則 null。 */
+export function liveApproval(change: Pick<TaskChange, 'status'>, info: ApprovalInfo | null | undefined): LiveApproval | null {
+  if (change.status !== STATUS_AUTH || !info || !info.record || approvalState(info) !== 'approved') return null;
+  if (!canApprove(info.change)) return null;
+  return { by: info.record.authorizedBy, at: info.record.authorizedAt };
+}
+
+/** 即時已核准時徽章顯示的文字 */
+export const LIVE_APPROVED_LABEL = `${STATUS_READY}・已核准`;

@@ -2,7 +2,8 @@
 // vault 與封存 note 也由真實服務建立。只有「服務錯誤」無法自然重現，以 page.route 攔截 blob_get 回 500。
 // 涵蓋：尚未同步（全部 vault 空清單、單一 vault 404 not_found）、混合四態列表與篩選、過時提示（以 page.clock
 // 把瀏覽器時間往後推）、格式錯誤的快照、封存 change 的 note 連結、服務錯誤、非 dev space 守門、鍵盤可達與深淺色 axe，
-// 以及需授權 change 的 UI 核准（MCP-T5）：核准前後服務端授權紀錄不同、edit 後過期、bearer 無法核准或偽造。
+// 以及需授權 change 的 UI 核准（MCP-T5）：核准前後服務端授權紀錄不同、edit 後過期、bearer 無法核准或偽造；
+// 快照仍是待授權時，列表與詳情的狀態徽章以即時核准結果為準（核准後立即反映、過期即撤回）。
 // 設 E2E_SCREENSHOT_DIR 時另存截圖供人工審查（不設就不存）。
 //
 // 側載是服務端共用狀態：第一個測試先斷言本 space 還沒有任何快照，之後的測試才寫入（workers=1、依檔案順序執行）。
@@ -378,6 +379,10 @@ test('核准：需授權 change 經 UI 核准前後授權紀錄不同，內容�
   const panel = page.getByTestId('task-approval');
   await expect(panel.getByTestId('task-approval-state')).toHaveText('尚未核准');
   await expect(panel.getByTestId('task-approval-version')).toContainText('v1');
+  // 頁首狀態來自快照（待授權）
+  const header = page.getByTestId('task-status');
+  await expect(header).toHaveText('待授權');
+  await expect(page.getByTestId('task-live-note')).toHaveCount(0);
   await shot(page, 'tasks-approve-pending');
 
   // 取消不寫入
@@ -398,7 +403,20 @@ test('核准：需授權 change 經 UI 核准前後授權紀錄不同，內容�
   await expect(panel.getByTestId('task-approval-state')).toHaveText('已核准');
   await expect(panel.getByTestId('task-approval-record')).toContainText(E2E_DISPLAY);
   await expect(panel.getByRole('button', { name: /核准/ })).toHaveCount(0);
+  // 快照只在 CLI／MCP 推送時重算：頁首立即改用即時核准狀態（不需重新整理），並註明快照尚未同步
+  await expect(header).toHaveText('可開工・已核准');
+  await expect(page.getByTestId('task-live-note')).toHaveText('快照尚未同步');
+  await expect(page.getByTestId('task-reasons')).toContainText(`已由 ${E2E_DISPLAY} 核准`);
   await shot(page, 'tasks-approve-approved');
+  // 重新整理後仍以即時結果為準（快照本身還是待授權）
+  await page.reload();
+  await expect(header).toHaveText('可開工・已核准');
+  // 列表：只有待授權的列查即時狀態，徽章同樣覆蓋；篩選分組仍依快照
+  await page.goto('/ui/tasks?status=auth');
+  const authRow = list(page).locator('li', { has: page.getByRole('link', { name: AUTH_CHANGE }) });
+  await expect(authRow.getByTestId('task-status')).toHaveText('可開工・已核准');
+  await expect(authRow.getByTestId('task-live-note')).toHaveText('快照尚未同步');
+  await page.goto(`/ui/tasks/${encodeURIComponent(REPO.key)}/${AUTH_CHANGE}`);
 
   // 核准後：紀錄對準目前版本 v1，授權人與 principal 由服務端依 UI 登入填（MCP archive 的授權檢查通過）
   const approved = await authorizationRecord(request);
@@ -422,6 +440,9 @@ test('核准：需授權 change 經 UI 核准前後授權紀錄不同，內容�
   await page.reload();
   await expect(panel.getByTestId('task-approval-state')).toHaveText('核准已過期');
   await expect(panel.getByTestId('task-approval-record')).toContainText('需要重新核准');
+  // 核准過期：不覆蓋，頁首回到快照的待授權
+  await expect(header).toHaveText('待授權');
+  await expect(page.getByTestId('task-live-note')).toHaveCount(0);
   expect((await authorizationRecord(request))?.change_version).toBe(1);
   await shot(page, 'tasks-approve-stale');
   const violations = await axeViolations(page, '任務詳情（核准已過期）');
@@ -430,6 +451,7 @@ test('核准：需授權 change 經 UI 核准前後授權紀錄不同，內容�
   await panel.getByRole('button', { name: '重新核准 v3' }).click();
   await dialog.getByRole('button', { name: '確認核准' }).click();
   await expect(panel.getByTestId('task-approval-state')).toHaveText('已核准');
+  await expect(header).toHaveText('可開工・已核准');
   const renewed = await authorizationRecord(request);
   expect(renewed?.change_version).toBe(3);
   expect(renewed?.content_digest).not.toBe(approved?.content_digest);
