@@ -82,8 +82,7 @@ def _section(text: str, names: tuple[str, ...]) -> str:
 
 
 def _read(change: Change, filename: str) -> str:
-    path = change.path / filename
-    return path.read_text(encoding="utf-8-sig") if path.is_file() else ""
+    return change.read_file(filename)
 
 
 def _goal(change: Change) -> str:
@@ -299,17 +298,7 @@ def archive_change(
         )
     authorized_by = (authorized_by or "").strip() or None
     # 1b. 未完成的 tasks：在任何寫入之前；續跑只認第一次留下的略過記錄
-    done, total = change.tasks_progress()
-    incomplete = total - done
-    if incomplete > 0:
-        if not allow_incomplete and "incomplete_at_archive" not in meta:
-            raise ArchiveError(
-                f"{name} 的 tasks.md 尚未完成（{done}/{total} 完成，"
-                f"未完成 {incomplete} 項），不可封存",
-                ["勾完 tasks.md，或確認要略過時帶 --allow-incomplete"],
-            )
-        # 只改記憶體中的 metadata，第一次 change.save() 時才落地
-        meta["incomplete_at_archive"] = incomplete
+    check_incomplete(change, allow_incomplete)
 
     # 2. 本機全驗
     resumed_merge = bool(meta.get("spec_applied"))
@@ -336,9 +325,7 @@ def archive_change(
 
     # 3. 服務：vault、鏈頭
     space = str(meta.get("space") or "dev")
-    notes: dict[str, str] = dict(meta.get("notes") or {})
     result = ArchiveResult(name=name, destination="", note_id="")
-    already = set(notes)
     try:
         client = client_factory()
         vault_key = _resolve_vault(client, ws, change, vault, space)
@@ -348,73 +335,21 @@ def archive_change(
             )
         meta["vault"] = vault_key
         result.vault = vault_key
-        pending = [it for it in _requirement_items(change) if it[0] not in notes]
-        current = _requirement_digests(change)
-        heads: dict[str, str | None] = {}
-        for key, *_ in list(pending):
-            existing, heads[key] = _lookup_requirement(
-                client, vault_key, space, key, name
-            )
-            if existing:
-                if _digest_mismatch(change, key, notes, current):
-                    raise _reject_changed(name, [key])
-                notes[key] = existing
-                meta["notes"] = dict(notes)
-                change.save()
-                result.skipped.append(key)
-        pending = [it for it in pending if it[0] not in notes]
-
-        # 4. 逐則寫入，每則立即回寫 metadata
-        for key, op, _cap, raw in pending:
-            _record_digest(change, key, current[key])
-            note_id = client.write(
-                vault_key,
-                space,
-                title=f"req:{key}",
-                body=_requirement_body(change, op, raw, authorized_by),
-                topics=[specs.change_topic(name), specs.requirement_topic(key)],
-                supersedes=heads[key],
-                author=author,
-            )
-            notes[key] = note_id
-            meta["notes"] = dict(notes)
-            change.save()
-            result.written.append(key)
-        result.skipped += [k for k, *_ in _requirement_items(change) if k in already]
-        if SUMMARY_KEY not in notes:
-            existing = _existing_summary(client, vault_key, space, name)
-            if existing:
-                if _digest_mismatch(change, SUMMARY_KEY, notes, current):
-                    raise _reject_changed(name, [SUMMARY_KEY])
-                notes[SUMMARY_KEY] = existing
-                meta["notes"] = dict(notes)
-        if SUMMARY_KEY not in notes:
-            req_notes = {k: notes[k] for k, *_ in _requirement_items(change)}
-            _record_digest(change, SUMMARY_KEY, _summary_digest(change, notes))
-            summary_id = client.write(
-                vault_key,
-                space,
-                title=f"變更 {name}：{_goal(change)}",
-                body=_summary_body(change, req_notes, authorized_by),
-                topics=[specs.change_topic(name)],
-                links=list(req_notes.values()),
-                author=author,
-            )
-            notes[SUMMARY_KEY] = summary_id
-            meta["notes"] = dict(notes)
-            result.written.append(SUMMARY_KEY)
-        else:
-            result.skipped.append(SUMMARY_KEY)
-        meta["note_id"] = notes[SUMMARY_KEY]
-        if authorized_by:
-            meta["authorized_by"] = authorized_by
-        change.save()
+        write_notes(
+            change,
+            client,
+            vault_key,
+            space,
+            authorized_by=authorized_by,
+            author=author,
+            result=result,
+        )
     except ServiceError as exc:
         change.save()
         raise ArchiveError(
             "Lore Vault 寫入失敗，change 留在原處（重跑會跳過已寫的 note）："
             + exc.detail,
-            [f"已寫入：{', '.join(notes) or '無'}"],
+            [f"已寫入：{', '.join(meta.get('notes') or {}) or '無'}"],
         ) from None
 
     # 5. 併主 spec → 搬目錄
@@ -443,6 +378,106 @@ def archive_change(
     result.destination = str(destination)
     result.note_id = str(meta["note_id"])
     return result
+
+
+def check_incomplete(change: Change, allow_incomplete: bool) -> None:
+    """tasks.md 有未勾選項目時拒絕；`allow_incomplete` 明確略過時把未完成數記進
+    記憶體中的 metadata（`incomplete_at_archive`，第一次 `change.save()` 才落地）。
+    續跑只認第一次留下的略過記錄。"""
+    done, total = change.tasks_progress()
+    incomplete = total - done
+    if incomplete > 0:
+        if not allow_incomplete and "incomplete_at_archive" not in change.meta:
+            raise ArchiveError(
+                f"{change.name} 的 tasks.md 尚未完成（{done}/{total} 完成，"
+                f"未完成 {incomplete} 項），不可封存",
+                ["勾完 tasks.md，或確認要略過時帶 --allow-incomplete"],
+            )
+        change.meta["incomplete_at_archive"] = incomplete
+
+
+def write_notes(
+    change: Change,
+    client: VaultClient,
+    vault_key: str,
+    space: str,
+    *,
+    authorized_by: str | None,
+    author: str,
+    result: ArchiveResult,
+) -> dict[str, str]:
+    """archive 第 3～4 步：查鏈頭、逐則寫 requirement note 與總結 note。
+
+    與檔案系統解耦：只經 `change.read_file`／`change.plans()`／`change.save()` 與
+    `client.list_topic`／`client.write` 讀寫，本機 CLI（`Change` 存 `.openspec.yaml`）
+    與服務端版本化內容（`remote_store.RemoteChange`，save 寫回版本化側載）共用。
+    每寫成一則立刻 `change.save()`（write-ahead 雜湊、`notes` 回寫）；失敗拋
+    `ServiceError`，已寫的項目都已記在 `change.meta["notes"]`，重跑會跳過。
+    呼叫前須已通過驗證與 `_check_written_digests`。回傳全部 note id。"""
+    meta = change.meta
+    name = change.name
+    notes: dict[str, str] = dict(meta.get("notes") or {})
+    already = set(notes)
+    pending = [it for it in _requirement_items(change) if it[0] not in notes]
+    current = _requirement_digests(change)
+    heads: dict[str, str | None] = {}
+    for key, *_ in list(pending):
+        existing, heads[key] = _lookup_requirement(client, vault_key, space, key, name)
+        if existing:
+            if _digest_mismatch(change, key, notes, current):
+                raise _reject_changed(name, [key])
+            notes[key] = existing
+            meta["notes"] = dict(notes)
+            change.save()
+            result.skipped.append(key)
+    pending = [it for it in pending if it[0] not in notes]
+
+    # 4. 逐則寫入，每則立即回寫 metadata
+    for key, op, _cap, raw in pending:
+        _record_digest(change, key, current[key])
+        note_id = client.write(
+            vault_key,
+            space,
+            title=f"req:{key}",
+            body=_requirement_body(change, op, raw, authorized_by),
+            topics=[specs.change_topic(name), specs.requirement_topic(key)],
+            supersedes=heads[key],
+            author=author,
+        )
+        notes[key] = note_id
+        meta["notes"] = dict(notes)
+        change.save()
+        result.written.append(key)
+    result.skipped += [k for k, *_ in _requirement_items(change) if k in already]
+    if SUMMARY_KEY not in notes:
+        existing = _existing_summary(client, vault_key, space, name)
+        if existing:
+            if _digest_mismatch(change, SUMMARY_KEY, notes, current):
+                raise _reject_changed(name, [SUMMARY_KEY])
+            notes[SUMMARY_KEY] = existing
+            meta["notes"] = dict(notes)
+    if SUMMARY_KEY not in notes:
+        req_notes = {k: notes[k] for k, *_ in _requirement_items(change)}
+        _record_digest(change, SUMMARY_KEY, _summary_digest(change, notes))
+        summary_id = client.write(
+            vault_key,
+            space,
+            title=f"變更 {name}：{_goal(change)}",
+            body=_summary_body(change, req_notes, authorized_by),
+            topics=[specs.change_topic(name)],
+            links=list(req_notes.values()),
+            author=author,
+        )
+        notes[SUMMARY_KEY] = summary_id
+        meta["notes"] = dict(notes)
+        result.written.append(SUMMARY_KEY)
+    else:
+        result.skipped.append(SUMMARY_KEY)
+    meta["note_id"] = notes[SUMMARY_KEY]
+    if authorized_by:
+        meta["authorized_by"] = authorized_by
+    change.save()
+    return notes
 
 
 SPEC_APPLYING_KEY = "spec_applying"

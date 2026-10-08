@@ -110,6 +110,9 @@ REMOTE_DIGEST_KEY = "remote_digest"
 SYNC_FIELDS = (REMOTE_VERSION_KEY, REMOTE_DIGEST_KEY)
 
 MIRROR_SOURCE_STDIO = "stdio"
+# archive 段一推進鏡像的 write-ahead（語意同本機的 spec_applying／spec_applied_caps）
+MIRROR_APPLYING_KEY = "mirror_applying"
+MIRROR_APPLIED_KEY = "mirror_applied_caps"
 PRINCIPAL_UI = "ui_session"
 INDEX_RETRIES = 5
 
@@ -734,6 +737,55 @@ async def all_indexes(post: Post) -> dict[str, dict[str, Any]]:
         except (StoreError, KeyError):
             continue
     return result
+
+
+class ThreadBridgeClient:
+    """給 worker thread 裡跑的同步 archive note 寫入（`archive.write_notes`）用：
+    介面同 `VaultClient.list_topic`／`write`，實際經 `anyio.from_thread.run` 回到事件
+    迴圈呼叫 `RemoteStore`（MCP 走 `Shell._send`，HTTP 模式是同迴圈 loopback，
+    不可直接用同步 client）。錯誤轉成 `hooks.service` 的例外，與 CLI 路徑一致。"""
+
+    def __init__(self, store: RemoteStore) -> None:
+        self.store = store
+
+    def _run(self, fn: Callable[..., Awaitable[Any]], *args: Any) -> Any:
+        import anyio.from_thread
+
+        from .vault_client import ServiceRejected, ServiceUnavailable
+
+        try:
+            return anyio.from_thread.run(fn, *args)
+        except RemoteUnreachable as exc:
+            raise ServiceUnavailable(exc.detail) from None
+        except RemoteError as exc:
+            raise ServiceRejected(exc.message, exc.status, exc.body) from None
+
+    def list_topic(self, vault: str, space: str, topic: str) -> list[dict[str, Any]]:
+        return self._run(self.store.list_topic, topic)
+
+    def write(
+        self,
+        vault: str,
+        space: str,
+        *,
+        title: str,
+        body: str,
+        topics: Any,
+        links: Any = (),
+        supersedes: str | None = None,
+        author: str | None = None,
+    ) -> str:
+        return self._run(
+            self.store.write_note,
+            {
+                "title": title,
+                "body": body,
+                "topics": list(topics),
+                "links": list(links),
+                "supersedes": supersedes,
+                "author": author,
+            },
+        )
 
 
 def vault_client_post(client: Any) -> Post:
