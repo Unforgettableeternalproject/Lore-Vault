@@ -519,3 +519,70 @@ export interface SettingError {
   code: string;
   message: string;
 }
+
+// ── 通用側載（POST /v1/blob_get；TASK_LAYER_UI §3）──
+
+/** `blob_get` 帶 `vault`：該 vault 存的一份內容；不存在回 404 `not_found` */
+export interface BlobRecord {
+  mime: string;
+  content_base64: string;
+  updated: string;
+}
+
+/** `blob_get` 省略 `vault`：本 space 內所有存過該 key 的 vault（可能是空陣列） */
+export interface BlobListResult {
+  items: (BlobRecord & { vault: string })[];
+}
+
+// ── 任務層快照（側載 key `tasks-snapshot` 的 JSON 內容）──
+// 這是 UI 端對任務層 CLI（UI-T2）推送內容的契約；CLI 序列化時以此為準。
+// 只含推導結果，不含 spec delta 全文、tasks.md 逐項文字（語料邊界，TASK_LAYER_UI §1.2）。
+
+/** 推導狀態：沿用任務層 `workspace.py` 的五個常數字串 */
+export type TaskStatus = '可開工' | '被擋住' | '待授權' | '已完成' | '無法判定';
+
+export interface TaskBlocker {
+  /** D 編號，例如 `D6` */
+  id: string;
+  /** true＝已裁決、false＝未裁決、null＝無法判定（DECISIONS.md 找不到或沒有此小節） */
+  resolved: boolean | null;
+}
+
+export interface TaskDependency {
+  /** 依賴的 change 名稱 */
+  name: string;
+  archived: boolean;
+}
+
+export interface TaskSpecDelta {
+  capability: string;
+  requirement: string;
+  op: 'ADDED' | 'MODIFIED' | 'REMOVED' | string;
+}
+
+export interface TaskChange {
+  name: string;
+  status: TaskStatus | string;
+  /** derive_status 回的原因（被擋住／無法判定／待授權的說明） */
+  reasons: string[];
+  blocked_by: TaskBlocker[];
+  depends_on: TaskDependency[];
+  requires_authorization: boolean;
+  tasks: { done: number; total: number };
+  /** 對應 TASKS.md 卡號，無則 null */
+  source: string | null;
+  /** proposal.md 的「Why」摘要段（簡單 Markdown） */
+  why: string | null;
+  specs: TaskSpecDelta[];
+  /** 已封存且寫了總結 note 時的 note id */
+  note_id: string | null;
+  archived_at: string | null;
+}
+
+export interface TaskSnapshot {
+  /** 快照格式版本，目前為 1 */
+  schema: number;
+  /** CLI 產生快照的時間（ISO）；同步時間以側載 `updated` 為準 */
+  generated_at?: string;
+  changes: TaskChange[];
+}

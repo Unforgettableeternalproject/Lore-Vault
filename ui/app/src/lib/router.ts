@@ -7,6 +7,7 @@ export const SCREENS = [
   { id: 'notes', glyph: '¶', label: '筆記' },
   { id: 'docs', glyph: '▤', label: '文件' },
   { id: 'memory', glyph: '✦', label: '記憶層' },
+  { id: 'tasks', glyph: '◇', label: '任務' },
   { id: 'vaults', glyph: '▦', label: 'Vault' },
   { id: 'maint', glyph: '↻', label: '維護' },
   { id: 'health', glyph: '✓', label: '系統健康' },

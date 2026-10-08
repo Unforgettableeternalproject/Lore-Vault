@@ -1266,3 +1266,35 @@ details.lv-check > .lv-check__head { cursor: pointer; }
   .lv-filter-panel { padding: 14px; }
   .lv-search__input { font-size: 16px; }
 }
+
+/* ── 任務層（screens/Tasks）──────────────────────────────
+   狀態徽章：可開工＝成功色、待授權＝金色實心（與「被擋住／可能已過時」的金色描邊區分）、無法判定＝錯誤色。
+   設計系統的警示色就是金色、沒有橘色 token，所以被擋住與過時提示沿用 warn。 */
+.lv-badge--ready {
+  color: var(--lv-success-text); border-color: color-mix(in srgb, var(--status-success) 55%, transparent);
+  background: color-mix(in srgb, var(--status-success) 8%, transparent);
+}
+.lv-badge--auth {
+  color: var(--ink-title); font-weight: 600; border-color: var(--uep-gold);
+  background: color-mix(in srgb, var(--uep-gold) 24%, transparent);
+}
+.lv-badge--error {
+  color: var(--lv-error-text); border-color: color-mix(in srgb, var(--status-error) 60%, transparent);
+  background: color-mix(in srgb, var(--status-error) 8%, transparent);
+}
+.lv-tasks { list-style: none; margin: 12px 0 0; padding: 0; }
+.lv-task { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; padding: 14px 4px; border-bottom: 1px solid var(--line); }
+.lv-task__main { min-width: 0; }
+.lv-task__name { font-family: var(--font-mono); font-size: 15px; color: var(--ink-title); overflow-wrap: anywhere; text-decoration: none; }
+.lv-task__name:hover { color: var(--lv-zone-text); text-decoration: underline; }
+.lv-task-progress { display: inline-flex; gap: 8px; align-items: center; }
+.lv-progress { width: 96px; height: 6px; accent-color: var(--uep-gold); }
+.lv-task-syncs { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.lv-task-sync { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: var(--lv-fs-meta); font-family: var(--font-mono); color: var(--ink-soft); }
+.lv-task-sync .lv-banner { flex-basis: 100%; margin: 4px 0 0; }
+.lv-task-section { margin-top: 28px; }
+.lv-task-specs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.lv-task-spec { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: var(--lv-fs-body); overflow-wrap: anywhere; min-width: 0; }
+@media (max-width: 760px) {
+  .lv-task { grid-template-columns: minmax(0, 1fr); }
+}

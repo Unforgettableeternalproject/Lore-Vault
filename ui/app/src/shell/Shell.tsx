@@ -1,5 +1,5 @@
 // App Shell：頂列（品牌、space 切換、連線狀態、降級徽章、深淺色、登出）＋
-// 側欄（8 項導覽、目前 space 的 vault 列表篩選、目前寫入位置）＋ 主內容（依路由切換畫面）。
+// 側欄（9 項導覽、目前 space 的 vault 列表篩選、目前寫入位置）＋ 主內容（依路由切換畫面）。
 // 窄螢幕（≤760px，T-86）側欄收合成抽屜：頂列的選單鈕開關，深淺色／快捷鍵／登出移進抽屜底部。
 // 全站快捷鍵（T-87）見 lib/shortcuts.ts；`?` 開說明面板。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
@@ -24,6 +24,7 @@ import { NoteNew } from '../screens/NoteNew';
 import { Notes } from '../screens/Notes';
 import { Search, SEARCH_INPUT_ID } from '../screens/Search';
 import { Settings } from '../screens/Settings';
+import { Tasks } from '../screens/Tasks';
 import { Vaults } from '../screens/Vaults';
 import { SpaceSwitcher } from './SpaceSwitcher';
 
@@ -535,6 +536,8 @@ function ScreenView({
       return <Health />;
     case 'memory':
       return <Memory key={spaceKey} />;
+    case 'tasks':
+      return <Tasks key={`${spaceKey}:${params.join('/')}`} params={params} />;
     case 'settings':
       return <Settings onLogout={onLogout} />;
   }
