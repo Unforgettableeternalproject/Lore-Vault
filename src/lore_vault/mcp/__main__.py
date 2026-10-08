@@ -32,6 +32,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     # httpx2 的 INFO 會逐筆記請求；只留警告
     logging.getLogger("httpx2").setLevel(logging.WARNING)
 
+    from . import task_plugin
     from .server import Shell, build_server
     from .settings import load_shell_settings
 
@@ -40,7 +41,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ConfigError as exc:
         print(f"設定錯誤：{exc}", file=sys.stderr)
         return 2
-    build_server(Shell(settings)).run("stdio")
+    shell = Shell(settings)
+    server = build_server(shell)
+    task_plugin.register(server, shell)
+    server.run("stdio")
     return 0
 
 

@@ -352,7 +352,11 @@ def snapshot_shape(ctx: DoctorContext) -> CheckResult:
 def default_registry() -> Registry:
     registry = Registry()
     for name, func, description in (
-        ("tasks.isolation", isolation, "核心（tasks/ 以外）零 import 任務層"),
+        (
+            "tasks.isolation",
+            isolation,
+            "核心（tasks/ 與 mcp/task_plugin.py 以外）零 import 任務層",
+        ),
         (
             "tasks.archive_note_agreement",
             archive_note_agreement,

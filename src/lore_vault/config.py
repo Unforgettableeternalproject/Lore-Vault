@@ -189,6 +189,9 @@ class McpConfig:
     # HTTP 端點（/mcp）的 `download` 以 base64 回傳原始檔的大小上限（位元組）。
     # 內容會進 agent 的上下文，刻意設小；超過時請改用 stdio 殼（寫本機檔）或 UI
     http_download_max_bytes: int = 1024 * 1024
+    # 是否把任務層工具（`mcp/task_plugin.py`）掛上 stdio 殼與 HTTP 端點；
+    # 關閉時只有核心工具。與任務層遠端同步的寫入開關是兩回事
+    tasks_enabled: bool = True
 
 
 @dataclass(frozen=True)

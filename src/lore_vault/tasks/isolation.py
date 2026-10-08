@@ -1,13 +1,17 @@
 """核心零 import 任務層的機械保證（純標準庫 AST 掃描，不實際 import 任何模組）。
 
-掃描 `lore_vault/` 底下除了 `tasks/` 以外的全部 .py，凡指向 `lore_vault.tasks` 的
-import 都算違規，包括：
+掃描 `lore_vault/` 底下除了 `tasks/` 與具名例外檔案以外的全部 .py，凡指向
+`lore_vault.tasks` 的 import 都算違規，包括：
 - `import lore_vault.tasks`、`from lore_vault.tasks import x`、
   `from lore_vault import tasks`
 - 相對 import：`from . import tasks`（在 `lore_vault/__init__.py`）、
   `from ..tasks import x`
 - 以字串動態 import：`__import__("lore_vault.tasks")`、
   `import_module("lore_vault.tasks")`
+
+具名例外只有 `mcp/task_plugin.py`（把任務層工具掛上 MCP server 的組合層，
+TASK_LAYER_MCP §2）：以相對路徑的 parts 逐段比對單一檔案，不用 glob、不看目錄前綴，
+組合邏輯只能收斂在這一個檔案。
 
 `tests/test_tasks_isolation.py` 與 doctor `tasks.isolation` 共用這裡。
 """
@@ -22,6 +26,9 @@ PACKAGE = "lore_vault"
 TASKS = "tasks"
 DEFAULT_PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 _DYNAMIC = {"__import__", "import_module"}
+# 唯一允許 import 任務層的核心檔案（相對於 `lore_vault/` 的路徑 parts）；
+# 原則上不再增加；要增加前先讀 TASK_LAYER_MCP §2
+CORE_EXEMPT_FILES: tuple[tuple[str, ...], ...] = (("mcp", "task_plugin.py"),)
 
 
 @dataclass(frozen=True)
@@ -104,7 +111,8 @@ def scan_file(path: Path, package_root: Path) -> list[Violation]:
 
 
 def check_core_isolation(package_root: Path = DEFAULT_PACKAGE_ROOT) -> IsolationReport:
-    """`package_root` 是 `lore_vault` 套件目錄；排除其下的 `tasks/`。"""
+    """`package_root` 是 `lore_vault` 套件目錄；排除其下的 `tasks/` 與
+    `CORE_EXEMPT_FILES`（呼叫時才讀，測試可暫時清空以證明例外是唯一豁免來源）。"""
     report = IsolationReport()
     tasks_dir = package_root / TASKS
     if not package_root.is_dir():
@@ -112,6 +120,8 @@ def check_core_isolation(package_root: Path = DEFAULT_PACKAGE_ROOT) -> Isolation
         return report
     for path in sorted(package_root.rglob("*.py")):
         if tasks_dir in path.parents:
+            continue
+        if path.relative_to(package_root).parts in CORE_EXEMPT_FILES:
             continue
         report.scanned.append(path)
         try:

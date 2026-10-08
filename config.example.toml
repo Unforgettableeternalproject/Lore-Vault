@@ -111,6 +111,8 @@ snapshot_max_age_hours = 24.0
 # 服務內建 HTTP MCP（/mcp）的 download 以 base64 回傳原始檔的上限（位元組）；
 # 內容會進 agent 上下文，超過時改用 stdio 殼或 UI 下載
 http_download_max_bytes = 1048576
+# 是否把任務層工具掛上 stdio 殼與 HTTP 端點（mcp/task_plugin.py）；關閉時只有核心工具
+tasks_enabled = true
 # ask 工具的請求逾時（秒）：涵蓋服務端檢索 + 模型呼叫，要比 ask.timeout 長
 ask_timeout = 90.0
 

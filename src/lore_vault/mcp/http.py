@@ -29,6 +29,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.types import Receive, Scope, Send
 
+from . import task_plugin
 from .server import FORWARD_HEADERS, MODE_HTTP, Shell, build_server, forwarded_headers
 from .settings import ShellSettings
 
@@ -129,6 +130,7 @@ def build_http_server(app: object, settings: ApiSettings) -> MCPServer:
         ask_timeout=config.mcp.ask_timeout,
         # download 以 base64 回傳（進 agent 上下文），上限另設、刻意較小
         download_max_bytes=config.mcp.http_download_max_bytes,
+        tasks_enabled=config.mcp.tasks_enabled,
     )
     shell = Shell(
         shell_settings,
@@ -138,7 +140,9 @@ def build_http_server(app: object, settings: ApiSettings) -> MCPServer:
         # 上限可由設定頁調整（D13）：每次 download 讀服務的執行期有效值
         download_limit=lambda: _runtime_download_limit(app, config),
     )
-    return build_server(shell)
+    server = build_server(shell)
+    task_plugin.register(server, shell)
+    return server
 
 
 def build_http_endpoint(app: object, settings: ApiSettings) -> McpEndpoint:
