@@ -168,8 +168,9 @@ def calibrate_env(tmp_path, monkeypatch):
         if "--ingest" in args:
             verdicts = json.loads(
                 (tmp_path / "verdicts_auto" / "verdicts-00.json").read_text(encoding="utf-8"))
-            # 同 calibrate.ingest：只認對得上 concept id 的判定
-            env["ingested"] = [v["id"] for v in verdicts if v.get("id") in ALL_IDS]
+            # 同 calibrate.ingest：只認對得上 concept id、判定合法的記錄
+            env["ingested"] = [v["id"] for v in verdicts if v.get("id") in ALL_IDS
+                               and v.get("verdict") in pipeline.VERDICT_SCORES]
             return True, f"[calibrate] 更新 {len(env['ingested'])} 條 → x"
         return True, ""
 
@@ -190,7 +191,7 @@ def calibrate_env(tmp_path, monkeypatch):
             (tmp_path / "probe_out_auto" / "answers-00.json").read_text(encoding="utf-8"))
         answered = [a["id"] for a in answers if a["id"] in ids]
         env["judged"] = (env["judged"] or []) + answered
-        return True, json.dumps([{"id": i, "verdict": "KNEW"} for i in answered])
+        return True, json.dumps([{"id": i, "verdict": "SILENT"} for i in answered])
 
     monkeypatch.setattr(pipeline, "run_tool", fake_run_tool)
     monkeypatch.setattr(pipeline, "adjudicate", fake_adjudicate)
@@ -237,13 +238,45 @@ def test_calibrate_judge_splits_an_empty_reply(calibrate_env, capsys):
 
 def test_calibrate_judge_with_rewritten_ids_names_both_sides(calibrate_env):
     """模型改寫 id 時拆批救不回來，但訊息要帶出兩邊的 id 樣本，一眼看得出是格式問題。"""
-    rewritten = (True, json.dumps([{"id": "C000", "verdict": "KNEW"}]))
+    rewritten = (True, json.dumps([{"id": "C000", "verdict": "SILENT"}]))
     for span in [("c-000", "c-003"), ("c-000", "c-001"), ("c-002", "c-003")]:
         calibrate_env["judge_fail"][span] = rewritten
     ok, summary = _calibrate()
     assert not ok and "判卷失敗" in summary
     assert "C000" in summary and "c-000" in summary
     assert len(calibrate_env["judge_calls"]) == 3
+
+
+def test_calibrate_answer_records_without_answer_count_as_missing(calibrate_env, capsys):
+    """受測回 `[{"id": "c-001"}]`：id 對上卻沒有 answer，不能算成功，要進拆批重試。
+    拿掉欄位驗收，這條會在判卷前就以「沒有待處理的題目」紅掉。"""
+    calibrate_env["fail"][("c-000", "c-003")] = (True, json.dumps([{"id": "c-001"}]))
+    ok, summary = _calibrate()
+    assert ok, summary
+    assert calibrate_env["calls"] == ["c-000..c-003", "c-000..c-001", "c-002..c-003"]
+    assert calibrate_env["ingested"] == sorted(ALL_IDS)
+    err = capsys.readouterr().err
+    assert pipeline.EMPTY_RESULT_REASON in err and "1 筆 id 對上但欄位無效" in err
+
+
+def test_calibrate_blank_answers_fail_with_a_diagnosable_reason(calibrate_env):
+    blank = (True, json.dumps([{"id": "c-000", "answer": "  "}]))
+    for span in [("c-000", "c-003"), ("c-000", "c-001"), ("c-002", "c-003")]:
+        calibrate_env["fail"][span] = blank
+    ok, summary = _calibrate()
+    assert not ok and "受測失敗" in summary and "拆批重試後仍全部失敗" in summary
+    assert calibrate_env["judge_calls"] == []
+
+
+def test_calibrate_judge_with_illegal_verdicts_splits(calibrate_env, capsys):
+    """判卷 verdict 不是合法判定（ingest 會全部略過）時視同缺漏，對半重試一次。"""
+    illegal = (True, json.dumps([{"id": f"c-{i:03d}", "verdict": "KNEW"} for i in range(4)]))
+    calibrate_env["judge_fail"][("c-000", "c-003")] = illegal
+    ok, summary = _calibrate()
+    assert ok, summary
+    assert calibrate_env["judge_calls"] == ["c-000..c-003", "c-000..c-001", "c-002..c-003"]
+    assert calibrate_env["ingested"] == sorted(ALL_IDS)
+    assert "4 筆 id 對上但欄位無效" in capsys.readouterr().err
 
 
 def test_calibrate_judge_skips_the_half_without_answers(calibrate_env, capsys):

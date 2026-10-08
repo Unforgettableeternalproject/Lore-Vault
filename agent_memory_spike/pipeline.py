@@ -77,6 +77,7 @@ from paths import CLIENT_ENV_PATH, CONCEPT_PATH  # noqa: E402
 from paths import EPISODE_CACHE_DIR  # noqa: E402
 
 import episode_source as ep_source  # noqa: E402
+from calibrate import VERDICT_SCORES  # noqa: E402
 
 # 鎖過期時間。程序被 kill 掉時鎖不會被清掉，沒有這個機制管線會永遠停擺；
 # 訂在 6 小時是因為單輪最慢的階段（校準）實測也遠短於此
@@ -499,10 +500,29 @@ def judge_prompt(start: int, end: int, answer_dir: Path) -> str:
     )
 
 
-# 回覆是合法 JSON、卻沒有任何一筆對上這批的 id。10/07 實例：受測回了 `[]`，
+# 回覆是合法 JSON、卻沒有任何一筆對上這批的 id（或對上了但欄位無效）。10/07 實例：受測回了 `[]`，
 # 判卷材料因此一題都沒有、判卷也回 `[]`，直到 ingest 才以「一條都沒對上」浮現。
 # 拆批重試認得這個前綴，改字要一起改
 EMPTY_RESULT_REASON = "回覆的 JSON 沒有任何一筆對上這批的 id"
+
+
+def _answer_usable(item: dict[str, Any]) -> bool:
+    """受測記錄要有非空字串 answer（show_judge 只判有作答的題目）。"""
+    answer = item.get("answer")
+    return isinstance(answer, str) and bool(answer.strip())
+
+
+def _verdict_usable(item: dict[str, Any]) -> bool:
+    """判卷記錄的 verdict 要是 calibrate.ingest 認得的判定，否則 ingest 會略過。"""
+    return item.get("verdict") in VERDICT_SCORES
+
+
+# 依 label 驗收每筆記錄的欄位；只有 id 沒有內容的記錄視同缺漏，
+# 否則 `[{"id": "c-001"}]` 會被當成功、拆批重試永遠不會發生
+ITEM_CHECKS: dict[str, Callable[[dict[str, Any]], bool]] = {
+    "受測": _answer_usable,
+    "判卷": _verdict_usable,
+}
 
 
 def _split_retryable(reason: str) -> bool:
@@ -540,7 +560,9 @@ def _answered_ids(path: Path) -> set[str]:
 
 def _adjudicate_checked(label: str, prompt: str, path: Path,
                         expected: set[str]) -> tuple[list[Any] | None, str]:
-    """裁決一批並驗收：要是逐題陣列，且至少一筆 id 落在這批的預期 id 裡。"""
+    """裁決一批並驗收：要是逐題陣列，且至少一筆 id 落在這批的預期 id 裡、欄位有效
+    （受測要有非空 answer，判卷 verdict 要合法，見 ITEM_CHECKS）。"""
+    usable = ITEM_CHECKS[label]
     ok, reply = adjudicate_to_file(prompt, path)
     if not ok:
         return None, reply
@@ -551,9 +573,12 @@ def _adjudicate_checked(label: str, prompt: str, path: Path,
     if items is None:
         return None, f"{label}回覆不是 [{{id, ...}}] 陣列"
     got = [x.get("id") for x in items if isinstance(x, dict)]
-    if not any(i in expected for i in got):
-        # 帶出兩邊的 id 樣本：分辨「空陣列」與「模型改寫了 id」
-        return None, (f"{EMPTY_RESULT_REASON}（收到 {len(items)} 筆，id 例 {got[:3]}；"
+    matched = [x for x in items if isinstance(x, dict) and x.get("id") in expected]
+    if not any(usable(x) for x in matched):
+        # 帶出兩邊的 id 樣本：分辨「空陣列」與「模型改寫了 id」；
+        # id 對上但欄位無效的筆數另外標明
+        invalid = f"，其中 {len(matched)} 筆 id 對上但欄位無效" if matched else ""
+        return None, (f"{EMPTY_RESULT_REASON}（收到 {len(items)} 筆{invalid}，id 例 {got[:3]}；"
                       f"預期 {len(expected)} 題，例 {sorted(expected)[:3]}）")
     return items, reply
 
