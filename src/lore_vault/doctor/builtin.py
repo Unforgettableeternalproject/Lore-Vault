@@ -15,6 +15,7 @@ from lore_vault.storage import imports as storage_imports
 from lore_vault.storage import ingest_checks as storage_ingest
 from lore_vault.storage import manage as storage_manage
 from lore_vault.storage import settings_store as storage_settings
+from lore_vault.storage import sidecar as storage_sidecar
 from lore_vault.storage import ui_login as storage_ui_login
 
 from .backup_check import backup_recent
@@ -217,6 +218,14 @@ def space_key_prefix_agreement(ctx: DoctorContext) -> CheckResult:
 
 def vaults_alias_integrity(ctx: DoctorContext) -> CheckResult:
     return _to_result(storage_manage.alias_integrity(ctx.require("db")))
+
+
+def sidecar_orphans(ctx: DoctorContext) -> CheckResult:
+    """側載列（schema v17）指向現存且 space 相符的 vault；v17 前的庫為 skipped。"""
+    db = ctx.require("db")
+    if not storage_sidecar.has_table(db):
+        raise CheckSkipped("資料庫尚無側載表（資料庫版本較舊，尚未遷移）")
+    return _to_result(storage_sidecar.orphans(db))
 
 
 def tombstones_disjoint(ctx: DoctorContext) -> CheckResult:
@@ -523,6 +532,14 @@ def default_registry() -> Registry:
             "vaults",
             vaults_alias_integrity,
             "別名不等於任何 vault 的正式 key，且指向現存 vault",
+        )
+    )
+    registry.add(
+        Check(
+            "sidecar.orphans",
+            "sidecar",
+            sidecar_orphans,
+            "側載列指向現存 vault 且 space 相符（vault 刪除／換 space 須同交易處理）",
         )
     )
     registry.add(

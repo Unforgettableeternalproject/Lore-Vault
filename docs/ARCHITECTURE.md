@@ -125,9 +125,13 @@ side-car 紀錄：`{session_id, prompt_id, injected: [concept_id]}`，不含原�
 "value": …, "part"?: n}`。chunk 有獨立的 FTS（CJK bigram）與向量（bge-m3）索引，只收可索引文件
 （ready、未被取代）。
 
+### 側載（sidecar，schema v17）
+
+不屬於知識內容的小型機器狀態（例如任務層推送的進行中 change 快照），`(vault, key)` 單列覆寫、上限 64KB，不檢索、不進快照、隨 vault 刪除與換 space 一併處理。端點與對帳見下方「側載小型機器狀態」。目前 schema 版本為 v17（`storage.migrate.SCHEMA_VERSION`）。
+
 ## MCP 介面（草案）
 
-HTTP 契約為 `POST /v1/<工具名>` + JSON body，另有 `POST /v1/vaults` 建 vault（write 不自動建）；所有 `/v1` 需認證（bearer token，或 UI session cookie ＋ `X-Lore-Vault-UI: 1`，見下方「UI 認證」），`GET /healthz` 公開。`GET /v1/snapshot` 提供降級用唯讀快照（只含 vaults（含 `space`）、notes、FTS，不含向量與 episode／concept／injection，**明確排除文件**（T-69）；整庫不分 space，由殼端依目前 space 過濾）。
+HTTP 契約為 `POST /v1/<工具名>` + JSON body，另有 `POST /v1/vaults` 建 vault（write 不自動建）；所有 `/v1` 需認證（bearer token，或 UI session cookie ＋ `X-Lore-Vault-UI: 1`，見下方「UI 認證」），`GET /healthz` 公開。`GET /v1/snapshot` 提供降級用唯讀快照（只含 vaults（含 `space`）、notes、FTS，不含向量與 episode／concept／injection，**明確排除文件**（T-69）與側載表 `sidecar_blobs`（schema v17）；整庫不分 space，由殼端依目前 space 過濾）。
 
 **文件上傳**（T-67）：`POST /v1/documents` 是唯一的 multipart 端點，欄位 `file`、`vault`、`space`（必填）、`filename?`、`mime?`（未知欄位 400）。大小在讀取 body 時就擋（413 `too_large`，單檔上限 `documents.max_file_bytes`，預設 25MB）；格式不支援 400 `unsupported_format`；服務未設 `documents.blob_dir` 500 `documents_not_configured`。回應 `{document_id, status, sha256, duplicate, retried, vault, space, filename, version, supersedes, size_bytes}`：新列或重試 201、`duplicate: true` 200。抽取在服務程序內的背景 worker，回應時 status 多為 `pending`。重複上傳（同 vault）：同內容且現行 → 回既有（不重新排隊）；同內容只有 failed → 沿用該列重跑（`retried: true`）；同檔名不同內容 → 新版本（`supersedes`）。
 
@@ -160,6 +164,15 @@ spike 接入端點（階段 8，同樣需 bearer；每筆 body 項目 = schema d
 
 **文件下載**：`POST /v1/document_download`，body `{space, vault, id, max_bytes?}`（未知欄位 422），是唯一回二進位的端點。範圍同 `get`：文件不在該 vault／space（含墓碑中的文件）一律 404 `not_found`，`vault="*"` 為目前 space 全部。成功回上傳時的原始位元組：`Content-Type` 為上傳時的 mime、`Content-Disposition: attachment`（ASCII 後備檔名＋RFC 5987 `filename*=UTF-8''…`）、`X-Lore-Vault-Sha256`、`X-Lore-Vault-Document-Id`、`Cache-Control: no-store`。`max_bytes` 給了而文件較大 → 413 `too_large`（依 metadata 判斷，不讀 blob）。讀 blob 時驗 sha256：遺失 500 `blob_missing`、雜湊不符 500 `blob_corrupt`（不回可能損毀的內容）；未設 `blob_dir` 500 `documents_not_configured`。bearer 與 UI session（cookie＋`X-Lore-Vault-UI`）皆可，由同一個中介層處理。不另加 doctor 檢查：這是唯讀資料流，blob 存在與雜湊已由 `documents.blob_exists` 對帳、讀取時再驗一次。
 
+**側載小型機器狀態**（schema v17，D15「UI 已裁決」(a′)，`lore_vault.storage.sidecar`）：通用、**不進任何檢索或快照路徑**的 `(vault, key) → (mime, bytes, updated)`，單列覆寫（put 即取代，不留版本、不留墓碑；真相來源在推送端，遺失可由下一次推送重建）。核心不認識使用者：任務層把進行中 change 的推導狀態以 key `tasks-snapshot` 推上來，給 UI 任務畫面讀。不寫 FTS、不算 embedding、不進 `recall`／`ask`／`list`／`get`，`GET /v1/snapshot` 的排除清單含 `sidecar_blobs`；**不提供 MCP 工具**。bearer 與 UI session（cookie＋`X-Lore-Vault-UI`）皆可，未知欄位 422。
+
+| 端點 | 請求 | 回應 | 錯誤 |
+|---|---|---|---|
+| `blob_put` | `{space, vault, key, mime?, content_base64}`（vault 可用別名，存正式 key；`mime` 預設 `application/octet-stream`） | `{updated}` | 400 `space_required`／`vault_required`（缺 vault 或 `*`）／`invalid_key`（key 不是 1–128 個英數與 `. _ -`、英數開頭，即含路徑分隔字元）／`invalid_request`（base64 不合法、mime 不是 `type/subtype`）；404 `unknown_vault`（不存在或在別的 space）；413 `too_large`（解碼後超過 64KB，不截斷） |
+| `blob_get` | `{space, vault?, key}` | 給了 `vault`：`{vault, key, mime, content_base64, updated}`；省略 `vault`（或 `*`）：`{items: [同左]}`＝本 space 內所有存過該 key 的 vault，依 vault key 排序，可能為空陣列 | 404 `not_found`（該 vault 沒有這個 key）、`unknown_vault`；400 `invalid_key` |
+
+表 `sidecar_blobs` 刻意無外鍵（同墓碑），欄名用 `vault` 讓換 space 的動態偵測自動涵蓋；另存冗餘的 `space` 欄。`vault_delete` 的規劃 `counts.sidecar_blobs` 列出筆數（綁進確認 token，不要求 force），執行時同一交易內刪除並以資料實況核對；`vault_move_space` 的 `counts` 多 `sidecar_blobs.vault`／`sidecar_blobs.space` 兩項，同一交易內改 key 與 space。doctor `sidecar.orphans`（分類 `sidecar`）：有列指向不存在的 vault、或 `space` 與該 vault 不符為 fail；v17 前的庫為 skipped。
+
 **執行期設定**（D13，`lore_vault.api.settings_admin`；白名單與驗證在 `lore_vault.runtime_settings`、儲存與稽核在 `storage.settings_store`，schema v15）。設定檔／環境變數是「預設值」，DB 的 `settings_overrides` 覆寫其上；讀取端一律經 `AppState.runtime.current()`（程序內快取，設定 API 寫入後立即失效；依據 A9 單一寫入程序，doctor CLI 等其他程序直接讀 DB）。**只允許 UI session**：bearer 請求一律 403 `ui_session_required`（在 body 驗證之前檢查）——bearer 由所有 agent／hook 共用，`/mcp` 也以 bearer 轉發 `/v1`，開放 bearer 等於任何 agent 都能翻隱私開關；其他管理端點開放 bearer 是因為有兩段式確認或墓碑可還原，設定沒有這層保護。
 
 | 端點 | body | 回應 |
@@ -186,7 +199,7 @@ spike 接入端點（階段 8，同樣需 bearer；每筆 body 項目 = schema d
 
 刻意不收：token／密碼／OpenAI key、資料庫與 blob 路徑、模型與 base_url（用戶端啟動時建立）、worker 參數與 session 期限（啟動時建構）、`documents.max_file_bytes`（MCP 請求大小上限在啟動時決定）等需重啟或涉及密鑰的項目。DB 裡不合法的覆寫（手動改 DB、白名單移除的鍵）執行期略過、改用預設值，不讓服務起不來；doctor `settings.overrides` 為 fail。
 
-**UI 管理端點**（T-70～T-75，`lore_vault.api.manage`）。其中 `note_delete`／`document_delete`／`note_undelete`／`document_undelete` 另由 MCP 的 `delete`／`undelete` 工具原樣轉呼叫（殼不另寫刪除邏輯）；其餘（含 `vault_delete`、`vault_move_space`）不提供 MCP 工具。同 `/v1` 慣例：POST、bearer、未知欄位 422、body 必帶 `space`（缺 400 `space_required`）；vault 在別的 space 與不存在相同（404 `unknown_vault`），墓碑在別的 space 與不存在相同（404 `not_found`），錯誤訊息不帶出別 space 的 key。
+**UI 管理端點**（T-70～T-75，`lore_vault.api.manage`）。其中 `note_delete`／`document_delete`／`note_undelete`／`document_undelete` 另由 MCP 的 `delete`／`undelete` 工具原樣轉呼叫（殼不另寫刪除邏輯）；其餘（含 `vault_delete`、`vault_move_space`）不提供 MCP 工具（`blob_put`／`blob_get` 同樣不提供，見上方「側載小型機器狀態」）。同 `/v1` 慣例：POST、bearer、未知欄位 422、body 必帶 `space`（缺 400 `space_required`）；vault 在別的 space 與不存在相同（404 `unknown_vault`），墓碑在別的 space 與不存在相同（404 `not_found`），錯誤訊息不帶出別 space 的 key。
 
 `VaultSummary`：`{key, display, kind, space, origin (manual／episode／pipeline), aliases, note_count, document_count, created, last_updated}`（`last_updated`＝note／文件最大的 `updated`，都沒有為 null）。
 

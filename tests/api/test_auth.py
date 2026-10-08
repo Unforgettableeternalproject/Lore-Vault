@@ -140,6 +140,9 @@ def test_openapi_is_served_behind_auth(anon):
         "/v1/settings",
         "/v1/settings_update",
         "/v1/settings_reset",
+        # 側載小型機器狀態（schema v17）
+        "/v1/blob_put",
+        "/v1/blob_get",
     } == paths
 
 
