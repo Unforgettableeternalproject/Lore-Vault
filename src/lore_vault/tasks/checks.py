@@ -173,12 +173,17 @@ def _chain_fails(
     且鏈頭只有一則。"""
     ids = [str(c.meta["notes"][key]) for c in changes]
     found, _ = client.get_meta(vault, space, ids)
-    fails: list[str] = []
+    # 先逐則確認存在（含第一則）：只有一則 note 時下面的相鄰迴圈根本不執行
+    fails = [
+        f"{key}：{change.name} 的 note {note_id} 不存在"
+        for note_id, change in zip(ids, changes, strict=True)
+        if note_id not in found
+    ]
     for prev, cur, change in zip(ids, ids[1:], changes[1:], strict=False):
         item = found.get(cur)
         if item is None:
-            fails.append(f"{key}：{change.name} 的 note {cur} 不存在")
-        elif item.get("supersedes") != prev:
+            continue  # 已在存在檢查回報
+        if item.get("supersedes") != prev:
             fails.append(
                 f"{key}：{change.name} 的 note 應 supersedes {prev}，"
                 f"實際為 {item.get('supersedes')}"

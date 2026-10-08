@@ -189,6 +189,34 @@ def test_supersedes_chain(tasks_dir: TasksDir, vault):
     assert _status(tasks_dir, "tasks.supersedes_chain", vault.client) == "fail"
 
 
+def test_supersedes_chain_fails_when_single_note_missing(tasks_dir: TasksDir, vault):
+    """requirement 只有一則 note（沒有相鄰對可比）時，note 被刪也要 fail。"""
+    _archived(tasks_dir, vault, "z1")
+    assert _status(tasks_dir, "tasks.supersedes_chain", vault.client) == "pass"
+    vault.notes.pop(tasks_dir.meta("z1")["notes"]["demo/資料根目錄"])
+    report = _report(tasks_dir, vault.client)["tasks.supersedes_chain"]
+    assert report["status"] == "fail"
+    assert any("不存在" in d for d in report["details"])
+
+
+def test_supersedes_chain_reports_missing_first_note_once(tasks_dir: TasksDir, vault):
+    """多則 note 時第一則被刪：存在檢查抓到它，且不重複回報。"""
+    mod2 = requirement(
+        "資料根目錄", "資料 SHALL 存放於 `~/.y/`。", scenarios=("讀取資料根",)
+    )
+    _archived(tasks_dir, vault, "z1")
+    _archived(tasks_dir, vault, "a2", mod2, minutes=5)
+    first = tasks_dir.meta("z1")["notes"]["demo/資料根目錄"]
+    second = tasks_dir.meta("a2")["notes"]["demo/資料根目錄"]
+    vault.notes.pop(first)
+    vault.notes[second]["supersedes"] = first
+    report = _report(tasks_dir, vault.client)["tasks.supersedes_chain"]
+    assert report["status"] == "fail"
+    assert [d for d in report["details"] if first in d] == [
+        f"demo/資料根目錄：z1 的 note {first} 不存在"
+    ]
+
+
 def test_supersedes_chain_is_checked_per_vault(tasks_dir: TasksDir, vault):
     """同一 requirement 在兩個 vault 各有獨立的鏈：各自完整就 pass，
     不可攤平成一條比相鄰關係；同一 vault 內斷了仍要 fail。"""
