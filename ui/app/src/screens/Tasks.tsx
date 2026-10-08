@@ -1,6 +1,6 @@
 // 任務層（TASK_LAYER_UI）：各 repo 的 change 推導狀態，來源是任務層 CLI 推送到通用側載的快照
 // （`/v1/blob_get` key `tasks-snapshot`）。狀態改變在本機以 CLI 或經 MCP 操作；這裡唯一的動作是
-// `requires_authorization` change 的人類核准（TASK_LAYER_MCP §3.3）：讀服務端 change 版本與授權紀錄，
+// `requires_authorization` change 的人類核准（TASK_LAYER_MCP §3.3）：讀服務端 change 與授權紀錄的核准狀態（內容雜湊比對），
 // 經 UI session 限定的 `/v1/tasks_authorize` 寫入，MCP 的 archive 只認這份紀錄。
 // 任務層只屬於 dev space，其他 space 只顯示說明（比照記憶層）。
 import { useEffect, useState } from 'preact/hooks';
@@ -562,8 +562,8 @@ function ArchiveNote({ change }: { change: TaskChange }) {
 // ── 人類核准（TASK_LAYER_MCP §3.3）──
 
 /**
- * 需授權 change 的核准區塊。版本與核准狀態一律讀服務端（`task-change:` 與 `task-authorization:`），
- * 不信快照：核准只對服務端目前版本有效，之後再 edit 即過期，要重新核准。
+ * 需授權 change 的核准區塊。核准狀態一律讀服務端（`/v1/tasks_authorization_status`），不信快照：
+ * 核准綁定服務端目前的內容（內容雜湊；archive 的簿記寫入不算修改），之後內容再改即過期，要重新核准。
  * 顯示條件是「需授權且未完成」而不只「待授權」：快照的推導狀態日後可能把已核准的 change 算成別的狀態。
  */
 function Approval({ vaultKey, name }: { vaultKey: string; name: string }) {
@@ -632,7 +632,7 @@ function Approval({ vaultKey, name }: { vaultKey: string; name: string }) {
           }
         >
           核准後，AI 可以經 MCP 封存這個 change（併入主 spec、寫入總結 note），紀錄以你的登入身分留存。
-          核准只對服務端目前的 v{version} 有效；之後內容再被修改，核准即失效、需要重新核准。
+          核准只對服務端目前 v{version} 的內容有效；之後內容再被修改，核准即失效、需要重新核准（封存過程的簿記寫入不算修改）。
         </Dialog>
       )}
     </section>
@@ -685,7 +685,7 @@ function ApprovalBody({ info, busy, onApprove }: { info: ApprovalInfo; busy: boo
       {record && (
         <p class="lv-small" data-testid="task-approval-record">
           {record.authorizedBy} 於 {record.authorizedAt ? formatTime(record.authorizedAt) : '（時間不明）'} 核准了 v{record.changeVersion}
-          {state === 'stale' ? `；之後已修改為 v${change.version}，需要重新核准。` : '。'}
+          {state === 'stale' ? `；之後內容已修改（目前 v${change.version}），需要重新核准。` : '。'}
         </p>
       )}
       {!approvable ? (

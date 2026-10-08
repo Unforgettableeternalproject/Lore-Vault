@@ -260,8 +260,9 @@ test('非 dev space：只顯示說明，可切回 DEV', async ({ page, request }
 });
 
 // ── 人類核准（MCP-T5）──
-// MCP archive 的授權閘門只認 `task-authorization:<name>` 且 change_version 等於服務端目前版本；這裡以服務端 API
-// 驗證閘門的輸入（紀錄是否存在、對準哪個版本），MCP archive 本身的行為由 pytest（tests/mcp/test_tasks_authorize_mcp.py）驗證。
+// MCP／CLI archive 的授權閘門只認 `task-authorization:<name>` 且其 content_digest 等於服務端目前內容雜湊；
+// `/v1/blob_put` 的守衛也在服務端強制（bearer 不能偽造段一結果或取消標記）。這裡以服務端 API 驗證閘門的輸入，
+// MCP archive 本身的行為由 pytest（tests/mcp、tests/api/test_tasks_authorize_http.py）驗證。
 
 const AUTH_CHANGE = 'auth-change';
 
@@ -270,8 +271,8 @@ function b64(text: string) {
 }
 
 /** 以 bearer 寫服務端 change 全文（與 MCP propose／edit 同一條路徑）；回新版本 */
-async function putTaskChange(request: APIRequestContext, expectedVersion: number, proposal: string): Promise<number> {
-  const doc = {
+function taskChangeDoc(proposal: string, extra: Record<string, unknown> = {}) {
+  return {
     schema: 1,
     name: AUTH_CHANGE,
     state: 'active',
@@ -281,8 +282,12 @@ async function putTaskChange(request: APIRequestContext, expectedVersion: number
     tasks_md: '# Tasks\n\n- [x] 1.1 做完\n',
     deltas: {},
     apply: null,
+    ...extra,
   };
-  const resp = await request.post('/v1/blob_put', {
+}
+
+async function postTaskChange(request: APIRequestContext, doc: Record<string, unknown>, expectedVersion?: number) {
+  return request.post('/v1/blob_put', {
     headers: BEARER,
     data: {
       space: 'dev',
@@ -290,11 +295,20 @@ async function putTaskChange(request: APIRequestContext, expectedVersion: number
       key: `task-change:${AUTH_CHANGE}`,
       mime: 'application/json',
       content_base64: b64(JSON.stringify(doc)),
-      expected_version: expectedVersion,
+      ...(expectedVersion === undefined ? {} : { expected_version: expectedVersion }),
     },
   });
+}
+
+/** 以 bearer 寫服務端 change 全文（與 MCP propose／edit 同一條路徑）；回新版本 */
+async function putTaskChange(request: APIRequestContext, expectedVersion: number, proposal: string): Promise<number> {
+  const resp = await postTaskChange(request, taskChangeDoc(proposal), expectedVersion);
   expect(resp.status(), await resp.text()).toBe(200);
   return ((await resp.json()) as { version: number }).version;
+}
+
+async function errorCode(resp: { json(): Promise<unknown> }): Promise<string> {
+  return ((await resp.json()) as { error: { code: string } }).error.code;
 }
 
 async function authorizationRecord(request: APIRequestContext): Promise<Record<string, unknown> | null> {
@@ -308,9 +322,8 @@ async function authorizationRecord(request: APIRequestContext): Promise<Record<s
   return JSON.parse(Buffer.from(blob.content_base64, 'base64').toString('utf-8')) as Record<string, unknown>;
 }
 
-test('核准：需授權 change 經 UI 核准前後授權紀錄不同，edit 後過期需重新核准；bearer 無法核准或偽造', async ({ page, request }) => {
+test('核准：需授權 change 經 UI 核准前後授權紀錄不同，內容修改後過期需重新核准；bearer 無法核准或偽造', async ({ page, request }) => {
   await seed(request);
-  // 不掛 watchPage：尚未核准時讀授權紀錄的 404 是預期結果，瀏覽器會把它記成資源錯誤
   expect(await putTaskChange(request, 0, '# Proposal\n')).toBe(1);
 
   // 核准前：沒有授權紀錄（MCP archive 回 authorization_required）
@@ -345,6 +358,20 @@ test('核准：需授權 change 經 UI 核准前後授權紀錄不同，edit 後
   expect(forged.status()).toBe(403);
   expect(((await forged.json()) as { error: { code: string } }).error.code).toBe('authorization_write_forbidden');
   expect(await authorizationRecord(request)).toBeNull();
+  // bearer 直接改 change：不能取消 requires_authorization，也不能自己湊段一結果（pending_apply）跳過核准
+  const downgraded = await postTaskChange(request, taskChangeDoc('# Proposal\n', { meta: { requires_authorization: false } }));
+  expect(downgraded.status()).toBe(403);
+  expect(await errorCode(downgraded)).toBe('authorization_downgrade_forbidden');
+  const skipped = await postTaskChange(
+    request,
+    taskChangeDoc('# Proposal\n', {
+      state: 'pending_apply',
+      meta: { requires_authorization: true, note_id: '01FAKE' },
+      apply: { archived_at: '2026-10-09T00:00:00Z', merged_specs: {}, mirror_versions: {} },
+    }),
+  );
+  expect(skipped.status()).toBe(403);
+  expect(await errorCode(skipped)).toBe('authorization_required');
 
   await login(page);
   await page.goto(`/ui/tasks/${encodeURIComponent(REPO.key)}/${AUTH_CHANGE}`);
@@ -383,9 +410,15 @@ test('核准：需授權 change 經 UI 核准前後授權紀錄不同，edit 後
     authorized_by: E2E_DISPLAY,
     principal: { kind: 'ui_session' },
   });
+  expect(approved?.content_digest).toMatch(/^[0-9a-f]{64}$/);
 
-  // 核准後又 edit：版本前進、紀錄仍是 v1（MCP archive 回 authorization_stale），畫面標過期
-  expect(await putTaskChange(request, 1, '# Proposal\n\n核准後又改\n')).toBe(2);
+  // 同內容重推（版本前進、內容雜湊不變）：核准仍有效
+  expect(await putTaskChange(request, 1, '# Proposal\n')).toBe(2);
+  await page.reload();
+  await expect(panel.getByTestId('task-approval-state')).toHaveText('已核准');
+
+  // 核准後又改內容：內容雜湊不同、紀錄仍是 v1（MCP archive 回 authorization_stale），畫面標過期
+  expect(await putTaskChange(request, 2, '# Proposal\n\n核准後又改\n')).toBe(3);
   await page.reload();
   await expect(panel.getByTestId('task-approval-state')).toHaveText('核准已過期');
   await expect(panel.getByTestId('task-approval-record')).toContainText('需要重新核准');
@@ -394,10 +427,12 @@ test('核准：需授權 change 經 UI 核准前後授權紀錄不同，edit 後
   const violations = await axeViolations(page, '任務詳情（核准已過期）');
   expect(violations, JSON.stringify(violations, null, 2)).toEqual([]);
 
-  await panel.getByRole('button', { name: '重新核准 v2' }).click();
+  await panel.getByRole('button', { name: '重新核准 v3' }).click();
   await dialog.getByRole('button', { name: '確認核准' }).click();
   await expect(panel.getByTestId('task-approval-state')).toHaveText('已核准');
-  expect((await authorizationRecord(request))?.change_version).toBe(2);
+  const renewed = await authorizationRecord(request);
+  expect(renewed?.change_version).toBe(3);
+  expect(renewed?.content_digest).not.toBe(approved?.content_digest);
 });
 
 for (const theme of ['dark', 'light'] as const) {
