@@ -153,12 +153,17 @@ class Change:
             for cap, p in self.delta_files().items()
         }
 
+    def read_file(self, filename: str) -> str:
+        """change 目錄下的文字檔（`proposal.md` 等）；不存在回空字串。
+
+        服務端版本化內容（`remote_store.RemoteChange`）覆寫此方法，archive 的
+        note 寫入與 `tasks_progress` 因此不綁定本機檔案。"""
+        path = self.path / filename
+        return path.read_text(encoding="utf-8-sig") if path.is_file() else ""
+
     def tasks_progress(self) -> tuple[int, int]:
-        path = self.path / "tasks.md"
-        if not path.is_file():
-            return 0, 0
         done = total = 0
-        for line in path.read_text(encoding="utf-8-sig").splitlines():
+        for line in self.read_file("tasks.md").splitlines():
             m = re.match(r"^\s*[-*]\s+\[([ xX])\]", line)
             if m:
                 total += 1

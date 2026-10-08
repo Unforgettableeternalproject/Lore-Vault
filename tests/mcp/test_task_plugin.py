@@ -87,12 +87,14 @@ async def test_disabled_ignores_tasks_tools_even_if_defined(monkeypatch):
     assert [t["name"] for t in await _tools(server)] == list(TOOL_NAMES)
 
 
-async def test_enabled_without_task_tools_is_identical_to_core():
-    """本輪 `build_tools` 為空：開啟時與單純 `build_server` 也完全相同。"""
+async def test_enabled_mounts_real_tasks_tool_without_touching_core():
+    """真正的 `build_tools`：只多一個 `tasks`，核心 13 個工具的 schema 不變。"""
     shell = _shell(enabled=True)
     server = build_server(shell)
-    assert task_plugin.register(server, shell) == []
-    assert await _tools(server) == await _tools(build_server(_shell(enabled=True)))
+    assert task_plugin.register(server, shell) == ["tasks"]
+    tools = await _tools(server)
+    assert [t["name"] for t in tools] == [*TOOL_NAMES, "tasks"]
+    assert tools[:-1] == await _tools(build_server(_shell(enabled=True)))
 
 
 async def test_enabled_mounts_task_tools(monkeypatch):

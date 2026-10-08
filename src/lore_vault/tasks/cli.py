@@ -185,8 +185,9 @@ def _workspace(args: argparse.Namespace, env: _Env) -> Workspace | None:
     return load_workspace(root, args.decisions, env.environ)
 
 
-def _init(args: argparse.Namespace, env: _Env) -> int:
-    root = resolve_root(args.root, env.environ, env.cwd) or (env.cwd / DEFAULT_DIR)
+def init_root(root: Path) -> list[str]:
+    """建立任務目錄骨架（重複執行不覆寫）；回傳新建的檔案（相對於 root）。
+    CLI `init` 與 MCP `tasks(action="init")` 的 stdio 本機部分共用。"""
     created = []
     for directory in (root / "specs", root / "changes" / "archive"):
         directory.mkdir(parents=True, exist_ok=True)
@@ -197,7 +198,13 @@ def _init(args: argparse.Namespace, env: _Env) -> int:
     ):
         if not path.exists():
             path.write_text(text, encoding="utf-8")
-            created.append(str(path.relative_to(root)))
+            created.append(path.relative_to(root).as_posix())
+    return created
+
+
+def _init(args: argparse.Namespace, env: _Env) -> int:
+    root = resolve_root(args.root, env.environ, env.cwd) or (env.cwd / DEFAULT_DIR)
+    created = [str(Path(c)) for c in init_root(root)]
     env.print(f"任務目錄：{root}", "新建：" + ("、".join(created) or "無（皆已存在）"))
     return EXIT_OK
 
