@@ -1,6 +1,12 @@
 """`python -m lore_vault.tasks <子指令>` 的進入點。
 
 exit code：成功 0；驗證失敗／拒絕執行 1；參數錯誤 2（argparse）。
+
+快照推送（D15 UI 已裁決）：`propose`／`validate`／`archive`／`list` 結束後把任務
+快照推到服務端側載（`snapshot.push`），失敗只在 stderr 印警告、不改 exit code
+（服務不可達不阻塞）；`propose`／`archive` 只在成功時推送（被拒絕的 archive
+一次都不碰服務）。`sync` 只做推送，失敗為 1。stdout 不受影響（`list --json`
+仍可直接解析）。
 """
 
 from __future__ import annotations
@@ -15,8 +21,9 @@ from typing import Any, TextIO
 
 from lore_vault.doctor.framework import DoctorContext
 
+from . import snapshot
 from .archive import ArchiveError, archive_change, describe_result
-from .vault_client import VaultClient, load_settings
+from .vault_client import ServiceError, VaultClient, load_settings
 from .workspace import (
     CONFIG_FILE,
     DEFAULT_DIR,
@@ -76,6 +83,10 @@ def _split(values: Sequence[str] | None) -> list[str]:
     return list(dict.fromkeys(out))
 
 
+def _add_client_env(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--client-env", help="客戶端設定檔（預設 ~/.lore-vault/client.env）")
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m lore_vault.tasks")
     parser.add_argument("--root", help=f"任務目錄（預設 ./{DEFAULT_DIR}）")
@@ -94,9 +105,11 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--requires-authorization", action="store_true")
     p.add_argument("--skip-specs", action="store_true", help="無規格的純任務")
     p.add_argument("--goal", help="一句話目標（寫入 .openspec.yaml 的 goal）")
+    _add_client_env(p)
 
     p = sub.add_parser("list", help="列出 change 與推導狀態")
     p.add_argument("--json", action="store_true")
+    _add_client_env(p)
 
     p = sub.add_parser("validate", help="檢查格式、requirement 重疊與 base")
     p.add_argument("name", nargs="?")
@@ -107,6 +120,7 @@ def _parser() -> argparse.ArgumentParser:
     group.add_argument(
         "--rebase", action="store_true", help="delta 已依主 spec 現值改好後，重記 base"
     )
+    _add_client_env(p)
 
     p = sub.add_parser("archive", help="寫 note、併主 spec、搬到 archive/")
     p.add_argument("name")
@@ -119,12 +133,22 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--vault", help="Lore Vault vault key（預設由專案目錄 binding 推算）"
     )
-    p.add_argument("--client-env", help="客戶端設定檔（預設 ~/.lore-vault/client.env）")
+    _add_client_env(p)
     p.add_argument("--author", default="lore-vault-tasks", help="寫入 note 的作者名")
+
+    p = sub.add_parser("sync", help="把任務快照推到 Lore Vault（UI 任務畫面）")
+    p.add_argument(
+        "--vault", help="Lore Vault vault key（預設由專案目錄 binding 推算）"
+    )
+    _add_client_env(p)
 
     p = sub.add_parser("doctor", help="任務層對帳")
     p.add_argument("--json", action="store_true")
-    p.add_argument("--client-env", help="客戶端設定檔（預設 ~/.lore-vault/client.env）")
+    _add_client_env(p)
+    p.add_argument(
+        "--vault",
+        help="tasks.snapshot_sync 比對的 vault（預設由專案目錄 binding 推算）",
+    )
     p.add_argument(
         "--offline", action="store_true", help="不連服務（相關檢查 skipped）"
     )
@@ -132,14 +156,25 @@ def _parser() -> argparse.ArgumentParser:
 
 
 class _Env:
-    def __init__(self, stdout: TextIO, environ: Mapping[str, str] | None, cwd: Path):
+    def __init__(
+        self,
+        stdout: TextIO,
+        environ: Mapping[str, str] | None,
+        cwd: Path,
+        stderr: TextIO | None = None,
+    ):
         self.out = stdout
+        self.err = stderr or sys.stderr
         self.environ = environ
         self.cwd = cwd
 
     def print(self, *lines: str) -> None:
         for line in lines:
             self.out.write(line + "\n")
+
+    def warn(self, *lines: str) -> None:
+        for line in lines:
+            self.err.write(line + "\n")
 
 
 def _workspace(args: argparse.Namespace, env: _Env) -> Workspace | None:
@@ -308,7 +343,67 @@ def _validate(args: argparse.Namespace, env: _Env) -> int:
 
 
 def _client_factory(args: argparse.Namespace, env: _Env) -> Callable[[], VaultClient]:
-    return lambda: VaultClient(load_settings(args.client_env, env.environ))
+    return lambda: VaultClient(
+        load_settings(getattr(args, "client_env", None), env.environ)
+    )
+
+
+_PUSH_ERRORS = (ServiceError, snapshot.SnapshotTooLarge, OSError, ValueError)
+
+
+def _push(
+    args: argparse.Namespace,
+    env: _Env,
+    client_factory: Callable[[], VaultClient] | None,
+    *,
+    vault: str | None = None,
+) -> snapshot.PushResult:
+    root = resolve_root(args.root, env.environ, env.cwd)
+    if root is None or not root.is_dir():
+        raise ServiceError("找不到任務目錄")
+    ws = load_workspace(root, args.decisions, env.environ)
+    client = (client_factory or _client_factory(args, env))()
+    if not client.settings.push_configured:
+        raise ServiceError(client.describe())
+    return snapshot.push(ws, client, vault=vault)
+
+
+def _detail(exc: BaseException) -> str:
+    return exc.detail if isinstance(exc, ServiceError) else str(exc)
+
+
+def _auto_sync(
+    args: argparse.Namespace,
+    env: _Env,
+    client_factory: Callable[[], VaultClient] | None,
+) -> None:
+    """子指令結尾的快照推送：任何失敗只在 stderr 警告，不影響 exit code。"""
+    try:
+        _push(args, env, client_factory, vault=getattr(args, "vault", None))
+    except _PUSH_ERRORS as exc:
+        env.warn(
+            f"警告：任務快照未同步到 Lore Vault（{_detail(exc)}）；"
+            "本機指令已完成，稍後可執行 sync 重推"
+        )
+
+
+def _sync(
+    args: argparse.Namespace,
+    env: _Env,
+    client_factory: Callable[[], VaultClient] | None,
+) -> int:
+    if _workspace(args, env) is None:
+        return EXIT_FAIL
+    try:
+        result = _push(args, env, client_factory, vault=args.vault)
+    except _PUSH_ERRORS as exc:
+        env.print(f"sync 失敗：{_detail(exc)}")
+        return EXIT_FAIL
+    env.print(
+        f"已同步 {result.changes} 個 change 到 {result.vault}"
+        f"（{result.size_bytes} 位元組，{result.updated}）"
+    )
+    return EXIT_OK
 
 
 def _archive(
@@ -353,6 +448,8 @@ def _doctor(
     if root is not None and root.is_dir():
         ws = load_workspace(root, args.decisions, env.environ)
         settings = {"tasks_root": str(ws.root), "decisions_path": ws.decisions_path}
+        if args.vault:
+            settings["vault"] = args.vault
         if not args.offline:
             if client_factory is not None:
                 resources["client"] = client_factory()
@@ -376,20 +473,35 @@ def main(
     cwd: Path | None = None,
     client_factory: Callable[[], VaultClient] | None = None,
     now: _dt.datetime | None = None,
+    stderr: TextIO | None = None,
 ) -> int:
-    """`environ`／`cwd`／`client_factory`／`now` 供測試注入。"""
+    """`environ`／`cwd`／`client_factory`／`now`／`stderr` 供測試注入。"""
     args = _parser().parse_args(argv)
     out = stdout or sys.stdout
-    env = _Env(out, environ, cwd or Path.cwd())
+    env = _Env(out, environ, cwd or Path.cwd(), stderr)
     today = (now or _dt.datetime.now()).date().isoformat()
     if args.command == "init":
         return _init(args, env)
+    if args.command == "sync":
+        return _sync(args, env, client_factory)
+    if args.command == "doctor":
+        return _doctor(args, env, client_factory)
     if args.command == "propose":
-        return _propose(args, env, today)
-    if args.command == "list":
-        return _list(args, env)
-    if args.command == "validate":
-        return _validate(args, env)
-    if args.command == "archive":
-        return _archive(args, env, client_factory, now)
-    return _doctor(args, env, client_factory)
+        code = _propose(args, env, today)
+    elif args.command == "list":
+        code = _list(args, env)
+    elif args.command == "validate":
+        code = _validate(args, env)
+    else:
+        code = _archive(args, env, client_factory, now)
+    if _should_sync(args, env, code):
+        _auto_sync(args, env, client_factory)
+    return code
+
+
+def _should_sync(args: argparse.Namespace, env: _Env, code: int) -> bool:
+    root = resolve_root(args.root, env.environ, env.cwd)
+    if root is None or not root.is_dir():
+        return False
+    # propose／archive 被拒絕時不碰服務；list／validate 的結果不改變快照內容
+    return code == EXIT_OK or args.command in ("list", "validate")

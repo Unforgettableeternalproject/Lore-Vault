@@ -3,6 +3,10 @@
 假服務走 `tests/fake_service.FakeService`（`http.server` 執行緒），任務層的
 `VaultClient` 照常經 `hooks.service.request_json` 打過去——不連真實服務、不讀
 `~/.lore-vault/client.env`、不看行程環境變數（`environ={}`）。
+
+`propose`／`list`／`validate`／`archive` 結尾會推任務快照：`TasksDir.run` 沒給 client
+時一律用未設定推送的 client（`offline_client`，不打網路、只在 stderr 警告），
+絕不落到真實的 client.env。
 """
 
 from __future__ import annotations
@@ -104,15 +108,19 @@ class TasksDir:
         )
 
     def run(self, *argv: str, client=None, now=NOW) -> tuple[int, str]:
+        """stdout 回傳；stderr（快照推送警告）存在 `self.err`。"""
         out = io.StringIO()
+        err = io.StringIO()
         code = cli.main(
             ["--root", str(self.root), *argv],
             stdout=out,
             environ={},
             cwd=self.project,
-            client_factory=client,
+            client_factory=client or offline_client,
             now=now,
+            stderr=err,
         )
+        self.err = err.getvalue()
         return code, out.getvalue()
 
     def change_dir(self, name: str) -> Path:
@@ -188,6 +196,9 @@ class FakeVault:
 
     def __init__(self, *, fail_write_at: int | None = None, list_page: int = 2) -> None:
         self.notes: dict[str, dict[str, Any]] = {}
+        # 側載：{(vault, key): {"mime", "content_base64", "updated"}}
+        self.blobs: dict[tuple[str, str], dict[str, Any]] = {}
+        self.blob_puts = 0
         self.writes = 0
         self.fail_write_at = fail_write_at
         self.list_page = list_page
@@ -227,6 +238,20 @@ class FakeVault:
     def handle(self, method: str, path: str, headers, body):
         if path == "/v1/vault_resolve":
             return 200, {"key": body["key"]}, {}
+        if path == "/v1/blob_put":
+            self.blob_puts += 1
+            updated = f"2026-10-08T12:00:{self.blob_puts:02d}.000Z"
+            self.blobs[(body["vault"], body["key"])] = {
+                "mime": body.get("mime") or "application/octet-stream",
+                "content_base64": body["content_base64"],
+                "updated": updated,
+            }
+            return 200, {"updated": updated}, {}
+        if path == "/v1/blob_get":
+            hit = self.blobs.get((body["vault"], body["key"]))
+            if hit is None:
+                return 404, {"error": {"code": "not_found", "message": "x"}}, {}
+            return 200, {"vault": body["vault"], "key": body["key"], **hit}, {}
         if path == "/v1/write":
             self.writes += 1
             if self.fail_write_at is not None and self.writes >= self.fail_write_at:
@@ -274,6 +299,11 @@ def client_for(url: str) -> VaultClient:
         None, {"LORE_VAULT_URL": url, "LORE_VAULT_API_TOKEN": "test-token"}
     )
     return VaultClient(settings, timeout=5.0)
+
+
+def offline_client() -> VaultClient:
+    """未設定 URL／token：推送直接略過（不打網路、不讀任何 env 檔）。"""
+    return VaultClient(load_client_settings(None, {}), timeout=5.0)
 
 
 def unreachable_client() -> VaultClient:

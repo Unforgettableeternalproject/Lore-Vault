@@ -8,6 +8,7 @@ token 只透過 `Secret` 傳遞，例外訊息與輸出都不含密鑰。
 
 from __future__ import annotations
 
+import base64
 import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -129,3 +130,39 @@ class VaultClient:
         )
         found = {i["id"]: i for i in data.get("items", []) if "id" in i}
         return found, [str(m) for m in data.get("missing", [])]
+
+    def put_blob(
+        self, vault: str, space: str, key: str, content: bytes, *, mime: str
+    ) -> str:
+        """覆寫服務端側載（`/v1/blob_put`）；回傳服務端的 `updated`。"""
+        data = self._post(
+            "/v1/blob_put",
+            {
+                "vault": vault,
+                "space": space,
+                "key": key,
+                "mime": mime,
+                "content_base64": base64.b64encode(content).decode("ascii"),
+            },
+        )
+        return str(data["updated"])
+
+    def get_blob(self, vault: str, space: str, key: str) -> dict[str, Any] | None:
+        """讀回側載（`/v1/blob_get`）；尚未推送過（404 `not_found`）回 None。
+
+        回傳 `{mime, content（bytes）, updated}`。"""
+        try:
+            data = self._post(
+                "/v1/blob_get", {"vault": vault, "space": space, "key": key}
+            )
+        except ServiceRejected as exc:
+            body = exc.body if isinstance(exc.body, dict) else {}
+            error = body.get("error") if isinstance(body.get("error"), dict) else {}
+            if exc.status == 404 and error.get("code") == "not_found":
+                return None
+            raise
+        return {
+            "mime": data.get("mime"),
+            "content": base64.b64decode(str(data["content_base64"]), validate=True),
+            "updated": data.get("updated"),
+        }
