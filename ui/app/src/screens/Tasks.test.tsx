@@ -289,3 +289,46 @@ describe('任務層：詳情', () => {
     await waitFor(() => expect(screen.getByTestId('task-missing')).toBeTruthy());
   });
 });
+
+describe('任務層：切換 vault', () => {
+  const OTHER_VAULT = 'folder/other';
+
+  function deferred<T>() {
+    let resolve!: (v: T) => void;
+    const promise = new Promise<T>((r) => (resolve = r));
+    return { promise, resolve };
+  }
+
+  it('新 vault 的回應到達前顯示載入中，不顯示舊 vault 的 change', async () => {
+    const pending = deferred<ReturnType<typeof json>>();
+    const { api } = makeApi({
+      '/v1/blob_get': (body) =>
+        body.vault === OTHER_VAULT ? pending.promise : json({ items: [{ vault: VAULT, ...blob([change({ name: 'old-change' })]) }] }),
+    });
+    const { rerenderWith } = renderWithApp(<Tasks />, api);
+    await screen.findByRole('link', { name: 'old-change' });
+
+    rerenderWith({ vault: OTHER_VAULT });
+    await waitFor(() => expect(screen.queryByRole('link', { name: 'old-change' })).toBeNull());
+    expect(screen.getByRole('status').textContent).toContain('載入中');
+
+    pending.resolve(json(blob([change({ name: 'new-change' })])));
+    await screen.findByRole('link', { name: 'new-change' });
+    expect(screen.queryByRole('link', { name: 'old-change' })).toBeNull();
+  });
+
+  it('快速切 A→B：A 的回應晚到時丟棄，不覆蓋 B', async () => {
+    const slowA = deferred<ReturnType<typeof json>>();
+    const { api } = makeApi({
+      '/v1/blob_get': (body) => (body.vault === OTHER_VAULT ? json(blob([change({ name: 'b-change' })])) : slowA.promise),
+    });
+    const { rerenderWith } = renderWithApp(<Tasks />, api);
+    rerenderWith({ vault: OTHER_VAULT });
+    await screen.findByRole('link', { name: 'b-change' });
+
+    slowA.resolve(json({ items: [{ vault: VAULT, ...blob([change({ name: 'a-change' })]) }] }));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.queryByRole('link', { name: 'a-change' })).toBeNull();
+    expect(screen.getByRole('link', { name: 'b-change' })).toBeTruthy();
+  });
+});

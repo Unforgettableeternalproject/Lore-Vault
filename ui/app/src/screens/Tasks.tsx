@@ -72,28 +72,36 @@ export function Tasks({ params = [] }: { params?: string[] }) {
 
 const GROUP_ORDER: Record<TaskGroup, number> = { ready: 0, auth: 1, blocked: 2, done: 3 };
 
+/**
+ * 取回快照。資料綁定發出請求時的 space＋vault：切換 vault 後、新回應到達前不回傳舊 vault 的資料
+ * （畫面顯示載入中），晚到的過時回應（快速切 A→B 時 A 的回應）直接丟棄，不覆蓋目前的結果。
+ */
 function useSnapshots(vault: string) {
   const { api, space } = useApp();
-  const [data, setData] = useState<VaultSnapshot[] | null>(null);
-  const [error, setError] = useState<unknown>(null);
+  const key = space.id + '|' + vault;
+  const [result, setResult] = useState<{ key: string; data: VaultSnapshot[] } | null>(null);
+  const [failure, setFailure] = useState<{ key: string; error: unknown } | null>(null);
   const [loading, setLoading] = useState(true);
   const [tick, setTick] = useState(0);
   useEffect(() => {
     const ctrl = new AbortController();
     setLoading(true);
-    setError(null);
+    setFailure(null);
     fetchTaskSnapshots(api, space.id, vault, ctrl.signal)
-      .then((result) => {
-        setData(result);
+      .then((data) => {
+        if (ctrl.signal.aborted) return;
+        setResult({ key, data });
         setLoading(false);
       })
       .catch((err) => {
         if (isAbort(err) || ctrl.signal.aborted) return;
-        setError(err);
+        setFailure({ key, error: err });
         setLoading(false);
       });
     return () => ctrl.abort();
   }, [api, space.id, vault, tick]);
+  const data = result?.key === key ? result.data : null;
+  const error = failure?.key === key ? failure.error : null;
   return { data, error, loading, retry: () => setTick((t) => t + 1) };
 }
 
