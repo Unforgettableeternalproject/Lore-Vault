@@ -527,6 +527,8 @@ export interface BlobRecord {
   mime: string;
   content_base64: string;
   updated: string;
+  /** 側載版本（每次 put 遞增；schema v18 起服務必回） */
+  version?: number;
 }
 
 /** `blob_get` 省略 `vault`：本 space 內所有存過該 key 的 vault（可能是空陣列） */

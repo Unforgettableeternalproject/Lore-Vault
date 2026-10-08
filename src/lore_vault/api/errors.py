@@ -56,6 +56,23 @@ class TasksRemoteSyncDisabled(Exception):
     不寫任何東西；讀取（`blob_get`）與其他 key（如 `tasks-snapshot`）不受影響。"""
 
 
+class AuthorizationWriteForbidden(Exception):
+    """`/v1/blob_put` 收到 `task-authorization:` 前綴（TASK_LAYER_MCP §3.3、MCP-T5）。
+
+    403 + `authorization_write_forbidden`，不論認證方式：授權紀錄只能經
+    `POST /v1/tasks_authorize`（UI session 限定、服務端填授權人）寫入，否則持 bearer
+    token 的 agent 可以自己偽造核准。錯誤碼與任務層 `remote_store.put_blob` 一致。"""
+
+
+class TaskAuthorizationRejected(Exception):
+    """`POST /v1/tasks_authorize` 的 change 不能核准（409，`code` 區分原因：
+    `change_invalid`／`change_not_active`／`authorization_not_required`）。"""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 class PayloadTooLarge(Exception):
     """上傳超過大小上限（讀取 body 時就擋，不讀完整份）。"""
 
@@ -257,6 +274,15 @@ def install_error_handlers(app: FastAPI) -> None:
     simple(EpisodeIngestDisabled, 403, "episode_ingest_disabled")
     simple(TasksRemoteSyncDisabled, 403, "tasks_remote_sync_disabled")
     simple(UiSessionRequired, 403, "ui_session_required")
+    simple(AuthorizationWriteForbidden, 403, "authorization_write_forbidden")
+
+    async def task_authorization_rejected(
+        request: Request, exc: Exception
+    ) -> JSONResponse:
+        assert isinstance(exc, TaskAuthorizationRejected)
+        return _json(409, exc.code, exc)
+
+    app.add_exception_handler(TaskAuthorizationRejected, task_authorization_rejected)
 
     simple(PayloadTooLarge, 413, "too_large")
     # 側載（schema v17）：兩者都是 ValueError，各自的 handler 先於 invalid_request

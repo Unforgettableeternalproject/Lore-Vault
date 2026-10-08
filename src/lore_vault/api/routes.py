@@ -25,7 +25,9 @@ FTS／embedding／recall／list／snapshot，不提供 MCP 工具。內容以 `c
 解碼後上限依 key 前綴（預設 64KB，`task-` 開頭 1MB）。`blob_put` 可帶 `expected_version`
 做樂觀鎖，不符回 409 `version_conflict`（附目前 version 與內容）。`task-` 開頭的 key 是
 任務層的權威內容，受 `tasks.remote_sync` 開關管制：關閉時 `blob_put` 回 403
-`tasks_remote_sync_disabled`，讀取不受影響。
+`tasks_remote_sync_disabled`，讀取不受影響。`task-authorization:` 開頭（任務層的人類核准
+紀錄）不論認證方式一律 403 `authorization_write_forbidden`，唯一寫入路徑是 UI session
+限定的 `POST /v1/tasks_authorize`（`api.tasks_admin`）。
 
 `POST /v1/document_download` 是唯一回二進位的端點：body 同其他 RPC（`space`、
 `vault`、`id`，選填 `max_bytes`），成功回原始位元組（Content-Type 為上傳時的 mime、
@@ -85,6 +87,7 @@ from lore_vault.storage.vaults import (
 )
 
 from .errors import (
+    AuthorizationWriteForbidden,
     DocumentsNotConfigured,
     PayloadTooLarge,
     TasksRemoteSyncDisabled,
@@ -93,6 +96,7 @@ from .errors import (
 )
 from .principals import principal_of
 from .state import AppState
+from .tasks_admin import AUTHORIZATION_PREFIX as AUTHORIZATION_KEY_PREFIX
 
 router = APIRouter(prefix="/v1")
 
@@ -704,9 +708,17 @@ def blob_put(request: Request, req: BlobPutRequest) -> dict[str, Any]:
 
     vault 必填、可用別名；key 含路徑分隔等字元 400 `invalid_key`；解碼後超過該 key
     的上限 413 `too_large`；`expected_version` 不符 409 `version_conflict`
-    （`error.current` 為目前內容，key 不存在時為 null）；`task-` 開頭且
-    `tasks.remote_sync` 關閉 403 `tasks_remote_sync_disabled`（不寫任何東西）。"""
+    （`error.current` 為目前內容，key 不存在時為 null）；`task-authorization:`
+    開頭一律 403 `authorization_write_forbidden`（只能經 `/v1/tasks_authorize`）；
+    `task-` 開頭且 `tasks.remote_sync` 關閉 403 `tasks_remote_sync_disabled`
+    （不寫任何東西）。"""
     storage_sidecar.validate_key(req.key)
+    if req.key.startswith(AUTHORIZATION_KEY_PREFIX):
+        # 不論 bearer 或 UI session：授權紀錄只能經 /v1/tasks_authorize 寫入
+        raise AuthorizationWriteForbidden(
+            "task-authorization: 開頭的授權紀錄不可直接寫入；"
+            "請在 UI 任務頁按「核准」（POST /v1/tasks_authorize）"
+        )
     if (
         storage_sidecar.is_task_key(req.key)
         and not _state(request).runtime.current().tasks.remote_sync

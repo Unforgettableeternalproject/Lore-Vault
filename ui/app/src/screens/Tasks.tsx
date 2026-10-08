@@ -1,18 +1,24 @@
-// 任務層（TASK_LAYER_UI，唯讀）：各 repo 的 change 推導狀態，來源是任務層 CLI 推送到通用側載的快照
-// （`/v1/blob_get` key `tasks-snapshot`）。狀態改變只能在本機以 CLI 操作，這裡不提供任何動作。
+// 任務層（TASK_LAYER_UI）：各 repo 的 change 推導狀態，來源是任務層 CLI 推送到通用側載的快照
+// （`/v1/blob_get` key `tasks-snapshot`）。狀態改變在本機以 CLI 或經 MCP 操作；這裡唯一的動作是
+// `requires_authorization` change 的人類核准（TASK_LAYER_MCP §3.3）：讀服務端 change 版本與授權紀錄，
+// 經 UI session 限定的 `/v1/tasks_authorize` 寫入，MCP 的 archive 只認這份紀錄。
 // 任務層只屬於 dev space，其他 space 只顯示說明（比照記憶層）。
 import { useEffect, useState } from 'preact/hooks';
 
 import { ChipGroup, FilterPanel, queryChoice, screenQuery, useQuerySync } from '../components/Filters';
-import { Badge, Banner, EmptyState, ErrorState, Loading } from '../components/ui';
+import { Badge, Banner, Dialog, EmptyState, ErrorState, Loading } from '../components/ui';
 import { VaultPicker } from '../components/VaultPicker';
 import { ALL, useApp, vaultName } from '../lib/context';
-import { formatTime, isAbort } from '../lib/format';
+import { describeError, formatTime, isAbort } from '../lib/format';
 import { formatAge, hoursSince } from '../lib/health';
 import { Markdown } from '../lib/markdown';
 import { routePath } from '../lib/router';
 import {
+  approvalState,
+  approveChange,
   blockerLabel,
+  canApprove,
+  fetchApproval,
   fetchTaskSnapshots,
   filterRows,
   isStale,
@@ -24,6 +30,7 @@ import {
   TASK_FILTER_IDS,
   TASK_FILTERS,
   TASK_STALE_HOURS,
+  type ApprovalInfo,
   type TaskFilter,
   type TaskGroup,
   type TaskRow,
@@ -35,7 +42,7 @@ export function Tasks({ params = [] }: { params?: string[] }) {
   const { space, switchSpace } = useApp();
   const [vaultKey, name] = params;
   // 詳情頁比照筆記詳情以麵包屑開頭，不再疊一行 eyebrow
-  const eyebrow = <div class="lv-eyebrow">TASK LAYER · 唯讀 · {space.en}</div>;
+  const eyebrow = <div class="lv-eyebrow">TASK LAYER · {space.en}</div>;
   return (
     <section class="lv-screen lv-screen--wide">
       {space.id !== 'dev' ? (
@@ -61,7 +68,7 @@ export function Tasks({ params = [] }: { params?: string[] }) {
           {eyebrow}
           <h1 class="lv-title">任務</h1>
           <p class="lv-section__desc">
-            各 repo 任務層的 change 與推導狀態，內容是任務層 CLI 最後一次推送的快照。這裡只能檢視；狀態要在本機用 CLI 改變。
+            各 repo 任務層的 change 與推導狀態，內容是任務層 CLI 最後一次推送的快照。狀態要在本機用 CLI 或經 MCP 改變；需授權的 change 在詳情頁核准。
           </p>
           <TaskList />
         </>
@@ -340,7 +347,7 @@ function TaskDetail({ vaultKey, name }: { vaultKey: string; name: string }) {
             它可能已改名或移除；最後一次同步於 {formatTime(snap.updated)}。
           </EmptyState>
         )}
-        {snap && change && <ChangeBody change={change} updated={snap.updated} />}
+        {snap && change && <ChangeBody change={change} updated={snap.updated} vaultKey={vaultKey} />}
       </article>
       {snap?.snapshot && change && (
         <aside class="lv-detail__side" aria-label="change 關聯">
@@ -351,7 +358,7 @@ function TaskDetail({ vaultKey, name }: { vaultKey: string; name: string }) {
   );
 }
 
-function ChangeBody({ change, updated }: { change: TaskChange; updated: string }) {
+function ChangeBody({ change, updated, vaultKey }: { change: TaskChange; updated: string; vaultKey: string }) {
   const view = statusView(change.status);
   const stale = isStale(updated);
   return (
@@ -385,6 +392,8 @@ function ChangeBody({ change, updated }: { change: TaskChange; updated: string }
           </ul>
         </Banner>
       )}
+
+      {change.requires_authorization && change.status !== STATUS_DONE && <Approval vaultKey={vaultKey} name={change.name} />}
 
       <section class="lv-task-section" aria-labelledby="task-why">
         <h2 id="task-why" class="lv-side-block__label">
@@ -547,5 +556,149 @@ function ArchiveNote({ change }: { change: TaskChange }) {
     >
       {note.title}
     </a>
+  );
+}
+
+// ── 人類核准（TASK_LAYER_MCP §3.3）──
+
+/**
+ * 需授權 change 的核准區塊。版本與核准狀態一律讀服務端（`task-change:` 與 `task-authorization:`），
+ * 不信快照：核准只對服務端目前版本有效，之後再 edit 即過期，要重新核准。
+ * 顯示條件是「需授權且未完成」而不只「待授權」：快照的推導狀態日後可能把已核准的 change 算成別的狀態。
+ */
+function Approval({ vaultKey, name }: { vaultKey: string; name: string }) {
+  const { api, toast } = useApp();
+  const [info, setInfo] = useState<ApprovalInfo | null>(null);
+  const [error, setError] = useState<unknown>(null);
+  const [tick, setTick] = useState(0);
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    setError(null);
+    fetchApproval(api, vaultKey, name, ctrl.signal)
+      .then((data) => {
+        if (!ctrl.signal.aborted) setInfo(data);
+      })
+      .catch((err) => {
+        if (isAbort(err) || ctrl.signal.aborted) return;
+        setError(err);
+      });
+    return () => ctrl.abort();
+  }, [api, vaultKey, name, tick]);
+
+  const reload = () => setTick((t) => t + 1);
+  const version = info?.change?.version;
+  const approve = async () => {
+    setBusy(true);
+    try {
+      await approveChange(api, vaultKey, name);
+      toast(`已核准 ${name}（v${version}）`, 'success');
+    } catch (err) {
+      toast(`核准失敗：${describeError(err)}`, 'error');
+    } finally {
+      setBusy(false);
+      setConfirming(false);
+      // 成功或失敗（版本已變、change 已封存等）都重讀服務端狀態
+      reload();
+    }
+  };
+
+  let body;
+  if (error !== null) body = <ErrorState error={error} onRetry={reload} />;
+  else if (!info) body = <Loading />;
+  else body = <ApprovalBody info={info} busy={busy} onApprove={() => setConfirming(true)} />;
+
+  return (
+    <section class="lv-task-section" aria-labelledby="task-approval" data-testid="task-approval">
+      <h2 id="task-approval" class="lv-side-block__label">
+        人類核准 · AUTHORIZATION
+      </h2>
+      {body}
+      {confirming && info?.change && (
+        <Dialog
+          title={`核准 ${name} 的 v${version}？`}
+          onClose={() => setConfirming(false)}
+          actions={
+            <>
+              <button type="button" class="uep-dialog__btn uep-dialog__btn--cancel" onClick={() => setConfirming(false)}>
+                取消
+              </button>
+              <button type="button" class="uep-dialog__btn uep-dialog__btn--confirm" disabled={busy} onClick={() => void approve()}>
+                確認核准
+              </button>
+            </>
+          }
+        >
+          核准後，AI 可以經 MCP 封存這個 change（併入主 spec、寫入總結 note），紀錄以你的登入身分留存。
+          核准只對服務端目前的 v{version} 有效；之後內容再被修改，核准即失效、需要重新核准。
+        </Dialog>
+      )}
+    </section>
+  );
+}
+
+function ApprovalBody({ info, busy, onApprove }: { info: ApprovalInfo; busy: boolean; onApprove: () => void }) {
+  const { change, record } = info;
+  const state = approvalState(info);
+  const formatError = info.error && (
+    <Banner tone="error" label="INVALID" title="服務端內容格式不正確" testId="task-approval-invalid">
+      {info.error}
+    </Banner>
+  );
+  if (!change) {
+    return (
+      <>
+        {formatError}
+        <p class="lv-muted" data-testid="task-approval-no-change">
+          服務端沒有這個 change 的內容（尚未經 MCP 或同步推送到服務），無法在這裡核准。
+        </p>
+      </>
+    );
+  }
+  const button = (label: string) => (
+    <button type="button" class="btn-outline btn-outline--gold" disabled={busy} onClick={onApprove}>
+      {label}
+    </button>
+  );
+  const approvable = canApprove(change);
+  return (
+    <>
+      {formatError}
+      <div class="lv-meta-line">
+        {state === 'approved' ? (
+          <Badge tone="ready" label="核准狀態" testId="task-approval-state">
+            已核准
+          </Badge>
+        ) : state === 'stale' ? (
+          <Badge tone="warn" label="核准狀態" testId="task-approval-state">
+            核准已過期
+          </Badge>
+        ) : (
+          <Badge tone="auth" label="核准狀態" testId="task-approval-state">
+            尚未核准
+          </Badge>
+        )}
+        <span data-testid="task-approval-version">服務端目前版本 v{change.version}</span>
+      </div>
+      {record && (
+        <p class="lv-small" data-testid="task-approval-record">
+          {record.authorizedBy} 於 {record.authorizedAt ? formatTime(record.authorizedAt) : '（時間不明）'} 核准了 v{record.changeVersion}
+          {state === 'stale' ? `；之後已修改為 v${change.version}，需要重新核准。` : '。'}
+        </p>
+      )}
+      {!approvable ? (
+        <p class="lv-muted lv-small" data-testid="task-approval-unavailable">
+          {change.state !== 'active'
+            ? `服務端的 change 已不在進行中（${change.state || '狀態不明'}），不能再核准。`
+            : '服務端的 change 沒有標記需授權，不需要核准。'}
+        </p>
+      ) : state === 'none' ? (
+        button(`核准 v${change.version}`)
+      ) : state === 'stale' ? (
+        button(`重新核准 v${change.version}`)
+      ) : null}
+    </>
   );
 }
