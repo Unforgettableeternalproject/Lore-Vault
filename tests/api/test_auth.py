@@ -146,6 +146,9 @@ def test_openapi_is_served_behind_auth(anon):
         # 任務層授權紀錄（MCP-T5；只允許 UI session）
         "/v1/tasks_authorize",
         "/v1/tasks_authorization_status",
+        "/v1/tasks_enable",
+        "/v1/tasks_disable",
+        "/v1/tasks_status",
     } == paths
 
 

@@ -23,6 +23,13 @@ from typing import Any
 SCHEMA = 1
 CHANGE_PREFIX = "task-change:"
 AUTHORIZATION_PREFIX = "task-authorization:"
+# vault 內 change 的列舉；存在且未停用＝該 vault 已啟用任務層（`/v1/tasks_enable`、
+# `tasks init`）。停用（`/v1/tasks_disable`、`tasks disable`）只在索引加 `disabled`
+# 欄位 `{"at": 時間, "by": 誰}`，不刪任何內容；重新啟用移除該欄位即復原
+INDEX_KEY = "task-index"
+DISABLED_KEY = "disabled"
+# 任務層 UI 快照（任務層 `snapshot` 推送；核心只為停用守衛認得這個 key）
+SNAPSHOT_KEY = "tasks-snapshot"
 
 STATE_ACTIVE = "active"
 STATE_PENDING_APPLY = "pending_apply"
@@ -63,6 +70,41 @@ def encode(data: Mapping[str, Any]) -> bytes:
     return json.dumps(
         data, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
+
+
+def empty_index() -> dict[str, Any]:
+    """新建的空索引（`/v1/tasks_enable` 與任務層 `ensure_index` 共用）。"""
+    return {"schema": SCHEMA, "changes": {}}
+
+
+def is_disabled(index: Mapping[str, Any]) -> bool:
+    """索引是否標記停用（欄位存在且不是 null／false；格式不對也當成停用，偏向拒絕）。"""
+    return index.get(DISABLED_KEY) not in (None, False)
+
+
+def disabled_info(index: Mapping[str, Any]) -> dict[str, Any] | None:
+    """停用資訊 `{"at", "by"}`（值不是字串時為 null）；未停用回 None。"""
+    if not is_disabled(index):
+        return None
+    raw = index.get(DISABLED_KEY)
+    raw = raw if isinstance(raw, Mapping) else {}
+    return {
+        k: raw.get(k) if isinstance(raw.get(k), str) else None for k in ("at", "by")
+    }
+
+
+def valid_disabled(value: object) -> bool:
+    """寫入索引的 `disabled` 欄位格式：`{"at": 非空字串, "by": 非空字串}`。"""
+    return (
+        isinstance(value, Mapping)
+        and set(value) == {"at", "by"}
+        and all(isinstance(value[k], str) and value[k].strip() for k in ("at", "by"))
+    )
+
+
+def guarded_by_disable(key: str) -> bool:
+    """停用中拒絕寫入的 key：`task-` 開頭（索引本身另有規則）與 UI 快照。"""
+    return (key.startswith("task-") and key != INDEX_KEY) or key == SNAPSHOT_KEY
 
 
 def _meta(doc: Mapping[str, Any]) -> dict[str, Any]:

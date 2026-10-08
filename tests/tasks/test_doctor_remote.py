@@ -653,3 +653,23 @@ def test_authorization_accepts_migrated_local_archive(tasks_dir: TasksDir, vv):
     doc["state"] = rs.STATE_PENDING_APPLY
     _place(vv, doc)
     assert check(_ctx(tasks_dir, vv)).status == "fail"
+
+
+def test_disabled_vault_skips_remote_checks(tasks_dir: TasksDir, vv):
+    """任務層停用中（索引帶 disabled）：服務端對帳一律 skipped 並註明停用，
+    即使服務端快照已落後（停用時快照本來就推不上去）也不報 warn／fail。"""
+    tasks_dir.write_main("demo", SPEC_A)
+    tasks_dir.propose("c1", deltas={"demo": delta(modified=[MOD_ROOT])})
+    _migrate(tasks_dir, vv)
+    index = vv.get_json(rs.INDEX_KEY)
+    index["disabled"] = {"at": "2026-10-09T00:00:00Z", "by": "艾斯維爾"}
+    vv.put_json(rs.INDEX_KEY, index)
+    vv.put_json(snapshot.SNAPSHOT_KEY, {"schema": 1, "changes": []})
+    report = _report(tasks_dir, vv)
+    guarded = (*REMOTE_CHECKS, "tasks.snapshot_sync", "tasks.snapshot_shape")
+    assert {n: report[n]["status"] for n in guarded} == dict.fromkeys(
+        guarded, "skipped"
+    )
+    for name in guarded:
+        assert "停用" in report[name]["summary"], report[name]
+    assert all(c["status"] in ("pass", "skipped") for c in report.values()), report

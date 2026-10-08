@@ -27,6 +27,41 @@
 版本／狀態／內容雜湊與授權紀錄、`approved`（紀錄雜湊等於目前內容雜湊），給 UI 判斷
 核准是否過期（雜湊只在服務端算，前端不重做一份）。
 
+`POST /v1/tasks_enable`（只收 UI session）：`{"space"?: "dev", "vault": str}`。
+啟用＝建立空的 `task-index`（`task_format.empty_index`）。已存在且未停用回
+`created: false`、不覆寫；停用中則只移除 `disabled` 欄位（`reenabled: true`），
+其餘內容原樣保留。回
+`{"vault", "space", "created", "reenabled", "version"}`。
+
+`POST /v1/tasks_disable`（只收 UI session）：同樣的 body。停用＝在 `task-index` 加
+`disabled: {"at", "by"}`（`by` 為 UI 登入者顯示名稱），**不刪**任何 change／鏡像／
+授權紀錄；已停用回 `changed: false`（不改時間）；沒有索引 409 `tasks_not_enabled`；
+索引不是 JSON 物件 409 `index_invalid`。回 `{"vault", "space", "changed", "disabled",
+"version"}`。
+
+`POST /v1/tasks_status`（只收 UI session，唯讀）：`{"space"?: "dev", "vault"?: str}`，
+vault 省略或 `*` 列出 dev space 全部 vault。回 `{"space", "remote_sync", "vaults": [{
+"vault", "initialized"（有索引）, "enabled"（有索引且未停用）, "disabled": null |
+{at, by}, "changes": int | null, "states": {active, pending_apply, archived} | null,
+"version", "error"?}]}`。計數取自索引（只負責列舉，可能落後 change 文件本身的
+state，見 `remote_store` 格式說明）；索引解析不了時 `error` 說明、計數為 null。
+
+三個任務層管理端點都只開 dev space（D15 第 4 項），其他 space 400 `invalid_request`；
+enable／disable 是 `task-` 前綴的寫入，`tasks.remote_sync` 關閉時 403
+`tasks_remote_sync_disabled`（status 照常可讀，回應帶 `remote_sync` 供 UI 說明）。
+
+停用守衛（`guard_task_write`，`/v1/blob_put` 不論認證方式）：
+- 索引停用中，`task_format.guarded_by_disable` 的 key（`task-change:`／
+  `task-spec-mirror:`／`task-decisions` 等 `task-` 前綴與 `tasks-snapshot`）一律 403
+  `tasks_disabled`，讀取不受影響；`/v1/tasks_authorize` 同樣拒絕
+- 寫 `task-index` 本身：停用中只接受「單純解除停用」（`changes` 等其餘欄位不變）；
+  未停用時可單純加上 `disabled`（MCP／CLI 的 disable，格式須為
+  `{"at": 非空字串, "by": 非空字串}`，否則 400），但切換旗標不可同時改 `changes`
+  （403 `tasks_disabled`）。也就是說舊版客戶端整份重寫索引時不會把停用旗標靜默洗掉。
+  守衛以讀到的版本做 CAS（同 `guard_change_write`）
+- 其他 key 的停用檢查與寫入之間不是同一筆交易：與 disable 同時發生的寫入可能剛好
+  寫進去；停用後的寫入一律被拒
+
 `/v1/blob_put` 對 `task-authorization:` 前綴一律 403 `authorization_write_forbidden`
 （不論認證方式），這裡是唯一的寫入路徑；寫 `task-change:` 時經 `guard_change_write`
 （規則見該函式）。
@@ -48,7 +83,7 @@ from pydantic import BaseModel, ConfigDict
 
 from lore_vault.storage import sidecar as storage_sidecar
 from lore_vault.storage.errors import NotFound
-from lore_vault.storage.vaults import resolve_write
+from lore_vault.storage.vaults import list_vaults, resolve_write
 
 from . import task_format as tf
 from .errors import (
@@ -67,6 +102,8 @@ AUTHORIZATION_PREFIX = tf.AUTHORIZATION_PREFIX
 SCHEMA = tf.SCHEMA
 STATE_ACTIVE = tf.STATE_ACTIVE
 PRINCIPAL_UI = tf.PRINCIPAL_UI
+INDEX_KEY = tf.INDEX_KEY
+INDEX_RETRIES = 5
 TASK_SPACE = "dev"
 MIME = "application/json"
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
@@ -74,7 +111,9 @@ NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 def _require_ui(request: Request) -> None:
     if auth_method_of(request) != AUTH_UI:
-        raise UiSessionRequired("任務核准只能由登入 UI 的使用者本人操作")
+        raise UiSessionRequired(
+            "任務層的核准、啟用與停用只能由登入 UI 的使用者本人操作"
+        )
 
 
 # 認證方式在 body 驗證之前檢查：bearer 請求一律 403，拿不到 422 等任何細節
@@ -242,6 +281,85 @@ def guard_change_write(
     return version
 
 
+# ── 停用守衛（`/v1/blob_put` 與 `/v1/tasks_authorize`）──────────────────
+
+
+def _index(
+    conn: Any, vault: str | None, space: object = TASK_SPACE
+) -> tuple[dict[str, Any] | None, int, bool]:
+    """(索引內容, 版本, 是否存在)；不存在 (None, 0, False)，存在但不是 JSON 物件
+    (None, 版本, True)。"""
+    try:
+        blob = storage_sidecar.get(conn, vault, INDEX_KEY, space=space)
+    except NotFound:
+        return None, 0, False
+    return _json_dict(blob.content), blob.version, True
+
+
+def _disabled_error(vault: str | None) -> TaskChangeWriteForbidden:
+    return TaskChangeWriteForbidden(
+        "tasks_disabled",
+        f"vault {vault} 的任務層已停用：內容保留但不接受寫入；"
+        "請使用者在 UI 的 Vault 維護頁重新啟用，或執行 tasks(action='init')",
+    )
+
+
+def require_enabled(conn: Any, vault: str | None, space: object = TASK_SPACE) -> None:
+    """索引停用中拋 403 `tasks_disabled`（沒有索引不算停用）。"""
+    index, _, _ = _index(conn, vault, space)
+    if index is not None and tf.is_disabled(index):
+        raise _disabled_error(vault)
+
+
+def _without_flag(index: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in index.items() if k != tf.DISABLED_KEY}
+
+
+def guard_task_write(
+    conn: Any,
+    vault: str | None,
+    key: str,
+    content: bytes,
+    *,
+    space: object,
+    expected_version: int | None,
+) -> int | None:
+    """`/v1/blob_put` 的停用守衛（規則見模組 docstring）；回傳寫入要用的
+    `expected_version`（寫索引時為守衛讀到的版本，其他 key 原樣傳回）。"""
+    if key != INDEX_KEY:
+        if tf.guarded_by_disable(key):
+            require_enabled(conn, vault, space)
+        return expected_version
+    current, version, exists = _index(conn, vault, space)
+    if expected_version is not None and expected_version != version:
+        try:
+            blob = storage_sidecar.get(conn, vault, key, space=space)
+        except NotFound:
+            blob = None
+        raise storage_sidecar.SidecarVersionConflict(expected_version, blob, key)
+    new = _json_dict(content)
+    was = current is not None and tf.is_disabled(current)
+    becomes = new is not None and tf.is_disabled(new)
+    if becomes and not tf.valid_disabled(new[tf.DISABLED_KEY]):
+        raise ValueError('task-index 的 disabled 必須是 {"at": 時間, "by": 誰}')
+    if was and becomes:
+        raise _disabled_error(vault)
+    if was or becomes:
+        # 切換旗標：其餘欄位必須原樣（停用不改內容；整份重寫不能順便洗掉旗標）
+        if not exists or current is None:
+            raise TaskChangeWriteForbidden(
+                "tasks_disabled",
+                f"vault {vault} 沒有可停用的任務索引（不存在或不是 JSON 物件）",
+            )
+        if new is None or _without_flag(new) != _without_flag(current):
+            raise TaskChangeWriteForbidden(
+                "tasks_disabled",
+                f"vault {vault} 的任務層停用／重新啟用只能單獨切換 disabled 欄位，"
+                "不可同時修改索引其他內容",
+            )
+    return version
+
+
 # ── 端點 ─────────────────────────────────────────────────────────────
 
 
@@ -274,6 +392,7 @@ def tasks_authorize(request: Request, req: TasksAuthorizeRequest) -> dict[str, A
     display = display_of(request) or principal
     with state.connection() as conn:
         vault = resolve_write(conn, req.vault, space=TASK_SPACE)
+        require_enabled(conn, vault)
         doc, version = _read_change(conn, vault, name)
         if doc.get("state") != STATE_ACTIVE:
             raise TaskAuthorizationRejected(
@@ -356,4 +475,210 @@ def tasks_authorization_status(
         },
         "record": record,
         "approved": record is not None and record.get("content_digest") == digest,
+    }
+
+
+# ── 任務層啟用／停用／狀態（Vault 維護頁）────────────────────────────
+
+
+class TasksVaultRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    space: str = TASK_SPACE
+    vault: str
+
+
+class TasksStatusRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    space: str = TASK_SPACE
+    vault: str | None = None
+
+
+def _check_space(space: str) -> None:
+    if space != TASK_SPACE:
+        raise ValueError(
+            f"任務層只屬於 dev space（D15），{space!r} space 不能啟用、停用或查詢任務層"
+        )
+
+
+def _check_remote_sync(state: AppState, what: str) -> None:
+    if not state.runtime.current().tasks.remote_sync:
+        raise TasksRemoteSyncDisabled(
+            f"服務未開啟任務層遠端同步（設定 tasks.remote_sync）；無法{what}任務層"
+        )
+
+
+def _put_index(conn: Any, vault: str, data: dict[str, Any], expected: int) -> int:
+    return storage_sidecar.put(
+        conn,
+        vault,
+        INDEX_KEY,
+        tf.encode(data),
+        space=TASK_SPACE,
+        mime=MIME,
+        expected_version=expected,
+    ).version
+
+
+def _conflict(vault: str) -> TaskAuthorizationRejected:
+    return TaskAuthorizationRejected(
+        "index_conflict", f"vault {vault} 的索引連續更新衝突，請稍後重試"
+    )
+
+
+@router.post("/tasks_enable")
+def tasks_enable(request: Request, req: TasksVaultRequest) -> dict[str, Any]:
+    """建立空索引，或解除停用（只移除 `disabled`）；已啟用時不寫入。"""
+    state = _state(request)
+    _check_space(req.space)
+    _check_remote_sync(state, "啟用")
+    with state.connection() as conn:
+        vault = resolve_write(conn, req.vault, space=TASK_SPACE)
+        for _ in range(INDEX_RETRIES):
+            index, version, exists = _index(conn, vault)
+            if exists and not (index is not None and tf.is_disabled(index)):
+                return {
+                    "vault": vault,
+                    "space": TASK_SPACE,
+                    "created": False,
+                    "reenabled": False,
+                    "version": version,
+                }
+            created = not exists
+            try:
+                if created:
+                    written = _put_index(conn, vault, tf.empty_index(), 0)
+                else:
+                    assert index is not None
+                    written = _put_index(conn, vault, _without_flag(index), version)
+            except storage_sidecar.SidecarVersionConflict:
+                continue
+            break
+        else:
+            raise _conflict(vault)
+    log.info(
+        "任務層啟用：vault=%s created=%s reenabled=%s principal=%s",
+        vault,
+        created,
+        not created,
+        principal_of(request),
+    )
+    return {
+        "vault": vault,
+        "space": TASK_SPACE,
+        "created": created,
+        "reenabled": not created,
+        "version": written,
+    }
+
+
+@router.post("/tasks_disable")
+def tasks_disable(request: Request, req: TasksVaultRequest) -> dict[str, Any]:
+    """在索引加 `disabled`（不刪任何內容）；已停用時不寫入。"""
+    state = _state(request)
+    _check_space(req.space)
+    _check_remote_sync(state, "停用")
+    by = display_of(request) or principal_of(request)
+    with state.connection() as conn:
+        vault = resolve_write(conn, req.vault, space=TASK_SPACE)
+        for _ in range(INDEX_RETRIES):
+            index, version, exists = _index(conn, vault)
+            if not exists:
+                raise TaskAuthorizationRejected(
+                    "tasks_not_enabled", f"vault {vault} 尚未啟用任務層，不需要停用"
+                )
+            if index is None:
+                raise TaskAuthorizationRejected(
+                    "index_invalid",
+                    f"vault {vault} 的 task-index 不是 JSON 物件，無法停用",
+                )
+            if tf.is_disabled(index):
+                return {
+                    "vault": vault,
+                    "space": TASK_SPACE,
+                    "changed": False,
+                    "disabled": tf.disabled_info(index),
+                    "version": version,
+                }
+            info = {"at": _now(), "by": by}
+            try:
+                written = _put_index(
+                    conn, vault, {**index, tf.DISABLED_KEY: info}, version
+                )
+            except storage_sidecar.SidecarVersionConflict:
+                continue
+            break
+        else:
+            raise _conflict(vault)
+    log.info(
+        "任務層停用：vault=%s principal=%s display=%s",
+        vault,
+        principal_of(request),
+        by,
+    )
+    return {
+        "vault": vault,
+        "space": TASK_SPACE,
+        "changed": True,
+        "disabled": info,
+        "version": written,
+    }
+
+
+def _status_row(vault: str, blob: storage_sidecar.SidecarBlob | None) -> dict:
+    row: dict[str, Any] = {
+        "vault": vault,
+        "initialized": blob is not None,
+        "enabled": False,
+        "disabled": None,
+        "changes": None,
+        "states": None,
+        "version": blob.version if blob is not None else 0,
+    }
+    if blob is None:
+        return row
+    index = _json_dict(blob.content)
+    entries = index.get("changes") if index is not None else None
+    if index is None or not isinstance(entries, dict):
+        # 解析不了：已初始化但狀態不明（不當成啟用）
+        row["error"] = "task-index 不是合法的索引 JSON（schema 1 的 changes 物件）"
+        return row
+    row["disabled"] = tf.disabled_info(index)
+    row["enabled"] = row["disabled"] is None
+    states = dict.fromkeys(tf.STATES, 0)
+    for entry in entries.values():
+        value = entry.get("state") if isinstance(entry, dict) else None
+        if value in states:
+            states[value] += 1
+    row["changes"] = len(entries)
+    row["states"] = states
+    return row
+
+
+@router.post("/tasks_status")
+def tasks_status(request: Request, req: TasksStatusRequest) -> dict[str, Any]:
+    """唯讀：各 dev vault 的任務層狀態（格式見模組 docstring）。"""
+    state = _state(request)
+    _check_space(req.space)
+    with state.connection() as conn:
+        if req.vault is None or storage_sidecar.is_all(req.vault):
+            blobs = {
+                b.vault: b
+                for b in storage_sidecar.list_for_key(conn, INDEX_KEY, space=TASK_SPACE)
+            }
+            keys = [v.key for v in list_vaults(conn, space=TASK_SPACE)]
+        else:
+            key = resolve_write(conn, req.vault, space=TASK_SPACE)
+            try:
+                blobs = {
+                    key: storage_sidecar.get(conn, key, INDEX_KEY, space=TASK_SPACE)
+                }
+            except NotFound:
+                blobs = {}
+            keys = [key]
+    return {
+        "space": TASK_SPACE,
+        "remote_sync": state.runtime.current().tasks.remote_sync,
+        "vaults": [_status_row(k, blobs.get(k)) for k in keys],
     }

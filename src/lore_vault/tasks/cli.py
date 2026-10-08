@@ -155,6 +155,14 @@ def _parser() -> argparse.ArgumentParser:
     _add_client_env(p)
     _add_offline(p)
 
+    p = sub.add_parser(
+        "disable",
+        help="停用服務端任務層（內容保留；init --remote 或 UI 重新啟用）",
+    )
+    _add_vault(p)
+    p.add_argument("--by", default="CLI", help="記進停用資訊的操作者名稱")
+    _add_client_env(p)
+
     p = sub.add_parser("validate", help="檢查格式、requirement 重疊與 base")
     p.add_argument("name", nargs="?")
     group = p.add_mutually_exclusive_group()
@@ -386,6 +394,9 @@ def _list(
         args, env, ws, client_factory or _client_factory(args, env)
     )
     remote_rows = cli_remote.list_rows(env, client, ws) if client else None
+    if not args.json:
+        # stdout 的 --json 格式（陣列）不變；狀態只在文字模式顯示
+        _print_layer_state(args, env, ws, client, client_factory)
     rows: list[dict[str, Any]] = list(remote_rows or [])
     for change in [] if remote_rows is not None else ws.active() + ws.archived():
         status, reasons = derive_status(change, ws)
@@ -430,6 +441,53 @@ def _list(
         if r["reasons"]:
             env.print(f"  {r['change']}：" + "；".join(r["reasons"]))
     return EXIT_OK
+
+
+def _print_layer_state(
+    args: argparse.Namespace,
+    env: _Env,
+    ws: Workspace,
+    client: VaultClient | None,
+    client_factory: Callable[[], VaultClient] | None,
+) -> None:
+    """服務端任務層是否啟用（同 MCP list 的 enabled／local_initialized）。"""
+    local = remote_enabled(ws.root)
+    state = None
+    if client is None and not args.offline:
+        candidate = (client_factory or _client_factory(args, env))()
+        client = candidate if candidate.settings.push_configured else None
+    if client is not None and not args.offline:
+        state = cli_remote.index_state(env, client, ws)
+    if state is None:
+        remote = "無法確認（離線或未設定服務）"
+    elif state.disabled is not None:
+        remote = f"已停用（{state.describe()}，內容保留）"
+    else:
+        remote = "已啟用" if state.exists else "未啟用"
+    env.print(
+        f"任務層：服務端{remote}；本機"
+        + ("已初始化（remote: true）" if local else "未標記 remote: true")
+    )
+    if state is not None and state.enabled and not local:
+        env.print("  服務端已啟用任務層：執行 init --remote 建立本機工作副本（冪等）")
+
+
+def _disable(
+    args: argparse.Namespace,
+    env: _Env,
+    client_factory: Callable[[], VaultClient] | None,
+    now: _dt.datetime | None,
+) -> int:
+    root = resolve_root(args.root, env.environ, env.cwd)
+    ws = load_workspace(root, args.decisions, env.environ) if root else None
+    if ws is None and not args.vault:
+        env.print("disable 失敗：找不到任務目錄；帶 --vault 指定 vault")
+        return EXIT_FAIL
+    client = (client_factory or _client_factory(args, env))()
+    if not client.settings.push_configured:
+        env.print(f"disable 失敗：{client.describe()}")
+        return EXIT_FAIL
+    return cli_remote.disable(env, client, ws, args.vault, by=args.by, now=now)
 
 
 def _width(text: str) -> int:
@@ -509,9 +567,15 @@ def _push(
         raise ServiceError(client.describe())
 
     async def remote() -> list[snapshot.PushResult] | None:
-        store = await cli_remote.open_store(client, ws, vault)
-        if not await snapshot.has_remote_index(store):
+        store = await cli_remote.open_store(client, ws, vault, writable=False)
+        state = await store.index_state()
+        if not state.exists:
             return None
+        if state.disabled is not None:
+            raise rs.StoreError(
+                "tasks_disabled",
+                f"{store.vault} 的任務層已停用（{state.describe()}），不推送快照",
+            )
         if decisions:
             await remote_ops.push_decisions(store, ws)
         return [await snapshot.push_remote(store, ws)]
@@ -667,6 +731,8 @@ def main(
         return _doctor(args, env, client_factory)
     if args.command == "migrate":
         return migrate.run(args, env, client_factory)
+    if args.command == "disable":
+        return _disable(args, env, client_factory, now)
     if args.command == "propose":
         code = _propose(args, env, today, client_factory)
     elif args.command == "list":

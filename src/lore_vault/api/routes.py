@@ -30,7 +30,9 @@ FTS／embedding／recall／list／snapshot，不提供 MCP 工具。內容以 `c
 限定的 `POST /v1/tasks_authorize`（`api.tasks_admin`）。`task-change:` 開頭的寫入經
 `tasks_admin.guard_change_write`：需授權的 change 不可取消標記，要離開 active 或寫入
 archive 簿記必須有內容雜湊相符的 UI 核准紀錄（403 `authorization_downgrade_forbidden`／
-`authorization_required`），並以守衛讀到的版本做 CAS。
+`authorization_required`），並以守衛讀到的版本做 CAS。任務層停用中（`task-index` 帶
+`disabled`）任務內容與 `tasks-snapshot` 的寫入 403 `tasks_disabled`，索引的停用旗標只能
+單獨切換（`tasks_admin.guard_task_write`）。
 
 `POST /v1/document_download` 是唯一回二進位的端點：body 同其他 RPC（`space`、
 `vault`、`id`，選填 `max_bytes`），成功回原始位元組（Content-Type 為上傳時的 mime、
@@ -101,7 +103,7 @@ from .principals import principal_of
 from .state import AppState
 from .tasks_admin import AUTHORIZATION_PREFIX as AUTHORIZATION_KEY_PREFIX
 from .tasks_admin import CHANGE_PREFIX as CHANGE_KEY_PREFIX
-from .tasks_admin import guard_change_write
+from .tasks_admin import guard_change_write, guard_task_write
 
 router = APIRouter(prefix="/v1")
 
@@ -716,7 +718,8 @@ def blob_put(request: Request, req: BlobPutRequest) -> dict[str, Any]:
     （`error.current` 為目前內容，key 不存在時為 null）；`task-authorization:`
     開頭一律 403 `authorization_write_forbidden`（只能經 `/v1/tasks_authorize`）；
     `task-` 開頭且 `tasks.remote_sync` 關閉 403 `tasks_remote_sync_disabled`
-    （不寫任何東西）；`task-change:` 開頭先過授權守衛（`guard_change_write`）。"""
+    （不寫任何東西）；任務層停用中，任務內容與 `tasks-snapshot` 403 `tasks_disabled`
+    （`guard_task_write`）；`task-change:` 開頭再過授權守衛（`guard_change_write`）。"""
     storage_sidecar.validate_key(req.key)
     if req.key.startswith(AUTHORIZATION_KEY_PREFIX):
         # 不論 bearer 或 UI session：授權紀錄只能經 /v1/tasks_authorize 寫入
@@ -734,7 +737,15 @@ def blob_put(request: Request, req: BlobPutRequest) -> dict[str, Any]:
         )
     content = _decode_sidecar(req.content_base64, req.key)
     with _state(request).connection() as conn:
-        expected = req.expected_version
+        # 任務層停用守衛：停用中拒收任務內容；索引的停用旗標只能單獨切換
+        expected = guard_task_write(
+            conn,
+            req.vault,
+            req.key,
+            content,
+            space=req.space,
+            expected_version=req.expected_version,
+        )
         if req.key.startswith(CHANGE_KEY_PREFIX):
             # 不論認證方式：需授權 change 的閘門在服務端強制（bearer 由所有 agent 共用）
             expected = guard_change_write(

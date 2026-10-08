@@ -881,6 +881,16 @@ button.lv-wikilink { background: none; border: none; border-bottom: 1px dashed v
 .lv-vcard__k { font-family: var(--font-mono); font-size: var(--lv-fs-meta); letter-spacing: .14em; color: var(--ink-mute); }
 .lv-vcard__foot { margin-top: auto; display: flex; justify-content: space-between; gap: 8px; font-size: var(--lv-fs-meta); color: var(--ink-mute); }
 .lv-vcard__go { color: var(--lv-zone-text); font-family: var(--font-mono); font-size: var(--lv-fs-meta); white-space: nowrap; }
+/* 卡片上的任務層狀態（只在 dev space） */
+.lv-vcard__layer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.lv-vcard__layer .lv-badge { white-space: nowrap; }
+
+/* 維護頁：任務層區塊（徽章列、說明、按鈕以 lv-stack 間距分隔，按鈕維持原寬） */
+.lv-task-layer { align-items: flex-start; }
+.lv-task-layer > p { margin: 0; }
+.lv-task-layer > .lv-banner { margin-top: 0; align-self: stretch; }
+.lv-task-layer .lv-actions { margin-top: 0; }
+.lv-task-layer a.btn-outline { text-decoration: none; display: inline-flex; align-items: center; }
 
 /* 維護頁：墓碑 */
 .lv-graves { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }

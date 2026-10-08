@@ -3,6 +3,7 @@
 // `requires_authorization` change 的人類核准（TASK_LAYER_MCP §3.3）：讀服務端 change 與授權紀錄的核准狀態（內容雜湊比對），
 // 經 UI session 限定的 `/v1/tasks_authorize` 寫入，MCP 的 archive 只認這份紀錄。
 // 任務層只屬於 dev space，其他 space 只顯示說明（比照記憶層）。
+// 停用中的 vault（`/v1/tasks_status`）顯示停用橫幅、不顯示核准按鈕；狀態讀不到時照常顯示（服務端仍強制）。
 import { useEffect, useState } from 'preact/hooks';
 
 import { ChipGroup, FilterPanel, queryChoice, screenQuery, useQuerySync } from '../components/Filters';
@@ -13,6 +14,7 @@ import { describeError, formatTime, isAbort } from '../lib/format';
 import { formatAge, hoursSince } from '../lib/health';
 import { Markdown } from '../lib/markdown';
 import { routePath } from '../lib/router';
+import { describeDisabled, useTaskLayer, type TaskLayerDisabled } from '../lib/taskLayer';
 import {
   approvalState,
   approveChange,
@@ -119,13 +121,16 @@ function useSnapshots(vault: string) {
 }
 
 function TaskList() {
-  const { vault, vaults } = useApp();
+  const { api, vault, vaults } = useApp();
+  const layer = useTaskLayer(api, vault === ALL ? '*' : vault);
   // 篩選初值取自網址（重新整理、從詳情返回都保留），與筆記、文件同一套
   const [initial] = useState(() => screenQuery('tasks'));
   const [filter, setFilter] = useState<TaskFilter>(() => queryChoice(initial, 'status', TASK_FILTER_IDS, ''));
   useQuerySync('tasks', { status: filter });
   const { data, error, loading, retry } = useSnapshots(vault);
   const single = vault !== ALL;
+  // 單一 vault 的停用狀態放在列表上方（快照為空時也看得到）；全部 vault 時放進各自區塊
+  const singleDisabled = single && layer.status ? ([...layer.status.vaults.values()][0]?.disabled ?? null) : null;
 
   const groups = (data ?? []).map((s) => ({ snap: s, rows: filterRows(sortRows(taskRows([s])), filter) }));
   const total = groups.reduce((n, g) => n + (g.snap.snapshot?.changes.length ?? 0), 0);
@@ -152,6 +157,7 @@ function TaskList() {
         </div>
       </FilterPanel>
 
+      {singleDisabled && <DisabledBanner disabled={singleDisabled} />}
       {error !== null && <ErrorState error={error} onRetry={retry} />}
       {loading && !data && <Loading />}
       {data && error === null && data.length === 0 && (
@@ -171,7 +177,14 @@ function TaskList() {
       {data && error === null && visible.length > 0 && (
         <div class="lv-task-groups" data-testid="tasks" aria-busy={loading}>
           {visible.map((g) => (
-            <TaskGroupView key={g.snap.vault} snap={g.snap} rows={g.rows} header={!single} live={live} />
+            <TaskGroupView
+              key={g.snap.vault}
+              snap={g.snap}
+              rows={g.rows}
+              header={!single}
+              live={live}
+              disabled={single ? null : (layer.status?.vaults.get(g.snap.vault)?.disabled ?? null)}
+            />
           ))}
         </div>
       )}
@@ -226,11 +239,13 @@ function TaskGroupView({
   rows,
   header,
   live,
+  disabled,
 }: {
   snap: VaultSnapshot;
   rows: TaskRow[];
   header: boolean;
   live: Map<string, ApprovalInfo>;
+  disabled: TaskLayerDisabled | null;
 }) {
   const { vaults } = useApp();
   const stale = isStale(snap.updated);
@@ -255,6 +270,7 @@ function TaskGroupView({
       ) : (
         <div class="lv-meta-line lv-task-group__sync">{sync}</div>
       )}
+      {disabled && <DisabledBanner disabled={disabled} />}
       {snap.error && (
         <Banner tone="error" label="INVALID" title="快照格式不正確" testId="task-snapshot-invalid">
           {snap.error}。請在該 repo 重跑任務層的 sync。
@@ -268,6 +284,16 @@ function TaskGroupView({
         </ul>
       )}
     </section>
+  );
+}
+
+/** 任務層停用中：內容保留、唯讀；重新啟用在 Vault 維護頁。 */
+function DisabledBanner({ disabled }: { disabled: TaskLayerDisabled }) {
+  return (
+    <Banner tone="warn" label="DISABLED" title="任務層已停用" testId="task-layer-disabled">
+      {describeDisabled(disabled, formatTime)}。內容全部保留、可以檢視，但不接受寫入也不能核准；要恢復請到 Vault
+      維護頁重新啟用。
+    </Banner>
   );
 }
 
@@ -372,7 +398,9 @@ function TaskRowView({ row, approval }: { row: TaskRow; approval: LiveApproval |
 // ── 詳情 ──
 
 function TaskDetail({ vaultKey, name }: { vaultKey: string; name: string }) {
-  const { space, vaults, navigate } = useApp();
+  const { api, space, vaults, navigate } = useApp();
+  const layer = useTaskLayer(api, vaultKey);
+  const disabled = layer.status ? ([...layer.status.vaults.values()][0]?.disabled ?? null) : null;
   const { data, error, loading, retry } = useSnapshots(vaultKey);
   const snap = data?.[0] ?? null;
   const change = snap?.snapshot?.changes.find((c) => c.name === name) ?? null;
@@ -413,7 +441,8 @@ function TaskDetail({ vaultKey, name }: { vaultKey: string; name: string }) {
             它可能已改名或移除；最後一次同步於 {formatTime(snap.updated)}。
           </EmptyState>
         )}
-        {snap && change && <ChangeBody change={change} updated={snap.updated} vaultKey={vaultKey} />}
+        {disabled && <DisabledBanner disabled={disabled} />}
+        {snap && change && <ChangeBody change={change} updated={snap.updated} vaultKey={vaultKey} disabled={disabled !== null} />}
       </article>
       {snap?.snapshot && change && (
         <aside class="lv-detail__side" aria-label="change 關聯">
@@ -424,11 +453,23 @@ function TaskDetail({ vaultKey, name }: { vaultKey: string; name: string }) {
   );
 }
 
-function ChangeBody({ change, updated, vaultKey }: { change: TaskChange; updated: string; vaultKey: string }) {
+function ChangeBody({
+  change,
+  updated,
+  vaultKey,
+  disabled,
+}: {
+  change: TaskChange;
+  updated: string;
+  vaultKey: string;
+  /** 任務層停用中：不顯示核准區塊 */
+  disabled: boolean;
+}) {
   const view = statusView(change.status);
   const stale = isStale(updated);
   // 核准狀態在這裡讀一次，同時給頁首徽章、狀態說明與核准區塊；核准成功後 reload，頁首立即反映
-  const approval = useApproval(vaultKey, change.name, change.requires_authorization && change.status !== STATUS_DONE);
+  const needsApproval = change.requires_authorization && change.status !== STATUS_DONE;
+  const approval = useApproval(vaultKey, change.name, needsApproval);
   const live = liveApproval(change, approval.info);
   const reasons = live ? [`已由 ${live.by} 核准（${live.at ? formatTime(live.at) : '時間不明'}）`] : change.reasons;
   // 可開工（含快照已記錄核准）或即時已核准：說明是資訊，不是阻擋
@@ -472,7 +513,7 @@ function ChangeBody({ change, updated, vaultKey }: { change: TaskChange; updated
         </Banner>
       )}
 
-      {change.requires_authorization && change.status !== STATUS_DONE && (
+      {needsApproval && !disabled && (
         <Approval vaultKey={vaultKey} name={change.name} info={approval.info} error={approval.error} reload={approval.reload} />
       )}
 

@@ -66,6 +66,7 @@ from .workspace import (
     load_workspace,
     meta_errors,
     record_base,
+    remote_enabled,
     resolve_root,
     validate_change,
 )
@@ -89,6 +90,13 @@ ACTIONS = (
     "validate",
     "archive",
     "sync_specs",
+    "disable",
+)
+DISABLED_BY_DEFAULT = "agent（MCP）"
+DISABLE_NOTE = "內容全部保留；重新啟用：tasks(action='init') 或 UI 的 Vault 維護頁"
+LIST_INIT_NEXT_STEP = (
+    "服務端已啟用此 vault 的任務層，但本機尚未初始化工作副本（openspec/ 與 "
+    "config.yaml 的 remote: true）：呼叫 tasks(action='init')（冪等）"
 )
 ARCHIVE_OP = "tasks_archive"
 ARCHIVE_NEXT_STEP = (
@@ -197,6 +205,8 @@ HINTS = {
     "change_not_pending_apply": (
         "只有已封存待落地（pending_apply）的 change 需要 sync_specs"
     ),
+    "tasks_disabled": rs.DISABLED_HINT,
+    "tasks_not_enabled": "這個 vault 尚未啟用任務層；需要時呼叫 tasks(action='init')",
     "archive_dir_exists": (
         "本機 changes/archive/ 已有同名目錄但不是這個 change 的封存記錄；"
         "請使用者人工確認"
@@ -411,11 +421,12 @@ class TaskOps:
 
     async def init(self, vault: str | None, display: str | None) -> dict[str, Any]:
         target = await self._target(vault, create=True, display=display)
-        created = await target.store.ensure_index()
+        created, reenabled = await target.store.enable()
         result: dict[str, Any] = {
             "vault": target.vault,
             "space": SPACE_DEV,
             "created": created,
+            "reenabled": reenabled,
         }
         if self.shell.http:
             result["note"] = HTTP_INIT_NOTE
@@ -457,6 +468,7 @@ class TaskOps:
         blocked = _decision_ids(_str_list(blocked_by or [], "blocked_by"))
         depends = _str_list(depends_on or [], "depends_on")
         target = await self._target(vault)
+        await target.store.require_enabled()
         ws = target.workspace()
         index, _ = await target.store.get_index()
         local_archived = {c.name for c in ws.archived()} if ws else set()
@@ -547,6 +559,7 @@ class TaskOps:
         if not given:
             raise rs.StoreError("no_changes", "edit 沒有任何要更新的欄位")
         target = await self._target(vault)
+        await target.store.require_enabled()
         change = await target.store.require_change(name)
         if change.state != rs.STATE_ACTIVE:
             raise rs.StoreError(
@@ -606,6 +619,7 @@ class TaskOps:
     ) -> dict[str, Any]:
         name = rs.check_name(name)
         target = await self._target(vault)
+        await target.store.require_enabled()
         change = await target.store.require_change(name)
         result: dict[str, Any] = {
             "name": name,
@@ -653,8 +667,38 @@ class TaskOps:
                 rows += [{"vault": key, **row} for row in await self._rows(target)]
             return {"vault": "*", "changes": _filter(rows, status_filter)}
         target = await self._target(vault)
+        state = await target.store.index_state()
         rows = await self._rows(target)
-        return {"vault": target.vault, "changes": _filter(rows, status_filter)}
+        result: dict[str, Any] = {
+            "vault": target.vault,
+            "enabled": state.enabled,
+            "disabled": state.disabled,
+        }
+        if not self.shell.http:
+            root = target.local_root
+            local = root is not None and root.is_dir() and remote_enabled(root)
+            result["local_initialized"] = local
+            if root is None:
+                result["local_reason"] = target.local_reason
+            elif state.enabled and not local:
+                result["next_step"] = LIST_INIT_NEXT_STEP
+        result["changes"] = _filter(rows, status_filter)
+        return result
+
+    async def disable(self, vault: str | None, author: str | None) -> dict[str, Any]:
+        """停用此 vault 的任務層（只在索引加 disabled，不刪內容；冪等）。"""
+        target = await self._target(vault)
+        changed, info = await target.store.disable(
+            by=(author or "").strip() or DISABLED_BY_DEFAULT,
+            at=_utc(self.shell._now().timestamp()),
+        )
+        return {
+            "vault": target.vault,
+            "space": SPACE_DEV,
+            "changed": changed,
+            "disabled": info,
+            "note": DISABLE_NOTE,
+        }
 
     async def _rows(self, target: Target) -> list[dict[str, Any]]:
         changes, archived = await target.store.list_changes()
@@ -696,6 +740,7 @@ class TaskOps:
         if record and rebase:
             raise rs.StoreError("invalid_request", "record_base 與 rebase 擇一")
         target = await self._target(vault)
+        await target.store.require_enabled()
         changes, archived = await target.store.list_changes()
         result: dict[str, Any] = {"vault": target.vault}
         local = None if self.shell.http else target.workspace()
@@ -810,6 +855,7 @@ class TaskOps:
         # 1. 授權閘門：只讀 change 與授權紀錄（vault 用呼叫端給的 key 或工作目錄
         #    binding，服務端會解析別名），在 vault_resolve／list／write 之前
         gate_store = rs.RemoteStore(self.post, vault or self._binding_key())
+        await gate_store.require_enabled()
         change = await gate_store.require_change(name)
         if change.state != rs.STATE_ACTIVE:
             raise rs.StoreError(
@@ -922,6 +968,7 @@ class TaskOps:
                 hint=HINTS["path_not_supported"],
             )
         target = await self._target(vault)
+        await target.store.require_enabled()
         ws = target.workspace()
         if ws is None:
             raise rs.StoreError(
@@ -1031,7 +1078,8 @@ DESCRIPTION = (
     "固定在 dev space，與目前 space 無關）。用 action 選動作，其餘參數依動作帶：\n"
     "- init(vault?, display?)：建立此 vault 的任務層（vault 不存在時以 display 建立）。"
     "本地 stdio 殼另在工作目錄建 openspec/ 骨架、把 openspec/changes/ 加進 .gitignore，"
-    "並把本機主 spec 推成服務端鏡像\n"
+    "並把本機主 spec 推成服務端鏡像。任務層停用中的 vault 以 init 重新啟用"
+    "（內容原樣復原）\n"
     "- propose(name, goal?, source?, blocked_by?, depends_on?, "
     "requires_authorization?, skip_specs?)：建立 change（version=1，含 proposal／"
     "tasks 範本）。name 用 kebab-case；"
@@ -1048,7 +1096,13 @@ DESCRIPTION = (
     "本機 openspec/changes/<name>/；本機有未推送修改時回 local_modified，"
     "確認捨棄才帶 overwrite=true\n"
     "- list(vault?, status_filter?)：change 狀態表（可開工／被擋住／待授權／無法判定／"
-    "已封存（待落地））；vault='*' 列出目前 space 所有 vault\n"
+    "已封存（待落地））；vault='*' 列出目前 space 所有 vault。單一 vault 另回 enabled"
+    "（服務端已啟用任務層：有索引且未停用；即使沒有 change 也要把任務層當工作脈絡）、"
+    "disabled（停用資訊或 null）；本地 stdio 殼另回 local_initialized（本機 openspec/ "
+    "且 remote: true），服務端已啟用而本機未初始化時附 next_step（呼叫 init）\n"
+    "- disable(vault?, author?)：停用此 vault 的任務層（只在使用者要求時；先說明內容"
+    "全部保留、重新啟用即復原）。冪等。停用中除 list／init／disable 外的 action 一律回 "
+    "tasks_disabled\n"
     "- validate(name?, record_base?, rebase?)：檢查格式、requirement 重疊、base 是否"
     "過時與 delta 併回主 spec 的試算（主 spec 讀服務端鏡像）；"
     "省略 name 檢查全部 active。新增 delta 後帶 record_base=true 記錄 base；"
@@ -1187,7 +1241,8 @@ def build_tools(shell: Shell) -> list[TaskTool]:
             ),
         ] = None,
         author: Annotated[
-            str | None, Field(description="archive：" + AUTHOR_FIELD_DESCRIPTION)
+            str | None,
+            Field(description="archive／disable：" + AUTHOR_FIELD_DESCRIPTION),
         ] = None,
         overwrite: Annotated[
             bool,
@@ -1241,6 +1296,8 @@ def build_tools(shell: Shell) -> list[TaskTool]:
                     )
                 elif action == "sync_specs":
                     result = await ops.sync_specs(vault, name, overwrite)
+                elif action == "disable":
+                    result = await ops.disable(vault, author)
                 elif action == "archive":
                     result = await ops.archive(
                         vault,

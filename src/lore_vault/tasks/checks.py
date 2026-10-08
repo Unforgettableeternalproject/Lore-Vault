@@ -16,7 +16,9 @@ context：
 `authorization_record_integrity`／`version_sync_agreement`／`specs_mirror_agreement`，
 另加 `decisions_mirror_agreement`）經 `remote_store.RemoteStore` 讀版本化側載；
 服務端還沒有 `task-index`（這個 vault 未遷移、也沒跑過 MCP init）時記為 skipped，
-不把純本機的工作區判成異常。
+不把純本機的工作區判成異常。任務層停用中（索引帶 `disabled`）的 vault，對服務端的
+檢查（上列與 `snapshot_sync`／`snapshot_shape`）一律 skipped 並註明停用：停用時服務端
+拒收寫入，快照與鏡像本來就不會跟上。
 """
 
 from __future__ import annotations
@@ -296,11 +298,23 @@ def dependency_exists(ctx: DoctorContext) -> CheckResult:
     return CheckResult.ok("depends_on 都存在")
 
 
+async def _skip_if_disabled(store: rs.RemoteStore) -> rs.IndexState:
+    """任務層停用中 → skipped（註明停用）；否則回索引狀態。"""
+    state = await store.index_state()
+    if state.disabled is not None:
+        raise CheckSkipped(
+            f"{store.vault} 的任務層已停用（{state.describe()}），服務端對帳略過"
+        )
+    return state
+
+
 def _remote_snapshot(
     ctx: DoctorContext, ws: Workspace
 ) -> tuple[str, dict[str, Any] | None]:
     client = _client(ctx)
     vault = snapshot.resolve_vault(client, ws, ctx.settings.get("vault"))
+    store = rs.RemoteStore(rs.vault_client_post(client), vault)
+    asyncio.run(_skip_if_disabled(store))
     return vault, client.get_blob(vault, "dev", snapshot.SNAPSHOT_KEY)
 
 
@@ -318,7 +332,7 @@ def snapshot_sync(ctx: DoctorContext) -> CheckResult:
     try:
         vault = snapshot.resolve_vault(client, ws, ctx.settings.get("vault"))
         store = rs.RemoteStore(rs.vault_client_post(client), vault)
-        if asyncio.run(snapshot.has_remote_index(store)):
+        if asyncio.run(_skip_if_disabled(store)).exists:
             return _remote_snapshot_sync(client, store, ws)
     except ServiceError as exc:
         return _service_error(exc)
@@ -410,6 +424,10 @@ def snapshot_shape(ctx: DoctorContext) -> CheckResult:
         vault, remote = _remote_snapshot(ctx, ws)
     except ServiceError as exc:
         return _service_error(exc)
+    except rs.RemoteUnreachable as exc:
+        return CheckResult.warn(f"服務無法對帳：{exc.detail}")
+    except rs.RemoteError as exc:
+        return CheckResult.warn(f"服務拒絕對帳請求：{exc.message}")
     except ValueError:
         return CheckResult.fail("服務端快照不是合法的 base64，執行 sync 重推")
     if remote is None:
@@ -468,7 +486,12 @@ def _remote_check(
     try:
         vault = snapshot.resolve_vault(client, ws, ctx.settings.get("vault"))
         store = rs.RemoteStore(rs.vault_client_post(client), vault)
-        return asyncio.run(run(ws, store))
+
+        async def guarded() -> CheckResult:
+            await _skip_if_disabled(store)
+            return await run(ws, store)
+
+        return asyncio.run(guarded())
     except ServiceError as exc:
         return _service_error(exc)
     except rs.RemoteUnreachable as exc:

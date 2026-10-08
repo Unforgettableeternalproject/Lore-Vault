@@ -71,8 +71,11 @@ class TaskChangeWriteForbidden(Exception):
       新內容取消它
     - `authorization_required`：需授權的 change 要離開 active 或寫入 archive 簿記，
       但沒有內容雜湊相符的 UI 核准紀錄
+    - `tasks_disabled`：該 vault 的任務層停用中（任務內容、`tasks-snapshot` 與核准一律
+      拒收），或寫 `task-index` 時停用旗標沒有單獨切換（`guard_task_write`）
 
-    不論認證方式都適用（守衛規則見 `api.tasks_admin.guard_change_write`）。"""
+    不論認證方式都適用（守衛規則見 `api.tasks_admin.guard_change_write`／
+    `guard_task_write`）。"""
 
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
@@ -80,8 +83,10 @@ class TaskChangeWriteForbidden(Exception):
 
 
 class TaskAuthorizationRejected(Exception):
-    """`POST /v1/tasks_authorize` 的 change 不能核准（409，`code` 區分原因：
-    `change_invalid`／`change_not_active`／`authorization_not_required`）。"""
+    """任務層 UI 端點的 409（`code` 區分原因）：`/v1/tasks_authorize` 的
+    `change_invalid`／`change_not_active`／`authorization_not_required`；
+    `/v1/tasks_enable`／`tasks_disable` 的 `tasks_not_enabled`／`index_invalid`／
+    `index_conflict`。"""
 
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)

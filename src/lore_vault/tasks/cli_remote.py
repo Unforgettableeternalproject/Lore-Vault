@@ -32,7 +32,7 @@ from lore_vault.binding import resolve_binding
 
 from . import remote_ops
 from . import remote_store as rs
-from .vault_client import VaultClient
+from .vault_client import ServiceError, VaultClient
 from .workspace import (
     STATUS_PENDING_APPLY,
     Workspace,
@@ -69,6 +69,11 @@ class Offline(Exception):
     """服務不可達：呼叫端決定退回本機模式或失敗。"""
 
 
+DISABLED_HINT = (
+    "任務層停用中（內容保留）；重新啟用：UI 的 Vault 維護頁，或 init --remote"
+)
+
+
 def client_for(
     args: argparse.Namespace,
     env: _Env,
@@ -98,12 +103,25 @@ def run(fn: Callable[[], Awaitable[Any]]) -> Any:
 
 
 async def open_store(
-    client: VaultClient, ws: Workspace, vault: str | None
+    client: VaultClient,
+    ws: Workspace | None,
+    vault: str | None,
+    *,
+    writable: bool = True,
 ) -> rs.RemoteStore:
+    """`writable`：會寫服務端（或依服務端內容改本機）的指令，在任何寫入前確認
+    任務層未停用（`tasks_disabled`）；list／init 傳 False。"""
     post = rs.vault_client_post(client)
-    key = vault or resolve_binding(ws.project_root).key
+    if vault:
+        key = vault
+    else:
+        assert ws is not None
+        key = resolve_binding(ws.project_root).key
     resolved = await rs.RemoteStore(post, str(key)).resolve_vault(str(key))
-    return rs.RemoteStore(post, resolved)
+    store = rs.RemoteStore(post, resolved)
+    if writable:
+        await store.require_enabled()
+    return store
 
 
 def _fail(env: _Env, prefix: str, exc: Exception) -> int:
@@ -118,13 +136,17 @@ def _fail(env: _Env, prefix: str, exc: Exception) -> int:
     if isinstance(exc, rs.StoreError):
         details = exc.extra.get("details") or []
         lines = [f"{prefix}：{exc.message}", *(f"    {d}" for d in details)]
-        hint = exc.extra.get("hint")
+        hint = exc.extra.get("hint") or (
+            DISABLED_HINT if exc.code == "tasks_disabled" else None
+        )
         if hint:
             lines.append(f"    {hint}")
         env.print(*lines)
         return EXIT_FAIL
     if isinstance(exc, rs.RemoteError):
         env.print(f"{prefix}：服務拒絕（{exc.status}）：{exc.message}")
+        if exc.code == "tasks_disabled":
+            env.print(f"    {DISABLED_HINT}")
         return EXIT_FAIL
     raise exc
 
@@ -241,13 +263,26 @@ def propose(
     return EXIT_OK
 
 
+def index_state(env: _Env, client: VaultClient, ws: Workspace) -> rs.IndexState | None:
+    """服務端任務層的啟用狀態；服務不可達或被拒回 None（只用於顯示）。"""
+
+    async def go() -> rs.IndexState:
+        store = await open_store(client, ws, None, writable=False)
+        return await store.index_state()
+
+    try:
+        return run(go)
+    except (Offline, rs.RemoteError, rs.StoreError, ServiceError, ValueError):
+        return None
+
+
 def list_rows(
     env: _Env, client: VaultClient, ws: Workspace
 ) -> list[dict[str, Any]] | None:
     """服務端內容推導的狀態表；服務不可達回 None（呼叫端退回本機）。"""
 
     async def go() -> list[dict[str, Any]]:
-        store = await open_store(client, ws, None)
+        store = await open_store(client, ws, None, writable=False)
         changes, archived = await store.list_changes(include_archived=True)
         rws = await remote_ops.remote_workspace(store, ws, changes, archived)
         auth = await remote_ops.authorization_states(store, changes)
@@ -364,7 +399,7 @@ def validate(
         env.print(*lines)
         env.warn(f"警告：服務不可達（{exc}），以本機工作副本驗證（未同步）")
         return None
-    except rs.RemoteError as exc:
+    except (rs.RemoteError, rs.StoreError) as exc:
         env.print(*lines)
         return _fail(env, "validate 失敗", exc)
     env.print(*lines)
@@ -580,14 +615,15 @@ def init_remote(
     env: _Env, client: VaultClient, ws: Workspace, vault: str | None
 ) -> int:
     async def go() -> dict[str, Any]:
-        store = await open_store(client, ws, vault)
-        created = await store.ensure_index()
+        store = await open_store(client, ws, vault, writable=False)
+        created, reenabled = await store.enable()
         changes, _ = await store.list_changes()
         mirrors = await remote_ops.push_mirrors(store, ws, changes)
         decisions = await remote_ops.push_decisions(store, ws)
         return {
             "vault": store.vault,
             "created": created,
+            "reenabled": reenabled,
             "mirrors": mirrors,
             "decisions": decisions,
         }
@@ -601,9 +637,49 @@ def init_remote(
         return _fail(env, "服務端初始化失敗", exc)
     env.print(
         f"服務端任務層：{result['vault']}"
-        + ("（新建）" if result["created"] else "（已存在）"),
+        + (
+            "（新建）"
+            if result["created"]
+            else "（已重新啟用，內容原樣復原）"
+            if result["reenabled"]
+            else "（已存在）"
+        ),
         "主 spec 鏡像：推送 "
         + ("、".join(result["mirrors"]["pushed"]) or "無")
         + f"；DECISIONS 鏡像：{result['decisions']['status']}",
+    )
+    return EXIT_OK
+
+
+def disable(
+    env: _Env,
+    client: VaultClient,
+    ws: Workspace | None,
+    vault: str | None,
+    *,
+    by: str,
+    now: _dt.datetime | None,
+) -> int:
+    """停用服務端任務層（只在索引加 disabled，不刪內容；冪等）。"""
+    at = (now or _dt.datetime.now(_dt.UTC)).astimezone(_dt.UTC)
+
+    async def go() -> tuple[str, bool, dict[str, Any]]:
+        store = await open_store(client, ws, vault, writable=False)
+        changed, info = await store.disable(by=by, at=at.strftime("%Y-%m-%dT%H:%M:%SZ"))
+        return store.vault, changed, info
+
+    try:
+        key, changed, info = run(go)
+    except Offline as exc:
+        env.print(f"disable 失敗：服務不可達（{exc}）")
+        return EXIT_FAIL
+    except (rs.StoreError, rs.RemoteError) as exc:
+        return _fail(env, "disable 失敗", exc)
+    state = rs.IndexState(True, info, 0)
+    env.print(
+        f"服務端任務層：{key}"
+        + ("已停用" if changed else "原本就已停用")
+        + f"（{state.describe()}）",
+        "內容全部保留；重新啟用：init --remote，或 UI 的 Vault 維護頁",
     )
     return EXIT_OK

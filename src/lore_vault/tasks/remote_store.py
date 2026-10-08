@@ -28,7 +28,14 @@
 
 `task-index`：vault 內 change 的列舉（服務端沒有「依前綴列 key」的端點）::
 
-    {"schema": 1, "changes": {name: {"state": "active" | "pending_apply" | "archived"}}}
+    {"schema": 1, "changes": {name: {"state": "active" | "pending_apply" | "archived"}},
+     "disabled"?: {"at": "YYYY-MM-DDTHH:MM:SSZ", "by": str}}
+
+- 存在＝該 vault 已啟用任務層（`ensure_index`、UI `POST /v1/tasks_enable`）
+- `disabled`：任務層停用（UI `POST /v1/tasks_disable`、`disable`）。不刪任何內容；
+  服務端拒收任務內容與 `tasks-snapshot` 的寫入（403 `tasks_disabled`），讀取照常。
+  重新啟用（`enable`、UI 啟用、`init`）只移除這個欄位即復原。服務端守衛只接受
+  「單獨切換」這個欄位的索引寫入（`api.tasks_admin.guard_task_write`）
 
 - 只負責列舉；狀態以 change 文件本身的 `state` 為準（兩者不一致時信 change 文件）
 - propose 先以 `expected_version=0` 建 change（保證名稱唯一），再以 CAS 補進索引；
@@ -131,7 +138,7 @@ from .workspace import (
 SCHEMA = tf.SCHEMA
 MIME = "application/json"
 CHANGE_PREFIX = tf.CHANGE_PREFIX
-INDEX_KEY = "task-index"
+INDEX_KEY = tf.INDEX_KEY
 MIRROR_PREFIX = "task-spec-mirror:"
 AUTHORIZATION_PREFIX = tf.AUTHORIZATION_PREFIX
 DECISIONS_KEY = "task-decisions"
@@ -170,6 +177,30 @@ FILE_FIELDS = {
 }
 
 Post = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
+
+DISABLED_HINT = (
+    "任務層停用中（內容保留）。只有使用者要求時才重新啟用：UI 的 Vault 維護頁按"
+    "「重新啟用」，或 tasks(action='init')"
+)
+
+
+@dataclass(frozen=True)
+class IndexState:
+    """`task-index` 的啟用狀態：`exists`＝已初始化；`disabled`＝停用資訊 `{at, by}`。"""
+
+    exists: bool
+    disabled: dict[str, Any] | None
+    version: int
+
+    @property
+    def enabled(self) -> bool:
+        return self.exists and self.disabled is None
+
+    def describe(self) -> str:
+        info = self.disabled or {}
+        who = info.get("by") or "不明"
+        when = info.get("at") or "時間不明"
+        return f"{who} 於 {when} 停用"
 
 
 # ── 錯誤 ────────────────────────────────────────────────────────────
@@ -655,16 +686,84 @@ class RemoteStore:
     async def ensure_index(self) -> bool:
         """索引不存在時建立空索引；回傳是否新建。"""
         try:
-            await self.put_blob(
-                INDEX_KEY,
-                encode({"schema": SCHEMA, "changes": {}}),
-                expected_version=0,
-            )
+            await self.put_blob(INDEX_KEY, encode(tf.empty_index()), expected_version=0)
         except RemoteError as exc:
             if exc.code == "version_conflict":
                 return False
             raise
         return True
+
+    async def index_state(self) -> IndexState:
+        """任務層啟用狀態：索引是否存在、是否停用（停用資訊）。"""
+        blob = await self.get_blob(INDEX_KEY)
+        if blob is None:
+            return IndexState(False, None, 0)
+        index = _decode(blob.content, INDEX_KEY)
+        return IndexState(True, tf.disabled_info(index), blob.version)
+
+    async def require_enabled(self) -> None:
+        """停用中拋 `tasks_disabled`（寫入前呼叫；沒有索引不算停用，沿用既有行為）。"""
+        state = await self.index_state()
+        if state.disabled is not None:
+            raise StoreError(
+                "tasks_disabled",
+                f"vault {self.vault} 的任務層已停用（{state.describe()}）：內容保留、"
+                "不接受寫入",
+                disabled=state.disabled,
+            )
+
+    async def enable(self) -> tuple[bool, bool]:
+        """(是否新建, 是否解除停用)。沒有索引建空索引；停用中只移除 `disabled`
+        （其餘原樣，服務端守衛只接受單獨切換）；已啟用不寫入。"""
+        for _ in range(INDEX_RETRIES):
+            blob = await self.get_blob(INDEX_KEY)
+            if blob is None:
+                return await self.ensure_index(), False
+            index = _decode(blob.content, INDEX_KEY)
+            if not tf.is_disabled(index):
+                return False, False
+            index.pop(tf.DISABLED_KEY, None)
+            try:
+                await self.put_blob(
+                    INDEX_KEY, encode(index), expected_version=blob.version
+                )
+            except RemoteError as exc:
+                if exc.code != "version_conflict":
+                    raise
+                continue
+            return False, True
+        raise StoreError(
+            "index_conflict", f"索引更新連續衝突 {INDEX_RETRIES} 次，請稍後重試"
+        )
+
+    async def disable(self, *, by: str, at: str) -> tuple[bool, dict[str, Any]]:
+        """(是否有寫入, 停用資訊)。在索引加 `disabled`，不刪任何內容；已停用不寫入
+        （回原本的資訊）；沒有索引 `tasks_not_enabled`。"""
+        for _ in range(INDEX_RETRIES):
+            blob = await self.get_blob(INDEX_KEY)
+            if blob is None:
+                raise StoreError(
+                    "tasks_not_enabled",
+                    f"vault {self.vault} 尚未啟用任務層，不需要停用",
+                )
+            index = _decode(blob.content, INDEX_KEY)
+            info = tf.disabled_info(index)
+            if info is not None:
+                return False, info
+            info = {"at": at, "by": by}
+            index[tf.DISABLED_KEY] = info
+            try:
+                await self.put_blob(
+                    INDEX_KEY, encode(index), expected_version=blob.version
+                )
+            except RemoteError as exc:
+                if exc.code != "version_conflict":
+                    raise
+                continue
+            return True, info
+        raise StoreError(
+            "index_conflict", f"索引更新連續衝突 {INDEX_RETRIES} 次，請稍後重試"
+        )
 
     async def set_index_state(self, name: str, state: str) -> None:
         """CAS 更新索引中一個 change 的狀態；衝突時重讀重試。"""

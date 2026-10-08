@@ -55,6 +55,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from lore_vault.api import task_format as tf
 from lore_vault.binding import resolve_binding
 
 from . import remote_ops, specs
@@ -70,7 +71,7 @@ from .workspace import (
     derive_status,
 )
 
-SNAPSHOT_KEY = "tasks-snapshot"
+SNAPSHOT_KEY = tf.SNAPSHOT_KEY
 SNAPSHOT_MIME = "application/json"
 SNAPSHOT_SCHEMA = 1
 MAX_BYTES = 64 * 1024

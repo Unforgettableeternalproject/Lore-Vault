@@ -2,11 +2,20 @@
 // `/ui/maint/<key>` 針對單一 vault；`/ui/maint` 列出本 space 的 vault 與全 space 墓碑（刪除 vault 後回到這裡）。
 import { useEffect, useState } from 'preact/hooks';
 
-import { Badge, EmptyState, ErrorState, Loading, TwoPhaseConfirm, TwoPhaseDelete } from '../components/ui';
+import { Badge, Banner, Dialog, EmptyState, ErrorState, Loading, TwoPhaseConfirm, TwoPhaseDelete } from '../components/ui';
 import { useApp } from '../lib/context';
 import { describeError, formatTime, isAbort } from '../lib/format';
 import { routePath } from '../lib/router';
 import { SPACES, SPACE_IDS, type SpaceId } from '../lib/spaces';
+import {
+  describeCounts,
+  describeDisabled,
+  disableTaskLayer,
+  enableTaskLayer,
+  layerState,
+  useTaskLayer,
+  type TaskLayerVault,
+} from '../lib/taskLayer';
 import type {
   DocumentUndeleteResult,
   NoteUndeleteResult,
@@ -18,8 +27,10 @@ import type {
 import { ORIGIN_TITLE, originLabel } from './Vaults';
 
 export function Maint({ vaultKey }: { vaultKey: string | null }) {
-  const { space, vaults, navigate } = useApp();
+  const { api, space, vaults, navigate } = useApp();
   const [local, setLocal] = useState<VaultSummary | null>(null);
+  // 卡片上的任務層狀態（只有 dev space 有任務層）；讀不到時卡片不顯示這一列
+  const layers = useTaskLayer(api, '*', !vaultKey && space.id === 'dev');
 
   if (!vaultKey) {
     return (
@@ -55,7 +66,11 @@ export function Maint({ vaultKey }: { vaultKey: string | null }) {
             <ul class="lv-vcards" aria-label={`${space.en} 的 vault`}>
               {vaults.items.map((v) => (
                 <li key={v.key}>
-                  <VaultCard vault={v} onOpen={() => navigate(routePath('maint', [v.key]))} />
+                  <VaultCard
+                    vault={v}
+                    layer={layers.status ? (layers.status.vaults.get(v.key) ?? null) : undefined}
+                    onOpen={() => navigate(routePath('maint', [v.key]))}
+                  />
                 </li>
               ))}
             </ul>
@@ -106,6 +121,7 @@ export function Maint({ vaultKey }: { vaultKey: string | null }) {
         {vault.last_updated ? ` · 最近更新 ${formatTime(vault.last_updated)}` : ''}
       </p>
       <AliasSection vault={vault} onChanged={setLocal} />
+      {space.id === 'dev' && <TaskLayerSection vault={vault} />}
       <MoveSection vault={vault} />
       <TombstoneSection vault={vault.key} />
       <DeleteSection vault={vault} />
@@ -115,7 +131,17 @@ export function Maint({ vaultKey }: { vaultKey: string | null }) {
 
 // ── vault 卡片（維護入口）──
 
-function VaultCard({ vault, onOpen }: { vault: VaultSummary; onOpen: () => void }) {
+function VaultCard({
+  vault,
+  layer,
+  onOpen,
+}: {
+  vault: VaultSummary;
+  /** undefined＝不顯示（非 dev 或狀態讀不到）；null＝服務端沒有這個 vault 的資料（未啟用） */
+  layer?: TaskLayerVault | null;
+  onOpen: () => void;
+}) {
+  const state = layer === undefined ? null : layerState(layer ?? undefined);
   return (
     <a
       class="lv-vcard"
@@ -149,6 +175,28 @@ function VaultCard({ vault, onOpen }: { vault: VaultSummary; onOpen: () => void 
           <span class="lv-vcard__k">別名</span>
         </span>
       </span>
+      {state && (
+        <span class="lv-vcard__layer" data-task-layer={state}>
+          <span class="lv-vcard__k">任務層</span>
+          {state === 'enabled' ? (
+            <Badge tone="ready" label="任務層">
+              已啟用{layer?.changes !== null && layer?.changes !== undefined ? ` · ${layer.changes} change` : ''}
+            </Badge>
+          ) : state === 'disabled' ? (
+            <Badge tone="warn" label="任務層">
+              已停用
+            </Badge>
+          ) : state === 'invalid' ? (
+            <Badge tone="error" label="任務層">
+              索引格式錯誤
+            </Badge>
+          ) : (
+            <Badge tone="plain" label="任務層">
+              未啟用
+            </Badge>
+          )}
+        </span>
+      )}
       <span class="lv-vcard__foot">
         <span>{vault.last_updated ? `最近更新 ${formatTime(vault.last_updated)}` : '尚無內容'}</span>
         <span class="lv-vcard__go" aria-hidden="true">
@@ -249,6 +297,178 @@ function AliasSection({ vault, onChanged }: { vault: VaultSummary; onChanged: (v
         <p class="lv-notice lv-notice--error" role="alert">
           {describeError(error)}
         </p>
+      )}
+    </section>
+  );
+}
+
+// ── 任務層（只限 dev）──
+
+type LayerAction = 'enable' | 'reenable' | 'disable';
+
+const LAYER_DIALOG: Record<LayerAction, { title: (name: string) => string; confirm: string; body: string }> = {
+  enable: {
+    title: (name) => `為「${name}」啟用任務層？`,
+    confirm: '確認啟用',
+    body:
+      '在服務端建立這個 vault 的任務索引（不改動筆記或文件）。之後 agent 查任務層會看到已啟用，即使還沒有 change 也會把它當工作脈絡；' +
+      '本機 stdio 殼會提示執行 init 建立工作副本。',
+  },
+  reenable: {
+    title: (name) => `重新啟用「${name}」的任務層？`,
+    confirm: '確認重新啟用',
+    body: '移除停用標記：change、spec 鏡像與核准紀錄原樣復原，agent 可以繼續讀寫任務層。',
+  },
+  disable: {
+    title: (name) => `停用「${name}」的任務層？`,
+    confirm: '確認停用',
+    body:
+      '內容全部保留（change、spec 鏡像、核准紀錄都不刪），重新啟用即復原。停用期間服務端不接受任務層的寫入，' +
+      'agent 會略過任務層，任務頁也不能核准。',
+  },
+};
+
+const LAYER_DONE: Record<LayerAction, string> = {
+  enable: '已啟用任務層',
+  reenable: '已重新啟用任務層，內容原樣復原',
+  disable: '已停用任務層，內容保留',
+};
+
+function TaskLayerSection({ vault }: { vault: VaultSummary }) {
+  const { api, toast, navigate, setVault } = useApp();
+  const { status, error, reload } = useTaskLayer(api, vault.key);
+  const [action, setAction] = useState<LayerAction | null>(null);
+  const [busy, setBusy] = useState(false);
+  const layer = status?.vaults.get(vault.key);
+  const state = layerState(layer);
+  const remoteSync = status?.remoteSync ?? true;
+
+  const run = async (which: LayerAction) => {
+    setBusy(true);
+    try {
+      if (which === 'disable') await disableTaskLayer(api, vault.key);
+      else await enableTaskLayer(api, vault.key);
+      toast(`${vault.display}：${LAYER_DONE[which]}`, 'success');
+    } catch (err) {
+      toast(`任務層操作失敗：${describeError(err)}`, 'error');
+    } finally {
+      setBusy(false);
+      setAction(null);
+      // 成功或失敗都以服務端狀態為準
+      reload();
+    }
+  };
+
+  const openTasks = (e: Event) => {
+    e.preventDefault();
+    setVault(vault.key);
+    navigate(routePath('tasks'));
+  };
+  const tasksLink = (
+    <a class="btn-outline btn-outline--sm" href={routePath('tasks')} onClick={openTasks} data-testid="task-layer-open">
+      到任務頁查看 →
+    </a>
+  );
+  const button = (which: LayerAction, label: string, gold: boolean) => (
+    <button
+      type="button"
+      class={'btn-outline btn-outline--sm' + (gold ? ' btn-outline--gold' : '')}
+      disabled={busy || !remoteSync}
+      onClick={() => setAction(which)}
+    >
+      {label}
+    </button>
+  );
+
+  let body;
+  if (error !== null) body = <ErrorState error={error} onRetry={reload} />;
+  else if (!status) body = <Loading />;
+  else
+    body = (
+      <div class="lv-stack lv-task-layer" data-testid="task-layer" data-state={state}>
+        <div class="lv-meta-line">
+          {state === 'enabled' ? (
+            <Badge tone="ready" label="任務層狀態" testId="task-layer-state">
+              已啟用
+            </Badge>
+          ) : state === 'disabled' ? (
+            <Badge tone="warn" label="任務層狀態" testId="task-layer-state">
+              已停用
+            </Badge>
+          ) : state === 'invalid' ? (
+            <Badge tone="error" label="任務層狀態" testId="task-layer-state">
+              索引格式錯誤
+            </Badge>
+          ) : (
+            <Badge tone="plain" label="任務層狀態" testId="task-layer-state">
+              未啟用
+            </Badge>
+          )}
+          {layer && describeCounts(layer) && <span data-testid="task-layer-counts">{describeCounts(layer)}</span>}
+        </div>
+        {state === 'disabled' && layer?.disabled && (
+          <p class="lv-small" data-testid="task-layer-disabled">
+            {describeDisabled(layer.disabled, formatTime)}。內容全部保留，重新啟用即復原。
+          </p>
+        )}
+        {state === 'invalid' && (
+          <Banner tone="error" label="INVALID" title="服務端任務索引格式不正確">
+            {layer?.error}；請以任務層 doctor 檢查，這裡不提供啟用或停用。
+          </Banner>
+        )}
+        {state === 'off' && (
+          <p class="lv-small lv-muted">
+            這個 vault 尚未啟用任務層。啟用後，agent 經 MCP 查任務層時會看到已啟用，並在本機提示建立工作副本。
+          </p>
+        )}
+        {!remoteSync && (
+          <p class="lv-hint lv-hint--inline" data-testid="task-layer-sync-off">
+            服務未開啟任務層遠端同步（tasks.remote_sync），無法在這裡啟用或停用。
+          </p>
+        )}
+        {state !== 'invalid' && (
+          <div class="lv-actions lv-actions--wrap">
+            {state === 'enabled' && tasksLink}
+            {state === 'enabled' && button('disable', '停用任務層…', false)}
+            {state === 'disabled' && button('reenable', '重新啟用任務層', true)}
+            {state === 'disabled' && tasksLink}
+            {state === 'off' && button('enable', '啟用任務層', true)}
+          </div>
+        )}
+      </div>
+    );
+
+  return (
+    <section class="lv-section" aria-labelledby="maint-tasks">
+      <h2 class="lv-section__title" id="maint-tasks">
+        任務層
+      </h2>
+      <p class="lv-section__desc">
+        任務層（OpenSpec 格式的 change 與 spec delta）只屬於 dev space。停用只是暫停：內容保留在服務端，重新啟用即恢復。
+      </p>
+      {body}
+      {action && (
+        <Dialog
+          title={LAYER_DIALOG[action].title(vault.display)}
+          onClose={() => setAction(null)}
+          actions={
+            <>
+              <button type="button" class="uep-dialog__btn uep-dialog__btn--cancel" onClick={() => setAction(null)}>
+                取消
+              </button>
+              <button
+                type="button"
+                class="uep-dialog__btn uep-dialog__btn--confirm"
+                disabled={busy}
+                onClick={() => void run(action)}
+              >
+                {LAYER_DIALOG[action].confirm}
+              </button>
+            </>
+          }
+        >
+          {LAYER_DIALOG[action].body}
+        </Dialog>
       )}
     </section>
   );

@@ -442,8 +442,9 @@ async def test_authorization_required_rejects_before_other_service_calls(
         err = await http.err(action="archive", vault=VAULT, name="guarded")
         assert err["error"]["code"] == "authorization_required"
         assert "UI" in err["hint"]
-        # 只讀了 change 與授權紀錄；沒有 vault_resolve／list／write／blob_put
-        assert recorder.paths == ["/v1/blob_get", "/v1/blob_get"]
+        # 只讀了索引（停用檢查）、change 與授權紀錄；
+        # 沒有 vault_resolve／list／write／blob_put
+        assert recorder.paths == ["/v1/blob_get", "/v1/blob_get", "/v1/blob_get"]
         # 第二步（帶任意 token）同樣在閘門擋下
         recorder.paths.clear()
         err = await http.err(
