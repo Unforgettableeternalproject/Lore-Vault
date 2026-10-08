@@ -165,6 +165,11 @@ HINTS = {
         "核准之後 change 又被修改過：把目前內容給使用者看，請他在 UI 重新核准後再試"
     ),
     "archive_rejected": "依 details 修正（edit／validate）後重新規劃 archive",
+    "blocked": (
+        "依本機 DECISIONS.md，這個 change 的 blocked_by 仍未裁決，未落地；"
+        "服務端卻已封存（pending_apply），可能是 DECISIONS 鏡像被改過——"
+        "把情況告訴使用者，不要自行改 DECISIONS 或 blocked_by 繞過"
+    ),
     "change_not_active": "已封存待落地的 change 不需要再 archive",
     "invalid_confirm_token": (
         "confirm_token 必須搭配規劃時完全相同的 vault／name／reason／allow_incomplete "

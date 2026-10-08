@@ -456,6 +456,8 @@ def archive(
         env.print("（服務端段一先前已完成，本次只落地本機 specs）")
     if landed.get("written"):
         env.print("已寫回主 spec：" + "、".join(landed["written"]))
+    for warning in landed.get("warnings") or []:
+        env.warn(f"警告：{warning}")
     return EXIT_OK
 
 
@@ -568,6 +570,8 @@ def sync_specs(
             env.print("    已寫回主 spec：" + "、".join(item["written"]))
         if item["already_applied"]:
             env.print("    先前已寫回：" + "、".join(item["already_applied"]))
+        for warning in item.get("warnings") or []:
+            env.warn(f"警告：{warning}")
     return EXIT_OK
 
 

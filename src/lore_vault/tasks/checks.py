@@ -36,8 +36,8 @@ from lore_vault.doctor.framework import (
     Registry,
 )
 
+from . import remote_ops, snapshot, specs
 from . import remote_store as rs
-from . import snapshot, specs
 from .archive import NOTE_DIGESTS_KEY
 from .isolation import DEFAULT_PACKAGE_ROOT, check_core_isolation
 from .vault_client import ServiceError, VaultClient
@@ -664,6 +664,44 @@ def authorization_record_integrity(ctx: DoctorContext) -> CheckResult:
     return _remote_check(ctx, run)
 
 
+def blocked_archive(ctx: DoctorContext) -> CheckResult:
+    """服務端 `pending_apply`／`archived` 的 change，其 `blocked_by` 依**本機**
+    DECISIONS.md 都已解除。服務端 `task-decisions` 鏡像可被持 bearer 者竄改，讓未裁決的
+    change 在純 HTTP 流程完成 archive 段一；這裡以本機為準重查。本機沒有 DECISIONS.md
+    → skipped。"""
+
+    async def run(ws: Workspace, store: rs.RemoteStore) -> CheckResult:
+        if ws.decisions() is None:
+            raise CheckSkipped("本機沒有 DECISIONS.md，無法重查 blocked_by")
+        remote = await _load_remote(store)
+        fails: list[str] = []
+        for name, change in remote.docs.items():
+            if change.state == rs.STATE_ACTIVE:
+                continue
+            # 本機有 DECISIONS.md，local_blockers 不會回 None
+            blockers = remote_ops.local_blockers(change, ws) or []
+            if blockers:
+                fails.append(
+                    f"{name}：服務端狀態 {change.state}，但依本機 DECISIONS.md 仍被 "
+                    f"{'、'.join(blockers)} 擋住"
+                    "（未裁決或找不到小節；DECISIONS 鏡像可能被改過）"
+                )
+        counts = {"blocked": len(fails)}
+        if fails:
+            return CheckResult.fail(
+                "有未裁決就封存的 change", details=fails + remote.bad, counts=counts
+            )
+        if remote.bad:
+            return CheckResult.warn(
+                "有 change 文件無法讀取", details=remote.bad, counts=counts
+            )
+        return CheckResult.ok(
+            "已封存的 change 都沒有未裁決的 blocked_by", counts=counts
+        )
+
+    return _remote_check(ctx, run)
+
+
 def version_sync_agreement(ctx: DoctorContext) -> CheckResult:
     """本機 active change 的 `remote_version`／內容與服務端版本化內容比對：
     (a) 本機版本落後（沒 pull）；(b) 版本一致但內容雜湊不同（本機改了沒推）；
@@ -948,6 +986,12 @@ def default_registry() -> Registry:
             authorization_record_integrity,
             "需授權且已過閘的 change 有內容雜湊相符的 UI 核准紀錄；"
             "已封存文件都有 note_id",
+        ),
+        (
+            "tasks.blocked_archive",
+            blocked_archive,
+            "服務端已封存（pending_apply／archived）的 change 依本機 DECISIONS "
+            "沒有未裁決的 blocked_by",
         ),
         (
             "tasks.version_sync_agreement",

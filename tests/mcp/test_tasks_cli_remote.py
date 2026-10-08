@@ -15,6 +15,7 @@ MCP 的部分以 HTTP 殼另外接同一個資料庫，驗證兩條路徑看到�
 
 from __future__ import annotations
 
+import base64
 import io
 import json
 from datetime import UTC, datetime
@@ -386,6 +387,58 @@ def test_sync_specs_rechecks_authorization_before_landing(
     assert code == 1 and "核准" in out, out
     assert remote.spec() == before
     assert blob(db_path, "task-change:c1")["state"] == "pending_apply"
+
+
+def _tamper_decisions(remote: Cli, decisions: dict[str, bool]) -> None:
+    """持 bearer 者直接改服務端的 DECISIONS 鏡像（純 HTTP，不經任何工具）。"""
+    doc = {"schema": 1, "decisions": decisions, "source_digest": "0" * 64}
+    remote.client._post(
+        "/v1/blob_put",
+        {
+            "space": "dev",
+            "vault": VAULT,
+            "key": rs.DECISIONS_KEY,
+            "mime": "application/json",
+            "content_base64": base64.b64encode(rs.encode(doc)).decode("ascii"),
+        },
+    )
+
+
+def _blocked_and_archived_over_http(remote: Cli, db_path, project) -> str:
+    """blocked_by D6（本機未裁決）→ 竄改鏡像把 D6 標成已裁決
+    → HTTP archive 段一成功。"""
+    _ready(remote, "c1", DELTA_ADDED, "--blocked-by", "D6")
+    before = remote.spec()
+    _tamper_decisions(remote, {"D6": True, "D12": True})
+    done = http_archive(db_path, project, "c1")
+    assert done["executed"] is True
+    assert blob(db_path, "task-change:c1")["state"] == "pending_apply"
+    return before
+
+
+def test_land_rechecks_blocked_by_with_local_decisions(remote: Cli, db_path, project):
+    before = _blocked_and_archived_over_http(remote, db_path, project)
+    remote.client.paths.clear()
+    code, out = remote.run("sync-specs")
+    assert code == 1 and "D6" in out and "擋住" in out, out
+    # 零寫入：主 spec、工作副本、服務端狀態都不動
+    assert remote.spec() == before
+    assert remote.change("c1").is_dir()
+    assert blob(db_path, "task-change:c1")["state"] == "pending_apply"
+    assert "/v1/blob_put" not in remote.client.paths
+    # doctor 以本機 DECISIONS 重查：fail
+    code, out = remote.run("doctor", "--json", "--vault", VAULT)
+    report = {c["name"]: c for c in json.loads(out)["checks"]}
+    blocked = report["tasks.blocked_archive"]
+    assert blocked["status"] == "fail" and any("D6" in d for d in blocked["details"])
+
+
+def test_land_without_local_decisions_warns(remote: Cli, db_path, project):
+    _blocked_and_archived_over_http(remote, db_path, project)
+    (project / "DECISIONS.md").unlink()
+    out = remote.ok("sync-specs")
+    assert "已落地 c1" in out
+    assert "沒有 DECISIONS.md" in remote.err and "D6" in remote.err
 
 
 def test_offline_archive_refuses_server_tracked_change(remote: Cli, db_path):

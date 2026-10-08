@@ -446,6 +446,18 @@ def _apply_order(change: rs.RemoteChange) -> tuple[str, str]:
     return (str(stamp or ""), change.name)
 
 
+def local_blockers(change: rs.RemoteChange, ws: Workspace) -> list[str] | None:
+    """以本機 DECISIONS.md 判定 `blocked_by` 中仍未解除（未裁決或沒有該小節）的 D；
+    沒有 blocked_by 回 []，本機沒有 DECISIONS.md 回 None。"""
+    blocked = [str(d) for d in change.meta.get("blocked_by") or []]
+    if not blocked:
+        return []
+    decisions = ws.decisions()
+    if decisions is None:
+        return None
+    return [d for d in blocked if decisions.get(d) is not True]
+
+
 async def sync_specs(
     store: rs.RemoteStore,
     ws: Workspace,
@@ -513,8 +525,28 @@ async def land(
     需授權的 change 落地前重查 UI 核准紀錄（`check_authorization`，不符一律
     `authorization_required`）：服務端文件可被持 bearer 者直接改寫，不能只信
     `pending_apply` 這個狀態。
+
+    `blocked_by` 也以**本機** DECISIONS.md 重新判定（`local_blockers`）：服務端的
+    `task-decisions` 鏡像可被持 bearer 者竄改，段一的判定不可信。仍有未解除或無法
+    判定的 D → `blocked`（附 `decisions`），一個檔案都不寫；本機沒有 DECISIONS.md 時
+    照舊落地，結果附 `warnings`。
     """
     await check_authorization(store, change, stale_code="authorization_required")
+    warnings: list[str] = []
+    blockers = local_blockers(change, ws)
+    if blockers is None:
+        warnings.append(
+            f"{change.name} 有 blocked_by"
+            f"（{'、'.join(map(str, change.meta.get('blocked_by') or []))}），"
+            "但本機沒有 DECISIONS.md，無法重查是否已裁決（沿用段一的判定）"
+        )
+    elif blockers:
+        raise rs.StoreError(
+            "blocked",
+            f"{change.name} 依本機 DECISIONS.md 仍被 {'、'.join(blockers)} 擋住"
+            "（未裁決或找不到小節），未落地",
+            decisions=blockers,
+        )
     apply = change.doc.get("apply")
     if not isinstance(apply, dict):
         raise rs.StoreError(
@@ -608,4 +640,5 @@ async def land(
         "archive_dir": dest.name,
         "archive_created": created,
         "working_copy_removed": removed,
+        "warnings": warnings,
     }

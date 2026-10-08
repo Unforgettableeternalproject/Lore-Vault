@@ -19,6 +19,7 @@ from .versioned_fake import VersionedVault
 REMOTE_CHECKS = (
     "tasks.pending_apply_stale",
     "tasks.authorization_record_integrity",
+    "tasks.blocked_archive",
     "tasks.version_sync_agreement",
     "tasks.specs_mirror_agreement",
     "tasks.decisions_mirror_agreement",
@@ -314,6 +315,40 @@ def test_archived_without_note_id_needs_local_archive(tasks_dir: TasksDir, vv):
     doc["state"] = rs.STATE_PENDING_APPLY
     _place(vv, doc)
     assert check(_ctx(tasks_dir, vv)).status == "fail"
+
+
+# ── tasks.blocked_archive ──
+
+
+@pytest.mark.parametrize("state", [rs.STATE_PENDING_APPLY, rs.STATE_ARCHIVED])
+def test_blocked_archive_uses_local_decisions(tasks_dir: TasksDir, vv, state):
+    """服務端已封存的 change，blocked_by 依本機 DECISIONS 仍未裁決（D6）或找不到
+    小節（D99）→ fail；已裁決（D12）→ pass。DECISIONS 鏡像被改成全部已裁決也不影響。"""
+    _with_change(tasks_dir, vv)
+    _decisions_blob(vv, {"D6": True, "D12": True, "D13": True})
+    check = checks.blocked_archive
+    doc = _landed("b1", state, "2026-10-08T00:00:00Z", {}, {})
+    doc["meta"]["note_id"] = "n1"
+    doc["meta"]["blocked_by"] = ["D12"]
+    _place(vv, doc)
+    assert check(_ctx(tasks_dir, vv)).status == "pass"
+    for blocker in ("D6", "D99"):
+        doc["meta"]["blocked_by"] = ["D12", blocker]
+        _place(vv, doc)
+        result = check(_ctx(tasks_dir, vv))
+        assert result.status == "fail", blocker
+        assert any("b1" in d and blocker in d for d in result.details)
+    # active 的 change 被擋住是正常狀態，不算
+    doc["state"] = rs.STATE_ACTIVE
+    _place(vv, doc)
+    assert check(_ctx(tasks_dir, vv)).status == "pass"
+
+
+def test_blocked_archive_skipped_without_local_decisions(tasks_dir: TasksDir, vv):
+    _with_change(tasks_dir, vv)
+    tasks_dir.decisions.unlink()
+    with pytest.raises(CheckSkipped):
+        checks.blocked_archive(_ctx(tasks_dir, vv))
 
 
 # ── tasks.version_sync_agreement ──

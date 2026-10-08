@@ -28,6 +28,7 @@ from .conftest import (
 REMOTE_CHECKS = (
     "tasks.pending_apply_stale",
     "tasks.authorization_record_integrity",
+    "tasks.blocked_archive",
     "tasks.version_sync_agreement",
     "tasks.specs_mirror_agreement",
     "tasks.decisions_mirror_agreement",
@@ -82,11 +83,11 @@ def test_no_tasks_root_all_skipped_exit_0(tmp_path):
     )
     data = json.loads(out.getvalue())
     assert code == 0
-    assert data["summary"]["total"] == 14
-    assert data["summary"]["skipped"] == 14
+    assert data["summary"]["total"] == 15
+    assert data["summary"]["skipped"] == 15
 
 
-def test_registry_has_fourteen_checks_and_core_doctor_does_not():
+def test_registry_has_fifteen_checks_and_core_doctor_does_not():
     names = {c.name for c in checks.default_registry().checks}
     assert names == {
         "tasks.isolation",
@@ -100,6 +101,7 @@ def test_registry_has_fourteen_checks_and_core_doctor_does_not():
         "tasks.snapshot_shape",
         "tasks.pending_apply_stale",
         "tasks.authorization_record_integrity",
+        "tasks.blocked_archive",
         "tasks.version_sync_agreement",
         "tasks.specs_mirror_agreement",
         "tasks.decisions_mirror_agreement",
