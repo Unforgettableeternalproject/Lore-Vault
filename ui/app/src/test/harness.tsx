@@ -92,5 +92,15 @@ export function renderWithApp(ui: ComponentChildren, api: ApiClient, overrides: 
     switchSpace,
   };
   const result = render(<AppContext.Provider value={env}>{ui}</AppContext.Provider>);
-  return { ...result, navigate, toast, refreshVaults, setVault, reportHealth, switchSpace };
+  /** 以新的環境值（例如換 vault）重新渲染同一棵元件樹，模擬 Shell 的 context 更新 */
+  const rerenderWith = (next: Partial<AppEnv>) =>
+    result.rerender(<AppContext.Provider value={{ ...env, ...next }}>{ui}</AppContext.Provider>);
+  return { ...result, navigate, toast, refreshVaults, setVault, reportHealth, switchSpace, rerenderWith };
+}
+
+/** 字串 → base64（UTF-8 位元組；btoa 只吃 Latin-1，中文要先編碼）。側載 content_base64 的測試資料用。 */
+export function base64Utf8(text: string): string {
+  let bin = '';
+  new TextEncoder().encode(text).forEach((b) => (bin += String.fromCharCode(b)));
+  return btoa(bin);
 }

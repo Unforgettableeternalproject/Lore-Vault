@@ -1,0 +1,548 @@
+"""archive：授權閘門、dry-run 先驗、不可達不搬目錄、可續跑、鏈頭與 supersedes。"""
+
+from __future__ import annotations
+
+from .conftest import (
+    SPEC_A,
+    VAULT,
+    FakeVault,
+    TasksDir,
+    delta,
+    requirement,
+    unreachable_client,
+)
+
+MOD_ROOT = requirement(
+    "資料根目錄", "資料 SHALL 存放於 `~/.x/`。", scenarios=("讀取資料根",)
+)
+
+
+def _archive(tasks_dir: TasksDir, name: str, client, *extra: str):
+    return tasks_dir.run("archive", name, "--vault", VAULT, *extra, client=client)
+
+
+def _setup_two_reqs(tasks_dir: TasksDir, name: str = "c1") -> None:
+    tasks_dir.write_main("demo", SPEC_A)
+    tasks_dir.propose(
+        name, deltas={"demo": delta(added=[requirement("新功能")], modified=[MOD_ROOT])}
+    )
+
+
+def test_archive_success_writes_notes_merges_and_moves(tasks_dir: TasksDir, vault):
+    _setup_two_reqs(tasks_dir)
+    code, out = _archive(tasks_dir, "c1", vault.client)
+    assert code == 0, out
+    assert not tasks_dir.change_dir("c1").exists()
+    meta = tasks_dir.meta("c1")
+    assert set(meta["notes"]) == {"demo/新功能", "demo/資料根目錄", "summary"}
+    assert meta["note_id"] == meta["notes"]["summary"]
+    assert meta["spec_applied"] is True and meta["vault"] == VAULT
+    assert tasks_dir.archived_dir("c1").name == "2026-10-08-c1"
+    req = vault.notes[meta["notes"]["demo/新功能"]]
+    assert req["title"] == "req:demo/新功能"
+    assert set(req["topics"]) == {"change:c1", "req:demo/新功能"}
+    summary = vault.notes[meta["note_id"]]
+    assert summary["topics"] == ["change:c1"]
+    assert set(summary["links"]) == {
+        meta["notes"]["demo/新功能"],
+        meta["notes"]["demo/資料根目錄"],
+    }
+    assert "~/.x/" in tasks_dir.main_spec("demo")
+    assert "### Requirement: 新功能" in tasks_dir.main_spec("demo")
+
+
+def test_archive_preserves_crlf(tasks_dir: TasksDir, vault):
+    tasks_dir.write_main("demo", SPEC_A.replace("\n", "\r\n"))
+    tasks_dir.propose("c1", deltas={"demo": delta(added=[requirement("新功能")])})
+    assert _archive(tasks_dir, "c1", vault.client)[0] == 0
+    raw = (tasks_dir.root / "specs" / "demo" / "spec.md").read_bytes()
+    assert b"\r\n" in raw and b"\n" not in raw.replace(b"\r\n", b"")
+
+
+def test_authorization_gate_before_any_request(tasks_dir: TasksDir, vault):
+    tasks_dir.propose("guarded", "--skip-specs", "--requires-authorization")
+    code, out = _archive(tasks_dir, "guarded", vault.client)
+    assert code == 1 and "--authorized-by" in out
+    assert vault.requests == []
+    assert tasks_dir.change_dir("guarded").is_dir()
+    code, out = _archive(
+        tasks_dir, "guarded", vault.client, "--authorized-by", "艾斯維爾"
+    )
+    assert code == 0, out
+    meta = tasks_dir.meta("guarded")
+    assert meta["authorized_by"] == "艾斯維爾"
+    assert "授權：艾斯維爾" in vault.notes[meta["note_id"]]["body"]
+
+
+def test_unreachable_service_keeps_change_and_spec(tasks_dir: TasksDir):
+    _setup_two_reqs(tasks_dir)
+    spec_before = (tasks_dir.root / "specs" / "demo" / "spec.md").read_bytes()
+    code, out = _archive(tasks_dir, "c1", unreachable_client)
+    assert code == 1 and "change 留在原處" in out
+    assert tasks_dir.change_dir("c1").is_dir()
+    assert not list((tasks_dir.root / "changes" / "archive").glob("*-c1"))
+    assert (tasks_dir.root / "specs" / "demo" / "spec.md").read_bytes() == spec_before
+    meta = tasks_dir.meta("c1")
+    assert meta["note_id"] is None and meta["notes"] == {}
+    assert "spec_applied" not in meta
+
+
+def test_partial_failure_resumes_without_rewriting(tasks_dir: TasksDir):
+    _setup_two_reqs(tasks_dir)
+    spec_before = tasks_dir.main_spec("demo")
+    with FakeVault(fail_write_at=2) as flaky:
+        code, out = _archive(tasks_dir, "c1", flaky.client)
+        assert code == 1
+        meta = tasks_dir.meta("c1")
+        assert len(meta["notes"]) == 1 and meta["note_id"] is None
+        first_key, first_id = next(iter(meta["notes"].items()))
+        assert tasks_dir.change_dir("c1").is_dir()
+        assert tasks_dir.main_spec("demo") == spec_before
+        flaky.fail_write_at = None
+        code, out = _archive(tasks_dir, "c1", flaky.client)
+        assert code == 0, out
+        meta = tasks_dir.meta("c1")
+        assert meta["notes"][first_key] == first_id
+        titles = [n["title"] for n in flaky.notes.values()]
+        assert titles.count(f"req:{first_key}") == 1
+        assert len(flaky.notes) == 3
+        assert "先前已寫（跳過）" in out
+
+
+def test_resume_after_spec_applied_only_moves(tasks_dir: TasksDir, vault):
+    _setup_two_reqs(tasks_dir)
+    assert _archive(tasks_dir, "c1", vault.client)[0] == 0
+    # 模擬「主 spec 已併、搬目錄前中斷」：把目錄搬回 active
+    archived = tasks_dir.archived_dir("c1")
+    archived.rename(tasks_dir.change_dir("c1"))
+    spec_after = tasks_dir.main_spec("demo")
+    count = len(vault.notes)
+    code, out = _archive(tasks_dir, "c1", vault.client)
+    assert code == 0, out
+    assert len(vault.notes) == count
+    assert tasks_dir.main_spec("demo") == spec_after
+
+
+def test_supersedes_points_to_chain_head(tasks_dir: TasksDir, vault):
+    _setup_two_reqs(tasks_dir, "c1")
+    assert _archive(tasks_dir, "c1", vault.client)[0] == 0
+    first = tasks_dir.meta("c1")["notes"]["demo/資料根目錄"]
+    mod2 = requirement(
+        "資料根目錄", "資料 SHALL 存放於 `~/.y/`。", scenarios=("讀取資料根",)
+    )
+    tasks_dir.propose("c2", deltas={"demo": delta(modified=[mod2])})
+    code, out = _archive(tasks_dir, "c2", vault.client)
+    assert code == 0, out
+    second = tasks_dir.meta("c2")["notes"]["demo/資料根目錄"]
+    assert vault.notes[second]["supersedes"] == first
+    assert vault.notes[tasks_dir.meta("c2")["notes"]["summary"]]["supersedes"] is None
+
+
+def test_multiple_chain_heads_abort_before_writing(tasks_dir: TasksDir, vault):
+    _setup_two_reqs(tasks_dir)
+    for _ in range(3):  # 3 則 > list_page=2，順便驗翻頁
+        vault.add(title="req:demo/資料根目錄", topics=["req:demo/資料根目錄"])
+    code, out = _archive(tasks_dir, "c1", vault.client)
+    assert code == 1 and "鏈頭不只一則" in out
+    assert vault.writes == 0
+    assert tasks_dir.change_dir("c1").is_dir()
+
+
+def test_archive_runs_full_validation_first(tasks_dir: TasksDir, vault):
+    tasks_dir.write_main("demo", SPEC_A)
+    tasks_dir.propose("c1", deltas={"demo": delta(modified=[MOD_ROOT])})
+    tasks_dir.write_main("demo", SPEC_A.replace("`~/.demo/`。", "`~/.z/`。", 1))
+    code, out = _archive(tasks_dir, "c1", vault.client)
+    assert code == 1 and "base 過時" in out
+    assert vault.requests == []
+
+
+def test_archive_refuses_blocked(tasks_dir: TasksDir, vault):
+    tasks_dir.propose("c1", "--skip-specs", "--blocked-by", "D6")
+    code, out = _archive(tasks_dir, "c1", vault.client)
+    assert code == 1 and "被擋住" in out
+    assert vault.requests == []
+
+
+def test_spec_merge_failure_midway_resumes_per_capability(
+    tasks_dir: TasksDir, vault, monkeypatch
+):
+    """兩個 capability（alpha 含 REMOVED）：alpha 寫完、beta 寫入前失敗，重跑要收斂。"""
+    from lore_vault.tasks import archive as archive_mod
+
+    tasks_dir.write_main("alpha", SPEC_A.replace("demo", "alpha", 1))
+    tasks_dir.write_main("beta", SPEC_A.replace("demo", "beta", 1))
+    tasks_dir.propose(
+        "c1",
+        deltas={
+            "alpha": delta(removed=["封存"]),
+            "beta": delta(modified=[MOD_ROOT]),
+        },
+    )
+    real_write = archive_mod.atomic_write_text
+    calls = []
+
+    def flaky(path, text):
+        calls.append(path)
+        if len(calls) == 2:
+            raise OSError("模擬寫入 beta 時中斷")
+        real_write(path, text)
+
+    monkeypatch.setattr(archive_mod, "atomic_write_text", flaky)
+    try:
+        _archive(tasks_dir, "c1", vault.client)
+    except OSError:
+        pass
+    meta = tasks_dir.meta("c1")
+    assert meta["spec_applied_caps"] == ["alpha"]
+    assert "spec_applied" not in meta
+    assert "### Requirement: 封存" not in tasks_dir.main_spec("alpha")
+    assert "~/.x/" not in tasks_dir.main_spec("beta")
+    monkeypatch.setattr(archive_mod, "atomic_write_text", real_write)
+    count = len(vault.notes)
+    code, out = _archive(tasks_dir, "c1", vault.client)
+    assert code == 0, out
+    assert len(vault.notes) == count
+    assert "### Requirement: 封存" not in tasks_dir.main_spec("alpha")
+    assert "### Requirement: 資料根目錄" in tasks_dir.main_spec("alpha")
+    assert "~/.x/" in tasks_dir.main_spec("beta")
+    assert tasks_dir.meta("c1")["spec_applied"] is True
+
+
+def test_resume_rejects_stale_base_of_unapplied_capability(
+    tasks_dir: TasksDir, vault, monkeypatch
+):
+    """alpha 已套用後中斷，期間 beta 主 spec 被外部修改：
+    續跑須以 base 過時拒絕、不寫任何檔。"""
+    from lore_vault.tasks import archive as archive_mod
+
+    tasks_dir.write_main("alpha", SPEC_A.replace("demo", "alpha", 1))
+    tasks_dir.write_main("beta", SPEC_A.replace("demo", "beta", 1))
+    tasks_dir.propose(
+        "c1",
+        deltas={
+            "alpha": delta(removed=["封存"]),
+            "beta": delta(modified=[MOD_ROOT]),
+        },
+    )
+    real_write = archive_mod.atomic_write_text
+    calls = []
+
+    def flaky(path, text):
+        calls.append(path)
+        if len(calls) == 2:
+            raise OSError("模擬寫入 beta 時中斷")
+        real_write(path, text)
+
+    monkeypatch.setattr(archive_mod, "atomic_write_text", flaky)
+    try:
+        _archive(tasks_dir, "c1", vault.client)
+    except OSError:
+        pass
+    monkeypatch.setattr(archive_mod, "atomic_write_text", real_write)
+    assert tasks_dir.meta("c1")["spec_applied_caps"] == ["alpha"]
+    beta_path = tasks_dir.root / "specs" / "beta" / "spec.md"
+    beta_path.write_text(
+        tasks_dir.main_spec("beta").replace("`~/.demo/`。", "`~/.外部/`。", 1),
+        encoding="utf-8",
+    )
+    alpha_before = (tasks_dir.root / "specs" / "alpha" / "spec.md").read_bytes()
+    beta_before = beta_path.read_bytes()
+    meta_before = tasks_dir.meta("c1")
+    count = len(vault.notes)
+    code, out = _archive(tasks_dir, "c1", vault.client)
+    assert code == 1
+    assert "beta/資料根目錄" in out and "base 過時" in out
+    assert "alpha/" not in out
+    assert (tasks_dir.root / "specs" / "alpha" / "spec.md").read_bytes() == alpha_before
+    assert beta_path.read_bytes() == beta_before
+    assert tasks_dir.meta("c1") == meta_before
+    assert len(vault.notes) == count
+    assert tasks_dir.change_dir("c1").is_dir()
+
+
+def _crash_after_writing_alpha(tasks_dir: TasksDir, vault, monkeypatch) -> None:
+    """alpha（CRLF）主 spec 已原子寫入，記進 spec_applied_caps 前程序中斷。"""
+    import hashlib
+
+    from lore_vault.tasks import archive as archive_mod
+
+    tasks_dir.write_main(
+        "alpha", SPEC_A.replace("demo", "alpha", 1).replace("\n", "\r\n")
+    )
+    tasks_dir.write_main("beta", SPEC_A.replace("demo", "beta", 1))
+    tasks_dir.propose(
+        "c1",
+        deltas={
+            "alpha": delta(removed=["封存"]),
+            "beta": delta(modified=[MOD_ROOT]),
+        },
+    )
+    real_write = archive_mod.atomic_write_text
+
+    def crash_after_write(path, text):
+        real_write(path, text)
+        raise KeyboardInterrupt("模擬寫完主 spec 後、記錄前中斷")
+
+    monkeypatch.setattr(archive_mod, "atomic_write_text", crash_after_write)
+    try:
+        _archive(tasks_dir, "c1", vault.client)
+    except KeyboardInterrupt:
+        pass
+    monkeypatch.setattr(archive_mod, "atomic_write_text", real_write)
+    meta = tasks_dir.meta("c1")
+    assert "spec_applied_caps" not in meta
+    alpha_bytes = (tasks_dir.root / "specs" / "alpha" / "spec.md").read_bytes()
+    assert (
+        b"\r\n" in alpha_bytes and "### Requirement: 封存".encode() not in alpha_bytes
+    )
+    # 記錄的是實際落地位元組（含 CRLF）的雜湊
+    assert meta["spec_applying"] == {"alpha": hashlib.sha256(alpha_bytes).hexdigest()}
+
+
+def test_resume_after_spec_written_but_not_recorded_converges(
+    tasks_dir: TasksDir, vault, monkeypatch
+):
+    """主 spec 寫入與 spec_applied_caps 回寫之間中斷：續跑以 spec_applying 雜湊認出
+    alpha 已套用、補記後略過驗證，不把自己寫的結果當成外部修改而卡死。"""
+    _crash_after_writing_alpha(tasks_dir, vault, monkeypatch)
+    alpha_before = (tasks_dir.root / "specs" / "alpha" / "spec.md").read_bytes()
+    count = len(vault.notes)
+    code, out = _archive(tasks_dir, "c1", vault.client)
+    assert code == 0, out
+    meta = tasks_dir.meta("c1")
+    assert meta["spec_applied"] is True
+    assert meta["spec_applied_caps"] == ["alpha", "beta"]
+    assert "spec_applying" not in meta
+    assert len(vault.notes) == count
+    assert (tasks_dir.root / "specs" / "alpha" / "spec.md").read_bytes() == alpha_before
+    assert "~/.x/" in tasks_dir.main_spec("beta")
+
+
+def test_resume_rejects_external_edit_after_spec_applying(
+    tasks_dir: TasksDir, vault, monkeypatch
+):
+    """spec_applying 有記錄，但中斷期間主 spec 被外部改成別的內容：雜湊不符，
+    照常驗證並以 base 過時拒絕，檔案與 metadata 都不動。"""
+    _crash_after_writing_alpha(tasks_dir, vault, monkeypatch)
+    alpha_path = tasks_dir.root / "specs" / "alpha" / "spec.md"
+    alpha_path.write_bytes(
+        alpha_path.read_bytes().replace(
+            "`~/.demo/`。".encode(), "`~/.外部/`。".encode(), 1
+        )
+    )
+    alpha_before = alpha_path.read_bytes()
+    beta_before = (tasks_dir.root / "specs" / "beta" / "spec.md").read_bytes()
+    meta_before = tasks_dir.meta("c1")
+    code, out = _archive(tasks_dir, "c1", vault.client)
+    assert code == 1
+    assert "alpha/" in out and "base 過時" in out
+    assert alpha_path.read_bytes() == alpha_before
+    assert (tasks_dir.root / "specs" / "beta" / "spec.md").read_bytes() == beta_before
+    assert tasks_dir.meta("c1") == meta_before
+    assert tasks_dir.change_dir("c1").is_dir()
+
+
+def test_orphan_notes_from_lost_metadata_are_adopted(tasks_dir: TasksDir, vault):
+    """HTTP write 成功但本機回寫前中斷：服務端已有本 change 的 note，重跑不得再寫。"""
+    _setup_two_reqs(tasks_dir)
+    ids = {
+        key: vault.add(
+            title=f"req:{key}",
+            topics=["change:c1", f"req:{key}"],
+        )
+        for key in ("demo/新功能", "demo/資料根目錄")
+    }
+    ids["summary"] = vault.add(title="變更 c1：x", topics=["change:c1"])
+    assert tasks_dir.meta("c1")["notes"] == {}
+    code, out = _archive(tasks_dir, "c1", vault.client)
+    assert code == 0, out
+    assert vault.writes == 0
+    meta = tasks_dir.meta("c1")
+    assert meta["notes"] == ids
+    assert meta["note_id"] == ids["summary"]
+
+
+def _setup_incomplete(tasks_dir: TasksDir, name: str = "c1") -> None:
+    tasks_dir.write_main("demo", SPEC_A)
+    tasks_dir.propose(
+        name,
+        deltas={"demo": delta(added=[requirement("新功能")], modified=[MOD_ROOT])},
+        complete=False,
+    )
+
+
+def test_incomplete_tasks_refused_before_any_request_or_write(
+    tasks_dir: TasksDir, vault
+):
+    _setup_incomplete(tasks_dir)
+    change = tasks_dir.change_dir("c1")
+    before = {p: p.read_bytes() for p in tasks_dir.root.rglob("*") if p.is_file()}
+    code, out = _archive(tasks_dir, "c1", vault.client)
+    assert code == 1
+    assert "0/2" in out and "--allow-incomplete" in out
+    assert vault.requests == []
+    assert change.is_dir()
+    after = {p: p.read_bytes() for p in tasks_dir.root.rglob("*") if p.is_file()}
+    assert after == before
+
+
+def test_incomplete_check_runs_after_authorization_gate(tasks_dir: TasksDir, vault):
+    tasks_dir.propose(
+        "guarded", "--skip-specs", "--requires-authorization", complete=False
+    )
+    code, out = _archive(tasks_dir, "guarded", vault.client)
+    assert code == 1 and "--authorized-by" in out
+    code, out = _archive(
+        tasks_dir, "guarded", vault.client, "--authorized-by", "艾斯維爾"
+    )
+    assert code == 1 and "--allow-incomplete" in out
+    assert vault.requests == []
+
+
+def test_allow_incomplete_records_count(tasks_dir: TasksDir, vault):
+    _setup_incomplete(tasks_dir)
+    code, out = _archive(tasks_dir, "c1", vault.client, "--allow-incomplete")
+    assert code == 0, out
+    meta = tasks_dir.meta("c1")
+    assert meta["incomplete_at_archive"] == 2
+    body = vault.notes[meta["note_id"]]["body"]
+    assert "0/2" in body and "封存時未完成：2 項" in body
+
+
+def test_complete_tasks_leave_no_incomplete_record(tasks_dir: TasksDir, vault):
+    _setup_two_reqs(tasks_dir)
+    assert _archive(tasks_dir, "c1", vault.client)[0] == 0
+    meta = tasks_dir.meta("c1")
+    assert "incomplete_at_archive" not in meta
+    assert "封存時未完成" not in vault.notes[meta["note_id"]]["body"]
+
+
+def test_resume_cannot_bypass_incomplete_check(tasks_dir: TasksDir, vault):
+    # 已勾完時寫了一部分 note，之後 tasks 又變成未完成：續跑仍須拒絕
+    _setup_two_reqs(tasks_dir)
+    with FakeVault(fail_write_at=2) as flaky:
+        assert _archive(tasks_dir, "c1", flaky.client)[0] == 1
+        assert len(tasks_dir.meta("c1")["notes"]) == 1
+    tasks_md = tasks_dir.change_dir("c1") / "tasks.md"
+    tasks_md.write_text(
+        tasks_md.read_text(encoding="utf-8").replace("- [x]", "- [ ]", 1),
+        encoding="utf-8",
+    )
+    code, out = _archive(tasks_dir, "c1", vault.client)
+    assert code == 1 and "1/2" in out
+    assert vault.requests == []
+
+
+def test_resume_honours_first_allow_incomplete(tasks_dir: TasksDir):
+    _setup_incomplete(tasks_dir)
+    with FakeVault(fail_write_at=2) as flaky:
+        code, _ = _archive(tasks_dir, "c1", flaky.client, "--allow-incomplete")
+        assert code == 1
+        meta = tasks_dir.meta("c1")
+        assert len(meta["notes"]) == 1 and meta["incomplete_at_archive"] == 2
+        flaky.fail_write_at = None
+        code, out = _archive(tasks_dir, "c1", flaky.client)
+        assert code == 0, out
+        meta = tasks_dir.meta("c1")
+        assert meta["incomplete_at_archive"] == 2
+        assert "封存時未完成：2 項" in flaky.notes[meta["note_id"]]["body"]
+
+
+# ── note_digests：部分封存開始後 delta 不可再改 ──
+
+
+def _edit_new_feature(tasks_dir: TasksDir, name: str = "c1") -> None:
+    path = tasks_dir.change_dir(name) / "specs" / "demo" / "spec.md"
+    text = path.read_text(encoding="utf-8")
+    assert "系統 SHALL 運作。" in text
+    path.write_text(text.replace("系統 SHALL 運作。", "系統 SHALL 改過。"), "utf-8")
+
+
+def _first_note_only(tasks_dir: TasksDir) -> FakeVault:
+    """第 2 次 write 起失敗：只寫成 ADDED「新功能」那則。"""
+    _setup_two_reqs(tasks_dir)
+    flaky = FakeVault(fail_write_at=2).__enter__()
+    assert _archive(tasks_dir, "c1", flaky.client)[0] == 1
+    meta = tasks_dir.meta("c1")
+    assert list(meta["notes"]) == ["demo/新功能"]
+    assert set(meta["note_digests"]) >= {"demo/新功能"}
+    flaky.fail_write_at = None
+    return flaky
+
+
+def test_resume_rejects_delta_changed_after_note_written(tasks_dir: TasksDir):
+    flaky = _first_note_only(tasks_dir)
+    try:
+        spec_before = tasks_dir.main_spec("demo")
+        _edit_new_feature(tasks_dir)
+        writes = flaky.writes
+        code, out = _archive(tasks_dir, "c1", flaky.client)
+        assert code == 1 and "delta 不可再改" in out and "demo/新功能" in out
+        assert flaky.writes == writes
+        assert tasks_dir.main_spec("demo") == spec_before
+        assert tasks_dir.change_dir("c1").is_dir()
+        # 還原 delta 後續跑成功，note 與主 spec 一致
+        path = tasks_dir.change_dir("c1") / "specs" / "demo" / "spec.md"
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(
+                "系統 SHALL 改過。", "系統 SHALL 運作。"
+            ),
+            "utf-8",
+        )
+        code, out = _archive(tasks_dir, "c1", flaky.client)
+        assert code == 0, out
+        assert "系統 SHALL 運作。" in tasks_dir.main_spec("demo")
+    finally:
+        flaky.__exit__(None, None, None)
+
+
+def test_resume_rejects_changed_delta_for_adopted_server_note(tasks_dir: TasksDir):
+    """HTTP 寫成、回寫 notes 前中斷（notes 遺失，write-ahead 雜湊還在）：
+    採用服務端那則 note 前同樣比對雜湊。"""
+    flaky = _first_note_only(tasks_dir)
+    try:
+        tasks_dir.set_meta("c1", notes={})
+        _edit_new_feature(tasks_dir)
+        writes = flaky.writes
+        code, out = _archive(tasks_dir, "c1", flaky.client)
+        assert code == 1 and "delta 不可再改" in out
+        assert flaky.writes == writes
+        assert tasks_dir.meta("c1")["notes"] == {}
+    finally:
+        flaky.__exit__(None, None, None)
+
+
+def test_resume_rejects_changed_summary_basis(tasks_dir: TasksDir, vault):
+    """總結 note 已寫、搬目錄前中斷；proposal 被改過 → 拒絕。"""
+    _setup_two_reqs(tasks_dir)
+    blocker = tasks_dir.root / "changes" / "archive" / "2026-10-08-c1"
+    blocker.mkdir(parents=True)
+    code, out = _archive(tasks_dir, "c1", vault.client)
+    assert code == 1 and "封存目錄已存在" in out
+    assert tasks_dir.meta("c1")["spec_applied"] is True
+    blocker.rmdir()
+    proposal = tasks_dir.change_dir("c1") / "proposal.md"
+    original = proposal.read_text(encoding="utf-8")
+    proposal.write_text(original.replace("（為什麼要做）", "改過的理由"), "utf-8")
+    code, out = _archive(tasks_dir, "c1", vault.client)
+    assert code == 1 and "delta 不可再改" in out and "summary" in out
+    proposal.write_text(original, "utf-8")
+    code, out = _archive(tasks_dir, "c1", vault.client)
+    assert code == 0, out
+
+
+def test_resume_without_digests_keeps_legacy_behaviour(tasks_dir: TasksDir):
+    """舊 metadata 沒有 note_digests：維持原行為（續跑照用已寫的 note）。"""
+    flaky = _first_note_only(tasks_dir)
+    try:
+        meta = tasks_dir.meta("c1")
+        tasks_dir.set_meta("c1", note_digests=None)
+        _edit_new_feature(tasks_dir)
+        code, out = _archive(tasks_dir, "c1", flaky.client)
+        assert code == 0, out
+        assert (
+            tasks_dir.meta("c1")["notes"]["demo/新功能"] == meta["notes"]["demo/新功能"]
+        )
+    finally:
+        flaky.__exit__(None, None, None)

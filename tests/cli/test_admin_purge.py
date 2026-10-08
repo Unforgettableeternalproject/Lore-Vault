@@ -17,10 +17,16 @@ from lore_vault.storage import manage as storage_manage
 from lore_vault.storage.db import connect
 from lore_vault.storage.errors import NotFound
 from lore_vault.storage.notes import insert_note
+from lore_vault.storage.timeutil import utc_now
 from lore_vault.storage.vaults import upsert_vault
 
 TS = "2026-09-01T00:00:00.000Z"
 OLD = "2026-01-01T00:00:00.000Z"
+# document_tombstones 的「未過期」墓碑必須晚於 purge 的 30 天門檻（算的是真實牆鐘
+# 時間，見 admin.purge_cutoff），不能用固定字面值——否則隨著實際日期前進會過期，
+# 讓測試隨時間自然變紅。note_tombstones 那一側沒有這問題：a2 的墓碑是
+# admin.delete_note 用當下 utc_now() 寫的，本來就不是固定值。
+RECENT = utc_now()
 SOURCE = "open_notebook"
 
 
@@ -77,7 +83,7 @@ def db(tmp_path):
                     (document_id, vault, sha256, deleted_at, reason)
                 VALUES (?, 'folder/a', ?, ?, 'test')
                 """,
-                [("doc:old", "a" * 64, OLD), ("doc:new", "b" * 64, TS)],
+                [("doc:old", "a" * 64, OLD), ("doc:new", "b" * 64, RECENT)],
             )
     finally:
         conn.close()

@@ -804,6 +804,33 @@ def _v16(conn: sqlite3.Connection) -> None:
     absorb_folder_vaults(conn)
 
 
+# 側載小型機器狀態（v17，D15 UI 已裁決 (a′)；儲存層見 `storage.sidecar`）：
+# - 以 (vault, key) 單列覆寫，不留版本、不留墓碑；不進 FTS／向量／快照／recall／list
+# - 刻意不設外鍵（同墓碑、匯入對帳清單）：vault 刪除與換 space 由 `storage.admin`
+#   在同一交易內一併處理，doctor `sidecar.orphans` 對帳；欄名用 `vault`，
+#   `admin.vault_reference_columns` 自動納入換 space 的改名範圍
+# - space 冗餘存一份（與 vaults.space 一致）：換 space 時一併改寫，doctor 核對
+_V17_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE sidecar_blobs (
+        vault   TEXT NOT NULL CHECK (length(trim(vault)) > 0),
+        space   TEXT NOT NULL,
+        key     TEXT NOT NULL CHECK (length(key) BETWEEN 1 AND 128),
+        mime    TEXT NOT NULL,
+        content BLOB NOT NULL,
+        updated TEXT NOT NULL,
+        PRIMARY KEY (vault, key)
+    ) STRICT
+    """,
+    "CREATE INDEX sidecar_blobs_space_key ON sidecar_blobs(space, key)",
+)
+
+
+def _v17(conn: sqlite3.Connection) -> None:
+    for statement in _V17_STATEMENTS:
+        conn.execute(statement)
+
+
 # 有序遷移：索引 i 的函式把版本從 i 升到 i+1。只能往後加，不可改動已發佈的項目。
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _v1,
@@ -822,6 +849,7 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _v14,
     _v15,
     _v16,
+    _v17,
 )
 
 SCHEMA_VERSION = len(MIGRATIONS)

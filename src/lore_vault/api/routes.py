@@ -19,6 +19,10 @@
 `POST /v1/documents`（T-67）是唯一的 multipart 端點：欄位 `file`、`vault`、`space`
 （必填）、`filename?`、`mime?`；大小上限在讀取 body 時就擋（413 `too_large`）。
 
+`POST /v1/blob_put`／`POST /v1/blob_get`（schema v17）：通用、不檢索的小型機器狀態側載
+（`storage.sidecar`），以 `(vault, key)` 單列覆寫；不進 FTS／embedding／recall／list／
+snapshot，不提供 MCP 工具。內容以 `content_base64` 傳遞，解碼後上限 64KB。
+
 `POST /v1/document_download` 是唯一回二進位的端點：body 同其他 RPC（`space`、
 `vault`、`id`，選填 `max_bytes`），成功回原始位元組（Content-Type 為上傳時的 mime、
 `Content-Disposition` 帶檔名、`X-Lore-Vault-Sha256`），錯誤仍是 JSON。
@@ -26,6 +30,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import sqlite3
 from datetime import UTC, datetime
 from typing import Annotated, Any
@@ -57,6 +63,7 @@ from lore_vault.schema import Vault, canonical_key
 from lore_vault.storage import document_index as storage_document_index
 from lore_vault.storage import documents as storage_documents
 from lore_vault.storage import enrichment as storage_enrichment
+from lore_vault.storage import sidecar as storage_sidecar
 from lore_vault.storage import snapshot as storage_snapshot
 from lore_vault.storage.blobs import BlobCorrupt, BlobNotFound
 from lore_vault.storage.db import transaction
@@ -655,6 +662,75 @@ def document_download(request: Request, req: DocumentDownloadRequest) -> Respons
             "X-Content-Type-Options": "nosniff",
         },
     )
+
+
+# ── 側載小型機器狀態（schema v17）──
+
+# base64 長度上限：解碼後 MAX_BYTES 的 base64 長度（含 padding）
+_SIDECAR_B64_MAX = 4 * ((storage_sidecar.MAX_BYTES + 2) // 3)
+
+
+class BlobPutRequest(_ScopedReq):
+    vault: str | None = None
+    key: str
+    mime: str | None = None
+    content_base64: str
+
+
+class BlobGetRequest(_ScopedReq):
+    # 省略（或 `*`）＝本 space 內所有存過該 key 的 vault
+    vault: str | None = None
+    key: str
+
+
+def _decode_sidecar(text: str) -> bytes:
+    if len(text) > _SIDECAR_B64_MAX:
+        raise storage_sidecar.SidecarTooLarge(
+            f"內容超過上限 {storage_sidecar.MAX_BYTES} 位元組"
+        )
+    try:
+        return base64.b64decode(text, validate=True)
+    except (binascii.Error, ValueError):
+        raise ValueError("content_base64 不是合法的 base64") from None
+
+
+def _sidecar_dict(blob: storage_sidecar.SidecarBlob) -> dict[str, Any]:
+    return {
+        "vault": blob.vault,
+        "key": blob.key,
+        "mime": blob.mime,
+        "content_base64": base64.b64encode(blob.content).decode("ascii"),
+        "updated": blob.updated,
+    }
+
+
+@router.post("/blob_put")
+def blob_put(request: Request, req: BlobPutRequest) -> dict[str, Any]:
+    """覆寫 `(vault, key)` 的內容（不留舊版本）。vault 必填、可用別名；
+    key 含路徑分隔等字元 400 `invalid_key`；解碼後超過 64KB 413 `too_large`。"""
+    content = _decode_sidecar(req.content_base64)
+    with _state(request).connection() as conn:
+        blob = storage_sidecar.put(
+            conn,
+            req.vault,
+            req.key,
+            content,
+            space=req.space,
+            mime=req.mime,
+        )
+    return {"updated": blob.updated}
+
+
+@router.post("/blob_get")
+def blob_get(request: Request, req: BlobGetRequest) -> dict[str, Any]:
+    """給了 vault：回該份內容，沒有 404 `not_found`。省略 vault：回
+    `{"items": [...]}`（本 space 內所有存過該 key 的 vault，可能為空）。"""
+    with _state(request).connection() as conn:
+        if storage_sidecar.is_all(req.vault):
+            items = storage_sidecar.list_for_key(conn, req.key, space=req.space)
+            return {"items": [_sidecar_dict(b) for b in items]}
+        blob = storage_sidecar.get(conn, req.vault, req.key, space=req.space)
+    return _sidecar_dict(blob)
 
 
 # ── 唯讀快照（T-31）──

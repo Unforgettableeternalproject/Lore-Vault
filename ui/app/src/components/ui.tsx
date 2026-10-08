@@ -21,7 +21,21 @@ export function SourceTag({ source }: { source: SummarySource | string | undefin
  * metadata 標籤（vault、寫入者、日期、模式／分數、標籤、錨點…）：依種類分色，讓列表的 metadata 不再像一串純文字。
  * label 給螢幕閱讀器與滑鼠提示（例如「vault」「寫入者」），畫面上只顯示值；testId 放在值本身，textContent 只含值。
  */
-export type BadgeTone = 'vault' | 'author' | 'time' | 'score' | 'degraded' | 'tag' | 'kind' | 'warn' | 'anchor' | 'plain';
+export type BadgeTone =
+  | 'vault'
+  | 'author'
+  | 'time'
+  | 'score'
+  | 'degraded'
+  | 'tag'
+  | 'kind'
+  | 'warn'
+  | 'anchor'
+  | 'plain'
+  // 任務層狀態：可開工＝成功、待授權＝金色（實心）、無法判定＝錯誤；被擋住用 warn、已完成用 plain
+  | 'ready'
+  | 'auth'
+  | 'error';
 
 export function Badge({
   tone,
@@ -208,6 +222,10 @@ const COUNT_LABEL: Record<string, string> = {
   document_chunks: '文件段落',
   chunk_fts: '段落全文索引',
   document_chunk_embeddings: '段落向量',
+  // 通用側載（不檢索的小型機器狀態，例如任務層快照）：刪除計數與換 space 的改寫欄位
+  sidecar_blobs: '側載狀態',
+  'sidecar_blobs.vault': '側載狀態（vault）',
+  'sidecar_blobs.space': '側載狀態（space）',
 };
 
 function Meta({ label, value }: { label: string; value: ComponentChildren }) {

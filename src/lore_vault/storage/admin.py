@@ -8,7 +8,8 @@
 連帶資料：
 - note：FTS 列（虛擬表無外鍵，手動刪）、向量與補算紀錄（外鍵 CASCADE）
 - vault：上述 + 別名（CASCADE）+ episodes／concepts／injections
-  （外鍵無 CASCADE，手動刪）+ 文件（見下）
+  （外鍵無 CASCADE，手動刪）+ 文件（見下）+ 側載（`sidecar_blobs`，schema v17，
+  刻意無外鍵，手動刪；可由客戶端重新推送重建，不寫墓碑、不要求 force）
 - 文件（T-68）：chunk_fts 列（手動刪）、chunk（手動刪；向量隨 chunk CASCADE）、
   抽取／補算紀錄（隨文件 CASCADE），並寫 `document_tombstones`。blob **不刪**：
   可能被其他 vault 或其他版本引用；沒人引用時由 doctor `documents.orphan_blobs`
@@ -36,6 +37,7 @@ key 與別名改成新前綴，引用 vault key 的欄位全部在同一交易�
 引用欄位由 schema 動態列出（`vault_reference_columns`：欄名為 `vault` 或外鍵指向
 `vaults`），日後新增的表只要沿用任一慣例就不會漏改；已知清單
 `KNOWN_VAULT_REFERENCES` 中存在的表若沒被偵測到，視為偵測失效、拒絕執行。
+側載（`sidecar_blobs`）另存冗餘的 `space` 欄，同一交易內一併改寫並核對。
 """
 
 from __future__ import annotations
@@ -50,7 +52,7 @@ from typing import Any
 
 from lore_vault.schema import SPACE_DEV, Note, canonical_key
 
-from . import document_index
+from . import document_index, sidecar
 from .db import transaction
 from .errors import NotFound, StorageError, UnknownVault, VaultConflict
 from .notes import insert_note, note_from_row
@@ -637,6 +639,9 @@ def plan_vault_deletion(conn: sqlite3.Connection, key: str) -> DeletePlan:
         doc_counts = _document_counts(conn, "d.vault = ?", (key,))
         counts.update(doc_counts)
         counts["document_tombstones"] = doc_counts["documents"]
+    if sidecar.has_table(conn):
+        # 側載是可重建的機器狀態：列進規劃（綁進確認 token），但不要求 force
+        counts[sidecar.TABLE] = sidecar.count_for_vault(conn, key)
     requires_force = (
         counts["notes"] > 0
         or counts.get("documents", 0) > 0
@@ -697,6 +702,11 @@ def delete_vault(
             done.update(_delete_documents(conn, "d.vault = ?", (key,)))
             done["chunk_embeddings"] = plan.counts["chunk_embeddings"]
             done["document_enrichment"] = plan.counts["document_enrichment"]
+        if sidecar.TABLE in plan.counts:
+            done[sidecar.TABLE] = sidecar.delete_for_vault(conn, key)
+            # 以資料實況核對（不信 rowcount）：表沒有外鍵，漏刪只會留下孤兒
+            if sidecar.count_for_vault(conn, key):
+                raise PlanChanged(f"vault {key!r} 仍有側載列未刪")
         done["aliases"] = plan.counts["aliases"]
         if conn.execute("DELETE FROM vaults WHERE key = ?", (key,)).rowcount != 1:
             raise PlanChanged(f"vault {key!r} 刪除失敗")
@@ -757,6 +767,7 @@ KNOWN_VAULT_REFERENCES: frozenset[tuple[str, str]] = frozenset(
         ("note_tombstones", "vault"),
         ("documents", "vault"),
         ("document_tombstones", "vault"),
+        ("sidecar_blobs", "vault"),
     }
 )
 
@@ -911,6 +922,9 @@ def plan_space_change(
                 "（殘留資料）；拒絕合併"
             )
         counts[_ref_name(table, column)] = _count(conn, sql, (key,))
+    if sidecar.has_table(conn):
+        # 冗餘的 space 欄：與 key 欄分開計數，執行時一併改寫
+        counts[_SIDECAR_SPACE] = sidecar.count_for_vault(conn, key)
     return SpaceChangePlan(
         key=key,
         new_key=renamed,
@@ -919,6 +933,9 @@ def plan_space_change(
         aliases=tuple(aliases),
         counts=counts,
     )
+
+
+_SIDECAR_SPACE = f"{sidecar.TABLE}.space"
 
 
 def _rename_column(
@@ -957,6 +974,11 @@ def change_vault_space(
             ).rowcount
             for old_alias, new_alias in plan.aliases
         )
+        if _SIDECAR_SPACE in plan.counts:
+            # 在改 key 之前以舊 key 定位
+            done[_SIDECAR_SPACE] = sidecar.set_space_for_vault(
+                conn, plan.key, plan.to_space
+            )
         for name in plan.counts:
             if name in done:
                 continue
@@ -995,6 +1017,14 @@ def _verify_renamed(conn: sqlite3.Connection, plan: SpaceChangePlan) -> None:
         diff["vaults.key"] = {"planned": 1, "new_key": 0 if row is None else 1}
     if conn.execute("SELECT 1 FROM vaults WHERE key = ?", (plan.key,)).fetchone():
         diff["vaults.key"] = {"planned": 1, "old_key": 1}
+    if sidecar.has_table(conn):
+        stale_space = _count(
+            conn,
+            f"SELECT count(*) FROM {sidecar.TABLE} WHERE vault = ? AND space != ?",
+            (plan.new_key, plan.to_space),
+        )
+        if stale_space:
+            diff[_SIDECAR_SPACE] = {"stale_space": stale_space}
     for old_alias, new_alias in plan.aliases:
         owner = conn.execute(
             "SELECT vault FROM vault_aliases WHERE alias = ?", (new_alias,)

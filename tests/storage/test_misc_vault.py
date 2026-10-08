@@ -236,7 +236,7 @@ def test_v16_absorbs_folder_desktop_with_derived_content(tmp_path):
         concept_data = dict(conn.execute("SELECT id, data FROM concepts"))
 
         migrate(conn)
-        assert current_version(conn) == SCHEMA_VERSION == 16
+        assert current_version(conn) == SCHEMA_VERSION
 
         def grouped(table: str) -> dict:
             return {

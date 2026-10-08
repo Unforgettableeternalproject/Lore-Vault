@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -79,6 +80,57 @@ def _newest_pipeline_log() -> tuple[Path | None, float | None]:
     return newest, _age_days(newest)
 
 
+# 連續失敗次數達到這個數才在告警裡標出來（單次失敗本來就會報，連續才是「卡死」的訊號）
+STREAK_ALERT_MIN = 2
+# 往回最多看幾份每日 log。只為數連續失敗，看太多份只是拖慢 SessionStart
+STREAK_SCAN_LOGS = 14
+# 與 pipeline.run_pipeline 印的階段結果行一致：`[pipeline] FAIL calibrate (12s): ...`
+_STAGE_RESULT = re.compile(r"^\[pipeline\] (OK |FAIL) (\S+) \(")
+# run_pipeline.ps1 每次執行在 log 開頭寫的分隔行；一天一檔、可能 append 多次
+_RUN_MARKER = "=== pipeline start "
+
+
+def _log_run_outcome(path: Path) -> str | None:
+    """一份每日 log 最後一次執行的結果：失敗的階段名、全部成功回 ""、判斷不了回 None。
+
+    判斷不了（鎖被占用、log 截斷、沒有任何階段結果行）的那天不算進也不打斷連續紀錄。
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    last_run = text.rsplit(_RUN_MARKER, 1)[-1]
+    saw_ok = False
+    for line in last_run.splitlines():
+        match = _STAGE_RESULT.match(line.strip())
+        if not match:
+            continue
+        if match.group(1) == "FAIL":
+            return match.group(2)
+        saw_ok = True
+    return "" if saw_ok else None
+
+
+def _failure_streak(stage: str) -> int:
+    """同一階段連續失敗幾次：從最新的每日 log 往回數，遇到成功或別的階段失敗就停。
+
+    資料來源是排程既有的 pipeline-YYYYMMDD.log（state 只留最後一輪），不另建存儲。
+    """
+    try:
+        logs = sorted(LOG_DIR.glob("pipeline-*.log"), reverse=True)[:STREAK_SCAN_LOGS]
+    except OSError:
+        return 0
+    streak = 0
+    for path in logs:
+        outcome = _log_run_outcome(path)
+        if outcome is None:
+            continue
+        if outcome != stage:
+            break
+        streak += 1
+    return streak
+
+
 def collect_alerts() -> list[str]:
     """回傳要告警的句子。沒問題就是空 list。"""
     alerts: list[str] = []
@@ -90,8 +142,12 @@ def collect_alerts() -> list[str]:
         for result in (state.get("last_run") or {}).get("results") or []:
             if not result.get("ok"):
                 summary = str(result.get("summary") or "").strip()
+                stage = result.get("stage")
+                streak = _failure_streak(str(stage))
+                repeat = (f"（同一階段已連續失敗 {streak} 次）"
+                          if streak >= STREAK_ALERT_MIN else "")
                 alerts.append(
-                    f"夜間管線上次卡在 **{result.get('stage')}** 階段：{summary[:120]}"
+                    f"夜間管線上次卡在 **{stage}** 階段{repeat}：{summary[:120]}"
                     "（後續階段全部沒跑）")
                 break
     except (OSError, json.JSONDecodeError, AttributeError):

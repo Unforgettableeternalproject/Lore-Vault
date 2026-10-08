@@ -27,6 +27,7 @@ agent_memory_spike/data/*
 # 本地Agent相關檔案
 /CLAUDE.md
 /AGENTS.md
+/openspec/
 docs/hidden/
 
 # compose 預設的備份掛載目錄（LORE_VAULT_HOST_BACKUP_DIR 未設時）

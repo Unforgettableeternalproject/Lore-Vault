@@ -37,6 +37,7 @@ from lore_vault.storage.errors import (
 )
 from lore_vault.storage.manage import AliasConflict, CannotRemoveKey, RetryRefused
 from lore_vault.storage.settings_store import InvalidSettings
+from lore_vault.storage.sidecar import InvalidSidecarKey, SidecarTooLarge
 
 CREATE_VAULT_HINT = (
     "以 POST /v1/vaults 建立（key、display；key 由客戶端用 lore_vault.binding 算出），"
@@ -246,6 +247,9 @@ def install_error_handlers(app: FastAPI) -> None:
     simple(UiSessionRequired, 403, "ui_session_required")
 
     simple(PayloadTooLarge, 413, "too_large")
+    # 側載（schema v17）：兩者都是 ValueError，各自的 handler 先於 invalid_request
+    simple(InvalidSidecarKey, 400, "invalid_key")
+    simple(SidecarTooLarge, 413, "too_large")
     simple(DocumentsNotConfigured, 500, "documents_not_configured")
     app.add_exception_handler(UploadRejected, upload_rejected)
     app.add_exception_handler(InvalidCharacters, invalid_characters)
