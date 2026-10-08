@@ -1,4 +1,6 @@
-"""任務層 doctor 九項檢查：每項各有一個「通過」與一個「破壞後變紅」的情境。"""
+"""任務層 doctor 的本機檢查：每項各有一個「通過」與一個「破壞後變紅」的情境。
+
+服務端任務內容的五項對帳（MCP-T7）在 `test_doctor_remote.py`。"""
 
 from __future__ import annotations
 
@@ -23,6 +25,13 @@ from .conftest import (
     unreachable_client,
 )
 
+REMOTE_CHECKS = (
+    "tasks.pending_apply_stale",
+    "tasks.authorization_record_integrity",
+    "tasks.version_sync_agreement",
+    "tasks.specs_mirror_agreement",
+    "tasks.decisions_mirror_agreement",
+)
 MOD_ROOT = requirement(
     "資料根目錄", "資料 SHALL 存放於 `~/.x/`。", scenarios=("讀取資料根",)
 )
@@ -73,11 +82,11 @@ def test_no_tasks_root_all_skipped_exit_0(tmp_path):
     )
     data = json.loads(out.getvalue())
     assert code == 0
-    assert data["summary"]["total"] == 9
-    assert data["summary"]["skipped"] == 9
+    assert data["summary"]["total"] == 14
+    assert data["summary"]["skipped"] == 14
 
 
-def test_registry_has_nine_checks_and_core_doctor_does_not():
+def test_registry_has_fourteen_checks_and_core_doctor_does_not():
     names = {c.name for c in checks.default_registry().checks}
     assert names == {
         "tasks.isolation",
@@ -89,6 +98,11 @@ def test_registry_has_nine_checks_and_core_doctor_does_not():
         "tasks.dependency_exists",
         "tasks.snapshot_sync",
         "tasks.snapshot_shape",
+        "tasks.pending_apply_stale",
+        "tasks.authorization_record_integrity",
+        "tasks.version_sync_agreement",
+        "tasks.specs_mirror_agreement",
+        "tasks.decisions_mirror_agreement",
     }
     from lore_vault.doctor import default_registry
 
@@ -99,7 +113,14 @@ def test_all_pass_on_healthy_workspace(tasks_dir: TasksDir, vault):
     _archived(tasks_dir, vault)
     # archive 結尾已把快照推到 --vault 指定的 VAULT
     report = _report(tasks_dir, vault.client, "--vault", VAULT)
-    assert {n: c["status"] for n, c in report.items()} == dict.fromkeys(report, "pass")
+    # 服務端對帳（MCP-T7）：沒有任務索引（未遷移）時 skipped，見 test_doctor_remote
+    remote = {n for n in report if n in REMOTE_CHECKS}
+    assert {n: report[n]["status"] for n in remote} == dict.fromkeys(
+        REMOTE_CHECKS, "skipped"
+    )
+    assert {n: c["status"] for n, c in report.items() if n not in remote} == (
+        dict.fromkeys(set(report) - remote, "pass")
+    )
 
 
 def test_isolation_fails_on_injected_import(tasks_dir: TasksDir, tmp_path):
@@ -161,6 +182,8 @@ def test_service_checks_skipped_without_client(tasks_dir: TasksDir, vault):
     assert report["tasks.supersedes_chain"] == "skipped"
     assert report["tasks.snapshot_sync"] == "skipped"
     assert report["tasks.snapshot_shape"] == "skipped"
+    for name in REMOTE_CHECKS:
+        assert report[name] == "skipped"
 
 
 def test_requirement_overlap(tasks_dir: TasksDir):
