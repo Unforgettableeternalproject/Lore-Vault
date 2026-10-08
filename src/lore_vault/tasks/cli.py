@@ -21,7 +21,7 @@ from typing import Any, TextIO
 
 from lore_vault.doctor.framework import DoctorContext
 
-from . import snapshot
+from . import migrate, snapshot
 from .archive import ArchiveError, archive_change, describe_result
 from .vault_client import ServiceError, VaultClient, load_settings
 from .workspace import (
@@ -152,6 +152,8 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--offline", action="store_true", help="不連服務（相關檢查 skipped）"
     )
+
+    migrate.add_parser(sub)
     return parser
 
 
@@ -497,6 +499,8 @@ def main(
         return _sync(args, env, client_factory)
     if args.command == "doctor":
         return _doctor(args, env, client_factory)
+    if args.command == "migrate":
+        return migrate.run(args, env, client_factory)
     if args.command == "propose":
         code = _propose(args, env, today)
     elif args.command == "list":
