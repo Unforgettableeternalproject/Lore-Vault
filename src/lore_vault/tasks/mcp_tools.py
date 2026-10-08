@@ -20,23 +20,25 @@ server。
   的 binding
 - 本機工作副本（`openspec/`）只在 stdio、且目標 vault 等於殼工作目錄 binding 時讀寫；
   HTTP 不碰任何本機檔案，回應不含本機路徑
-- 主 spec 鏡像只由 stdio 的 init／validate 從本機 `specs/` 推送
+- 主 spec 鏡像只由 stdio 的 init／validate／sync_specs 從本機 `specs/` 推送；
+  DECISIONS 鏡像（`task-decisions`）只由 stdio 的 init／validate 推送
+- `sync_specs`（archive 段二落地）只限 stdio；HTTP 在任何服務呼叫之前拒絕
+- propose／edit／validate（有記 base）／archive／sync_specs 成功後以服務端內容重算
+  UI 快照並推送（`snapshot.push_remote`），失敗只記在回應的 `snapshot`
+- 與 Shell 無關的動作本體在 `remote_ops`（CLI 共用）
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, NamedTuple
 
-import anyio
-import anyio.to_thread
 from mcp.server.mcpserver import Context
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
@@ -50,33 +52,22 @@ from lore_vault.mcp.server import (
     _tool_error,
 )
 
+from . import remote_ops, snapshot
 from . import remote_store as rs
-from .archive import (
-    DEFAULT_AUTHOR,
-    ArchiveError,
-    ArchiveResult,
-    _check_written_digests,
-    _removed_keys,
-    _requirement_items,
-    check_incomplete,
-    write_notes,
-)
 from .decisions import DECISION_ID
-from .vault_client import ServiceError as HookServiceError
 from .workspace import (
     DEFAULT_DIR,
     SPACE_DEV,
     STATUS_AUTH,
-    STATUS_BLOCKED,
-    STATUS_UNKNOWN,
+    STATUS_PENDING_APPLY,
     Workspace,
     default_meta,
     derive_status,
+    enable_remote,
     load_workspace,
     meta_errors,
     record_base,
     resolve_root,
-    trial_merge,
     validate_change,
 )
 
@@ -90,7 +81,16 @@ class TaskTool(NamedTuple):
     description: str
 
 
-ACTIONS = ("init", "propose", "edit", "pull", "list", "validate", "archive")
+ACTIONS = (
+    "init",
+    "propose",
+    "edit",
+    "pull",
+    "list",
+    "validate",
+    "archive",
+    "sync_specs",
+)
 ARCHIVE_OP = "tasks_archive"
 ARCHIVE_NEXT_STEP = (
     "這一步只規劃、沒有寫入。把 plan 給使用者看、取得明確同意後，才以完全相同的參數"
@@ -100,7 +100,6 @@ PENDING_APPLY_NEXT_STEP = (
     "note 已寫入、服務端主 spec 鏡像已更新（已封存，待落地）；本機 specs/ 要等之後在"
     "有本機 repo 的機器以 stdio 殼同步（sync_specs）才會更新"
 )
-STATUS_PENDING_APPLY = "已封存（待落地）"
 AUTH_REASON = "需艾斯維爾在 UI 任務頁核准後才能經 MCP archive"
 HTTP_INIT_NOTE = (
     "此裝置之後如需本機檔案，另在該機器以 stdio 殼執行 tasks(action='init')"
@@ -182,6 +181,22 @@ HINTS = {
     ),
     "invalid_remote_content": (
         "服務端內容格式不符；請使用者檢查（可能是舊版或手動寫入）"
+    ),
+    "path_not_supported": (
+        "sync_specs 會寫本機 git repo 的 specs/ 與 changes/：請在裝了 stdio 殼、"
+        "有這個專案 repo 的機器執行"
+    ),
+    "local_unavailable": (
+        "這台機器沒有這個 vault 的本機任務目錄：在專案目錄先執行 tasks(action='init')"
+    ),
+    "spec_base_mismatch": remote_ops.HINT_SPEC_BASE_MISMATCH,
+    "local_modified_archived": remote_ops.HINT_LOCAL_MODIFIED_ARCHIVED,
+    "change_not_pending_apply": (
+        "只有已封存待落地（pending_apply）的 change 需要 sync_specs"
+    ),
+    "archive_dir_exists": (
+        "本機 changes/archive/ 已有同名目錄但不是這個 change 的封存記錄；"
+        "請使用者人工確認"
     ),
 }
 
@@ -350,6 +365,9 @@ class TaskOps:
             or "本機沒有任務目錄（先在 stdio 執行 init）",
         }
 
+    def _local_ws(self, target: Target) -> Workspace | None:
+        return None if self.shell.http else target.workspace()
+
     async def _remote_workspace(
         self,
         target: Target,
@@ -358,73 +376,29 @@ class TaskOps:
         mirror_for: list[rs.RemoteChange] = (),  # type: ignore[assignment]
     ) -> rs.RemoteWorkspace:
         """`mirror_for`：要讀主 spec 鏡像的 change（validate／archive）；
-        list 不需要。"""
-        decisions = None
-        local = None if self.shell.http else target.workspace()
-        if local is not None:
-            decisions = local.decisions()
-            archived = archived | {c.name for c in local.archived()}
-        caps = sorted({cap for c in mirror_for for cap in c.deltas})
-        mirrors = {}
-        for cap in caps:
-            mirror = await target.store.get_mirror(cap)
-            if mirror is not None:
-                mirrors[cap] = mirror
-        return rs.RemoteWorkspace(
-            root=PurePosixPath("remote"),  # type: ignore[arg-type]
-            changes=changes,
-            mirrors=mirrors,
-            archived_names=archived,
-            decisions_map=decisions,
+        list 不需要。DECISIONS：stdio 本機優先，否則讀鏡像。"""
+        return await remote_ops.remote_workspace(
+            target.store, self._local_ws(target), changes, archived, mirror_for
         )
 
     async def _push_mirrors(
         self, target: Target, ws: Workspace, changes: list[rs.RemoteChange]
     ) -> dict[str, Any]:
-        """stdio：把本機 `specs/` 推成鏡像（同內容不推；
-        pending_apply 合併中的 capability 跳過）。"""
-        local = rs.local_main_specs(ws)
-        caps = set(local) | {cap for c in changes for cap in c.deltas}
-        for change in ws.active():
-            caps |= set(change.delta_files())
-        pending: dict[str, str] = {}
-        for change in changes:
-            if change.state == rs.STATE_PENDING_APPLY:
-                for cap in (change.doc.get("apply") or {}).get("merged_specs") or {}:
-                    pending.setdefault(cap, change.name)
-        report: dict[str, Any] = {
-            "pushed": [],
-            "unchanged": [],
-            "skipped": {},
-            "conflicts": [],
-        }
-        for cap in sorted(c for c in caps if rs.NAME_RE.match(c)):
-            if cap in pending:
-                report["skipped"][cap] = (
-                    f"change {pending[cap]} 已封存待落地，鏡像保留併入後內容"
-                )
-                continue
-            exists = cap in local
-            text = local.get(cap)
-            mirror = await target.store.get_mirror(cap)
-            if mirror is not None and mirror.same_content(exists, text):
-                report["unchanged"].append(cap)
-                continue
-            try:
-                await target.store.put_mirror(
-                    cap,
-                    exists=exists,
-                    text=text,
-                    source=rs.MIRROR_SOURCE_STDIO,
-                    expected_version=mirror.version if mirror else 0,
-                )
-            except rs.RemoteError as exc:
-                if exc.code != "version_conflict":
-                    raise
-                report["conflicts"].append(cap)
-                continue
-            report["pushed"].append(cap)
-        return report
+        return await remote_ops.push_mirrors(target.store, ws, changes)
+
+    async def _push_snapshot(self, target: Target) -> dict[str, Any]:
+        """寫入類動作成功後，以服務端內容重算並推送 UI 快照；失敗不影響動作本身。"""
+        try:
+            pushed = await snapshot.push_remote(target.store, self._local_ws(target))
+        except rs.StoreError as exc:
+            return {"pushed": False, "reason": exc.message}
+        except rs.RemoteError as exc:
+            return {"pushed": False, "reason": exc.message}
+        except rs.RemoteUnreachable as exc:
+            return {"pushed": False, "reason": exc.detail}
+        except snapshot.SnapshotTooLarge as exc:
+            return {"pushed": False, "reason": str(exc)}
+        return {"pushed": True, "changes": pushed.changes}
 
     # ── actions ──
 
@@ -452,8 +426,10 @@ class TaskOps:
             "root": str(root),
             "created": files,
             "gitignore": _ensure_gitignore(root),
+            "remote_marker": enable_remote(root),
         }
         result["mirrors"] = await self._push_mirrors(target, ws, changes)
+        result["decisions"] = await remote_ops.push_decisions(target.store, ws)
         return result
 
     async def propose(
@@ -528,6 +504,7 @@ class TaskOps:
         }
         if not self.shell.http:
             result["local"] = self._write_new_local(target, ws, change)
+        result["snapshot"] = await self._push_snapshot(target)
         return result
 
     def _write_new_local(
@@ -614,6 +591,7 @@ class TaskOps:
                         "（之後用 pull overwrite=true 對齊）"
                     ),
                 }
+        result["snapshot"] = await self._push_snapshot(target)
         return result
 
     async def pull(
@@ -715,6 +693,7 @@ class TaskOps:
         local = None if self.shell.http else target.workspace()
         if local is not None:
             result["mirrors"] = await self._push_mirrors(target, local, changes)
+            result["decisions"] = await remote_ops.push_decisions(target.store, local)
         active = [c for c in changes if c.state == rs.STATE_ACTIVE]
         if name:
             rs.check_name(name)
@@ -728,6 +707,7 @@ class TaskOps:
             targets = active
         rws = await self._remote_workspace(target, changes, archived, targets)
         rows = []
+        recorded = False
         for change in targets:
             row: dict[str, Any] = {"name": change.name}
             missing = (
@@ -738,6 +718,7 @@ class TaskOps:
                 if changed:
                     await target.store.save_change(change)
                     row["base_recorded"] = changed
+                    recorded = True
             if missing:
                 errors = meta_errors(change) + [
                     f"{cap}：服務端沒有主 spec 鏡像（在有本機 repo 的機器以 stdio "
@@ -752,6 +733,8 @@ class TaskOps:
             rows.append(row)
         result["ok"] = all(r["ok"] for r in rows)
         result["results"] = rows
+        if recorded:
+            result["snapshot"] = await self._push_snapshot(target)
         return result
 
     # ── archive（段一＋授權閘門）──
@@ -897,73 +880,15 @@ class TaskOps:
         allow_incomplete: bool,
         reason: str | None,
     ) -> tuple[dict[str, Any], dict[str, str], dict[str, rs.Mirror]]:
-        """archive 段一的全驗（同本機 archive 第 1b～2 步，主 spec 讀鏡像）。
-        回傳 (規劃, 尚待推進的 {cap: 併入後全文}, 讀到的鏡像)。只讀不寫。"""
-        meta = change.meta
-        try:
-            check_incomplete(change, allow_incomplete)
-        except ArchiveError as exc:
-            raise _rejected(exc) from None
-        changes, archived = await target.store.list_changes()
-        changes = [c for c in changes if c.name != change.name] + [change]
-        rws = await self._remote_workspace(target, changes, archived, [change])
-        applied = list(meta.get(rs.MIRROR_APPLIED_KEY) or [])
-        _reconcile_mirror_applying(change, rws, applied)
-        skip_specs = bool(meta.get("skip_specs"))
-        missing = [] if skip_specs else rws.missing_mirrors(change)
-        if missing:
-            raise rs.StoreError(
-                "archive_rejected",
-                f"{change.name} 未通過 validate：服務端沒有主 spec 鏡像",
-                details=[f"{cap}：缺少主 spec 鏡像" for cap in missing],
-                hint_code="mirror_missing",
-            )
-        errors = validate_change(change, rws, rws.active(), skip=applied)
-        if errors:
-            raise rs.StoreError(
-                "archive_rejected", f"{change.name} 未通過 validate", details=errors
-            )
-        status, reasons = derive_status(change, rws)
-        if status in (STATUS_BLOCKED, STATUS_UNKNOWN):
-            raise rs.StoreError(
-                "archive_rejected",
-                f"{change.name} 狀態為「{status}」，不可封存",
-                details=reasons,
-            )
-        merged: dict[str, str] = {}
-        if not skip_specs:
-            merged, merge_errors = trial_merge(change, rws, skip=applied)
-            if merge_errors:
-                raise rs.StoreError(
-                    "archive_rejected",
-                    f"{change.name} delta 併回試算失敗",
-                    details=merge_errors,
-                )
-        try:
-            _check_written_digests(change, dict(meta.get("notes") or {}))
-        except ArchiveError as exc:
-            raise _rejected(exc) from None
-        caps = sorted(set(merged) | set(applied))
-        plan = {
-            "name": change.name,
-            "vault": target.vault,
-            "version": change.version,
-            "requires_authorization": bool(meta.get("requires_authorization")),
-            "authorized_by": record.authorized_by if record else None,
-            "authorized_version": record.change_version if record else None,
-            "incomplete": meta.get("incomplete_at_archive"),
-            "reason": reason or None,
-            "requirements": [k for k, *_ in _requirement_items(change)],
-            "removed": _removed_keys(change),
-            "already_written": sorted(meta.get("notes") or {}),
-            "capabilities": caps,
-            "mirror_versions": {cap: rws.mirrors[cap].version for cap in caps},
-            "merged_sha256": {
-                cap: _sha256(merged.get(cap) or rws.mirrors[cap].text or "")
-                for cap in caps
-            },
-        }
-        return plan, merged, rws.mirrors
+        return await remote_ops.archive_plan(
+            target.store,
+            change,
+            local=self._local_ws(target),
+            authorized_by=record.authorized_by if record else None,
+            authorized_version=record.change_version if record else None,
+            allow_incomplete=allow_incomplete,
+            reason=reason,
+        )
 
     async def _archive_execute(
         self,
@@ -976,103 +901,60 @@ class TaskOps:
         reason: str | None,
         author: str | None,
     ) -> dict[str, Any]:
-        store = target.store
-        meta = change.meta
-        name = change.name
-        if meta.get("vault") not in (None, target.vault):
-            raise rs.StoreError(
-                "archive_rejected",
-                f"vault 與先前記錄不同：{meta.get('vault')} → {target.vault}",
-            )
-        meta["vault"] = target.vault
-        if record is not None and not isinstance(meta.get("authorization"), dict):
-            meta["authorization"] = record.to_meta()
-        if reason:
-            meta["archive_reason"] = reason
-        await store.save_change(change)
-        result = ArchiveResult(
-            name=name, destination="", note_id="", vault=target.vault
+        done = await remote_ops.archive_execute(
+            target.store,
+            change,
+            merged,
+            mirrors,
+            authorized_by=record.authorized_by if record else None,
+            authorization=record.to_meta() if record else None,
+            reason=reason,
+            author=author,
+            now=self.shell._now(),
         )
-        client = rs.ThreadBridgeClient(store)
-
-        def write() -> None:
-            change.saver = lambda: anyio.from_thread.run(store.save_change, change)
-            try:
-                write_notes(
-                    change,
-                    client,  # type: ignore[arg-type]
-                    target.vault,
-                    SPACE_DEV,
-                    authorized_by=record.authorized_by if record else None,
-                    author=author or DEFAULT_AUTHOR,
-                    result=result,
-                )
-            finally:
-                change.saver = None
-
-        try:
-            await anyio.to_thread.run_sync(write)
-        except ArchiveError as exc:
-            raise _rejected(exc) from None
-        except HookServiceError as exc:
-            raise rs.StoreError(
-                "archive_write_failed",
-                "Lore Vault 寫入失敗，change 留在 active（重跑會跳過已寫的 note）："
-                + exc.detail,
-                written=sorted(meta.get("notes") or {}),
-            ) from None
-        # 段一：鏡像推進成併入後內容（write-ahead：先記雜湊再寫，續跑認得出）
-        applied = list(meta.get(rs.MIRROR_APPLIED_KEY) or [])
-        versions = {cap: mirrors[cap].version for cap in applied if cap in mirrors}
-        for cap, text in merged.items():
-            meta[rs.MIRROR_APPLYING_KEY] = {cap: _sha256(text)}
-            await store.save_change(change)
-            try:
-                versions[cap] = await store.put_mirror(
-                    cap,
-                    exists=True,
-                    text=text,
-                    source=f"archive:{name}",
-                    expected_version=mirrors[cap].version,
-                )
-            except rs.RemoteError as exc:
-                if exc.code != "version_conflict":
-                    raise
-                raise rs.StoreError(
-                    "mirror_changed",
-                    f"主 spec 鏡像 {cap} 在驗證後被更新，鏡像未推進；note 已寫入，"
-                    "重跑 archive 會依新鏡像重新驗證",
-                ) from None
-            applied.append(cap)
-            meta[rs.MIRROR_APPLIED_KEY] = list(applied)
-            meta.pop(rs.MIRROR_APPLYING_KEY, None)
-            await store.save_change(change)
-        merged_specs = {
-            cap: merged.get(cap) or (mirrors[cap].text or "") for cap in applied
-        }
-        stamp = self.shell._now().astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        meta["archived_at"] = stamp
-        change.doc["state"] = rs.STATE_PENDING_APPLY
-        change.doc["apply"] = {
-            "archived_at": stamp,
-            "merged_specs": dict(sorted(merged_specs.items())),
-            "mirror_versions": dict(sorted(versions.items())),
-        }
-        await store.save_change(change)
-        await store.set_index_state(name, rs.STATE_PENDING_APPLY)
         return {
             "executed": True,
-            "name": name,
+            "name": done["name"],
             "vault": target.vault,
-            "version": change.version,
+            "version": done["version"],
             "state": rs.STATE_PENDING_APPLY,
             "status": STATUS_PENDING_APPLY,
-            "note_id": meta.get("note_id"),
-            "written": result.written,
-            "skipped": result.skipped,
-            "capabilities": sorted(merged_specs),
+            "note_id": done["note_id"],
+            "written": done["written"],
+            "skipped": done["skipped"],
+            "capabilities": done["capabilities"],
             "next_step": PENDING_APPLY_NEXT_STEP,
+            "snapshot": await self._push_snapshot(target),
         }
+
+    # ── sync_specs（段二落地，stdio 限定）──
+
+    async def sync_specs(
+        self, vault: str | None, name: str | None, overwrite: bool
+    ) -> dict[str, Any]:
+        if self.shell.http:
+            # 在任何服務呼叫之前拒絕：這個動作定義上就是寫本機 git 檔案
+            raise _tool_error(
+                "path_not_supported",
+                "HTTP 端點沒有本機檔案系統，不支援 sync_specs",
+                hint=HINTS["path_not_supported"],
+            )
+        target = await self._target(vault)
+        ws = target.workspace()
+        if ws is None:
+            raise rs.StoreError(
+                "local_unavailable", target.local_reason or "本機沒有任務目錄"
+            )
+        result = await remote_ops.sync_specs(
+            target.store, ws, name, overwrite=overwrite, now=self.shell._now
+        )
+        result["vault"] = target.vault
+        result["root"] = str(ws.root)
+        result["next_step"] = (
+            "本機 specs/ 與 changes/archive/ 已更新；照平常的 commit 流程把它們進版控"
+        )
+        result["snapshot"] = await self._push_snapshot(target)
+        return result
 
 
 def _filter(rows: list[dict[str, Any]], status_filter: str | None) -> list[dict]:
@@ -1087,33 +969,6 @@ def _token_clock() -> float:
 
 def _utc(timestamp: float) -> str:
     return datetime.fromtimestamp(timestamp, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _sha256(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def _rejected(exc: ArchiveError) -> rs.StoreError:
-    return rs.StoreError("archive_rejected", str(exc), details=list(exc.details))
-
-
-def _reconcile_mirror_applying(
-    change: rs.RemoteChange, ws: rs.RemoteWorkspace, applied: list[str]
-) -> None:
-    """續跑：`mirror_applying` 記的鏡像若已是記錄的內容（推進成功、還沒記進
-    `mirror_applied_caps` 就中斷），補記為已套用（只改記憶體，執行時才落地）。"""
-    applying = change.meta.get(rs.MIRROR_APPLYING_KEY)
-    if not isinstance(applying, dict) or not applying:
-        return
-    for cap, digest in applying.items():
-        mirror = ws.mirrors.get(str(cap))
-        if mirror is None or not mirror.exists or _sha256(mirror.text or "") != digest:
-            return
-    for cap in applying:
-        if cap not in applied:
-            applied.append(str(cap))
-    change.meta[rs.MIRROR_APPLIED_KEY] = list(applied)
-    change.meta.pop(rs.MIRROR_APPLYING_KEY, None)
 
 
 def _apply_edit(change: rs.RemoteChange, given: dict[str, Any]) -> None:
@@ -1230,8 +1085,14 @@ DESCRIPTION = (
     "之後由有本機 repo 的機器同步。requires_authorization 的 change 必須先由使用者"
     "本人在 UI 任務頁核准（核准後再改內容需重新核准）；沒有核准會回 "
     "authorization_required——不要自行代填或繞過\n"
+    "- sync_specs(name?, overwrite?)：只限本地 stdio 殼。把已封存待落地的 change 的"
+    "併入後主 spec 寫回本機 openspec/specs/、本機 change 目錄換成 changes/archive/ 的"
+    "封存記錄、狀態改已完成；本機主 spec 與封存時的基準不一致（git 被別人改過）會拒絕"
+    "並回 spec_base_mismatch。省略 name 處理全部待落地的 change。HTTP 端點回 "
+    "path_not_supported\n"
     "本機檔案只在 stdio、且 vault 就是工作目錄專案時讀寫。HTTP 端點讀不到 "
-    "DECISIONS.md，有 blocked_by 的 change 狀態會是「無法判定」。"
+    "DECISIONS.md，改用 stdio init／validate 推上來的鏡像；從未推過時有 blocked_by 的"
+    " change 狀態會是「無法判定」。"
 )
 
 
@@ -1348,7 +1209,10 @@ def build_tools(shell: Shell) -> list[TaskTool]:
         ] = None,
         overwrite: Annotated[
             bool,
-            Field(description="pull（stdio）：捨棄本機未推送的修改，以服務端內容覆寫"),
+            Field(
+                description="pull／sync_specs（stdio）：捨棄本機未推送的修改，"
+                "以服務端內容覆寫"
+            ),
         ] = False,
         ctx: Context | None = None,
     ) -> str:
@@ -1393,6 +1257,8 @@ def build_tools(shell: Shell) -> list[TaskTool]:
                     result = await ops.validate(
                         vault, name, record=record_base, rebase=rebase
                     )
+                elif action == "sync_specs":
+                    result = await ops.sync_specs(vault, name, overwrite)
                 elif action == "archive":
                     result = await ops.archive(
                         vault,

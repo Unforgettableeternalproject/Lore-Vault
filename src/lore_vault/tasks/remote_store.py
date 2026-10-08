@@ -48,6 +48,28 @@
 - stdio 推送時跳過有 `pending_apply` change 正在合併的 capability，避免本機舊內容把
   段一推進的鏡像倒退
 
+段二（`sync_specs`，MCP-T6）在 `apply` 另記落地進度（write-ahead，中斷可續跑）::
+
+    "apply": {..., "applying": {capability: 即將寫入本機的全文 sha256},
+                   "applied_caps": [已寫回本機 specs 的 capability]}
+
+- 落地完成後 `state` 改 `archived`、索引同步改 `archived`；文件保留（快照與
+  doctor 仍要讀 note_id／archived_at／proposal）
+- 經 CLI `--authorized-by` 封存的 change，meta `authorization` 為
+  `{"authorized_by", "authorized_at", "change_version", "source": "cli"}`
+  （艾斯維爾在終端操作的已裁決路徑，沒有 UI 授權紀錄）；UI 核准抄進的版本沒有
+  `source` 欄位
+
+`task-decisions`：DECISIONS.md 解析結果的鏡像（HTTP 讀不到 DECISIONS.md）::
+
+    {"schema": 1, "decisions": {"D6": false, "D12": true, ...},
+     "source_digest": DECISIONS.md 原始位元組的 sha256}
+
+- 只放 D 編號與是否解除，不放全文；stdio／CLI 的 init／validate／sync 推送
+  （本機有 DECISIONS.md 才推，同內容不推；本機沒有檔案時不推空鏡像）
+- 判定規則（`resolve_decisions`）：本機有 DECISIONS.md 以本機為準，沒有時用鏡像，
+  兩者都沒有回 None（呼叫端標「無法判定」）
+
 `task-authorization:<name>`：`requires_authorization` 的人類核准紀錄（§3.3）::
 
     {"schema": 1, "vault": 正式 key, "change": name, "change_version": int,
@@ -76,6 +98,7 @@ import base64
 import binascii
 import hashlib
 import json
+import shutil
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -98,6 +121,7 @@ CHANGE_PREFIX = "task-change:"
 INDEX_KEY = "task-index"
 MIRROR_PREFIX = "task-spec-mirror:"
 AUTHORIZATION_PREFIX = "task-authorization:"
+DECISIONS_KEY = "task-decisions"
 
 STATE_ACTIVE = "active"
 STATE_PENDING_APPLY = "pending_apply"
@@ -114,6 +138,11 @@ MIRROR_SOURCE_STDIO = "stdio"
 MIRROR_APPLYING_KEY = "mirror_applying"
 MIRROR_APPLIED_KEY = "mirror_applied_caps"
 PRINCIPAL_UI = "ui_session"
+# CLI `--authorized-by` 記進 meta `authorization` 的來源
+AUTHORIZATION_SOURCE_CLI = "cli"
+# 段二落地的 write-ahead（`apply` 內）
+APPLY_APPLYING_KEY = "applying"
+APPLY_APPLIED_KEY = "applied_caps"
 INDEX_RETRIES = 5
 
 # change 目錄內的檔案 ↔ 文件欄位
@@ -392,6 +421,36 @@ class Mirror:
 
 
 @dataclass(frozen=True)
+class DecisionsMirror:
+    decisions: dict[str, bool]
+    source_digest: str
+    version: int
+
+
+def decisions_source(ws: Workspace) -> tuple[dict[str, bool], str] | None:
+    """本機 DECISIONS.md 的 (解析結果, 原始位元組 sha256)；沒有檔案回 None。"""
+    path = ws.decisions_path
+    if path is None or not path.is_file():
+        return None
+    decisions = ws.decisions()
+    if decisions is None:
+        return None
+    return decisions, hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+async def resolve_decisions(
+    store: RemoteStore, local: Workspace | None
+) -> dict[str, bool] | None:
+    """本機有 DECISIONS.md 以本機為準；沒有時用服務端鏡像；都沒有回 None。"""
+    if local is not None:
+        decisions = local.decisions()
+        if decisions is not None:
+            return decisions
+    mirror = await store.get_decisions()
+    return mirror.decisions if mirror is not None else None
+
+
+@dataclass(frozen=True)
 class AuthorizationRecord:
     vault: str
     change: str
@@ -609,23 +668,32 @@ class RemoteStore:
             if change is not None:
                 await self.set_index_state(name, change.state)
 
-    async def list_changes(self) -> tuple[list[RemoteChange], set[str]]:
+    async def list_changes(
+        self, *, include_archived: bool = False
+    ) -> tuple[list[RemoteChange], set[str]]:
         """(索引中 active／pending_apply 的 change，已封存名稱)；
         狀態以 change 文件為準。
 
-        已封存名稱＝索引標 `archived` 或 change 文件為 `pending_apply` 者。"""
+        已封存名稱＝索引標 `archived` 或 change 文件為 `pending_apply` 者。
+        `include_archived`：已落地（`archived`）的 change 文件也讀回並放進清單
+        （快照用）；索引標 `archived` 但沒有文件的（遷移的舊封存）只在名稱集合。"""
         index, _ = await self.get_index()
         changes: list[RemoteChange] = []
         archived: set[str] = set()
         for name, entry in sorted((index.get("changes") or {}).items()):
-            if (entry or {}).get("state") == STATE_ARCHIVED:
+            indexed_archived = (entry or {}).get("state") == STATE_ARCHIVED
+            if indexed_archived and not include_archived:
                 archived.add(name)
                 continue
             change = await self.get_change(name)
             if change is None:
+                if indexed_archived:
+                    archived.add(name)
                 continue
             if change.state == STATE_ARCHIVED:
                 archived.add(name)
+                if include_archived:
+                    changes.append(change)
                 continue
             if change.state == STATE_PENDING_APPLY:
                 archived.add(name)
@@ -668,6 +736,47 @@ class RemoteStore:
         }
         return await self.put_blob(
             mirror_key(capability), encode(doc), expected_version=expected_version
+        )
+
+    # DECISIONS 鏡像
+
+    async def get_decisions(self) -> DecisionsMirror | None:
+        blob = await self.get_blob(DECISIONS_KEY)
+        if blob is None:
+            return None
+        data = _decode(blob.content, DECISIONS_KEY)
+        raw = data.get("decisions")
+        if not isinstance(raw, dict) or not all(
+            isinstance(k, str) and isinstance(v, bool) for k, v in raw.items()
+        ):
+            raise StoreError(
+                "invalid_remote_content", f"{DECISIONS_KEY} 的 decisions 格式不符"
+            )
+        return DecisionsMirror(
+            dict(raw), str(data.get("source_digest") or ""), blob.version
+        )
+
+    async def put_decisions(
+        self, decisions: Mapping[str, bool], source_digest: str
+    ) -> int:
+        """整份覆寫（衍生資料，不鎖版本）。"""
+        doc = {
+            "schema": SCHEMA,
+            "decisions": dict(sorted(decisions.items())),
+            "source_digest": source_digest,
+        }
+        return await self.put_blob(DECISIONS_KEY, encode(doc), expected_version=None)
+
+    async def put_derived(self, key: str, content: bytes) -> dict[str, Any]:
+        """整份覆寫衍生資料的側載（`tasks-snapshot`，不鎖版本）；回傳服務端回應。"""
+        return await self._call(
+            "/v1/blob_put",
+            {
+                "vault": self.vault,
+                "key": key,
+                "mime": MIME,
+                "content_base64": base64.b64encode(content).decode("ascii"),
+            },
         )
 
     # 授權紀錄（唯讀）
@@ -878,7 +987,24 @@ def local_state(ws: Workspace, remote: RemoteChange) -> LocalState:
 
 def write_local(ws: Workspace, remote: RemoteChange) -> Path:
     """把服務端內容寫成本機工作副本（覆寫；多出的 delta 刪除），記同步欄位。"""
-    path = ws.changes_dir / remote.name
+    return _write_change_dir(ws.changes_dir / remote.name, remote)
+
+
+def write_archive_record(ws: Workspace, remote: RemoteChange, dest: Path) -> Path:
+    """依服務端內容建本機封存記錄 `changes/archive/<date>-<name>/`（段二落地）：
+    先寫進同層暫存目錄再改名，中途失敗不留半套目錄。meta 另記 `spec_applied: true`
+    （與本機 archive 的封存記錄一致）。"""
+    tmp = dest.parent / f".{dest.name}.tmp"
+    if tmp.exists():
+        shutil.rmtree(tmp)
+    _write_change_dir(tmp, remote, extra_meta={"spec_applied": True})
+    tmp.rename(dest)
+    return dest
+
+
+def _write_change_dir(
+    path: Path, remote: RemoteChange, extra_meta: Mapping[str, Any] | None = None
+) -> Path:
     doc = remote.to_doc()
     for filename, fld in FILE_FIELDS.items():
         value = doc.get(fld)
@@ -898,6 +1024,7 @@ def write_local(ws: Workspace, remote: RemoteChange) -> Path:
     for cap, text in wanted.items():
         atomic_write_text(specs_dir / check_capability(cap) / "spec.md", text)
     meta = dict(doc.get("meta") or {})
+    meta.update(extra_meta or {})
     meta[REMOTE_VERSION_KEY] = remote.version
     meta[REMOTE_DIGEST_KEY] = remote.digest()
     write_yaml(path / META_FILE, meta)

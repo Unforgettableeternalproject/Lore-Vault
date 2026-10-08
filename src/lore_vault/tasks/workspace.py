@@ -8,6 +8,11 @@ specs/<cap>/spec.md}`、
 任務目錄位置：`--root` > 環境變數 `LORE_VAULT_TASKS_ROOT` > 目前目錄下的 `openspec/`
 （存在才算）。DECISIONS.md 位置：`--decisions` > `LORE_VAULT_TASKS_DECISIONS` >
 `config.yaml` 的 `decisions_file`（相對於任務目錄的上一層）；都沒有就是未設定。
+
+服務端同步（TASK_LAYER_MCP §1、MCP-T6）：`config.yaml` 的 `remote: true` 表示本專案的
+change 以 Lore Vault 服務端為權威、本機 `changes/` 是工作副本（CLI 改走版本化同步）；
+由 stdio 的 `init`（MCP `tasks(action="init")` 或 CLI `init --remote`）寫入。
+沒有這一行時 CLI 維持純本機模式。
 """
 
 from __future__ import annotations
@@ -32,6 +37,7 @@ DEFAULT_DIR = "openspec"
 META_FILE = ".openspec.yaml"
 CONFIG_FILE = "config.yaml"
 DECISIONS_KEY = "decisions_file"
+REMOTE_KEY = "remote"
 SPACE_DEV = "dev"
 SUMMARY_KEY = "summary"
 
@@ -44,6 +50,8 @@ STATUS_BLOCKED = "被擋住"
 STATUS_AUTH = "待授權"
 STATUS_DONE = "已完成"
 STATUS_UNKNOWN = "無法判定"
+# 服務端 archive 段一已完成、本機 specs 尚未落地（state `pending_apply`）
+STATUS_PENDING_APPLY = "已封存（待落地）"
 
 # 第 4 項新欄位（含預設值）；`source` 無對應卡時省略
 REQUIRED_FIELDS = (
@@ -269,6 +277,36 @@ def resolve_root(
         return Path(env[TASKS_ROOT_ENV].strip()).expanduser().resolve()
     candidate = (cwd or Path.cwd()) / DEFAULT_DIR
     return candidate.resolve() if candidate.is_dir() else None
+
+
+def remote_enabled(root: Path) -> bool:
+    """`config.yaml` 是否標記 `remote: true`（讀不到或格式不對都當成否）。"""
+    config = root / CONFIG_FILE
+    if not config.is_file():
+        return False
+    try:
+        return read_yaml(config).get(REMOTE_KEY) is True
+    except (OSError, ValueError, yaml.YAMLError):
+        return False
+
+
+def enable_remote(root: Path) -> bool:
+    """在 `config.yaml` 追加 `remote: true`（保留原內容與行尾）；回傳是否有寫入。"""
+    if remote_enabled(root):
+        return False
+    config = root / CONFIG_FILE
+    text = ""
+    if config.is_file():
+        with config.open(encoding="utf-8-sig", newline="") as fh:
+            text = fh.read()
+    newline = "\r\n" if "\r\n" in text else "\n"
+    prefix = "" if not text or text.endswith(("\n", "\r")) else newline
+    atomic_write_text(
+        config,
+        f"{text}{prefix}# change 以 Lore Vault 服務端為準，本機 changes/ 是工作副本"
+        f"{newline}{REMOTE_KEY}: true{newline}",
+    )
+    return True
 
 
 def load_workspace(

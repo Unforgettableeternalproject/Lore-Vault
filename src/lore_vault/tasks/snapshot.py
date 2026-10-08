@@ -23,6 +23,22 @@
 - 依 vault 分份：每個 vault 只收 metadata `vault` 解析後等於它的 change，加上沒記
   vault 的 change（歸到預設 vault：明確指定或專案目錄 binding）。一次推送對所有涉及的
   vault 各推一份——change 封存到別的 vault 後，原 vault 的快照同時更新、把它移除
+
+## 計算來源（MCP-T6）
+
+- vault 已有 `task-index`（任務層已改由服務端為權威）：**一律由服務端內容計算**
+  （`remote_snapshot_bytes`：`task-index` 列舉＋各 `task-change:<name>`），
+  不看本機目錄——MCP 與 CLI 推的是同一份計算結果，不會互相覆蓋。
+  CLI 各指令結尾與 `sync`、MCP 的 propose／edit／validate record_base／archive／
+  sync_specs 成功後都走這條（`push_remote`）
+- vault 沒有 `task-index`（還沒用過服務端任務層的舊專案）：照舊由本機目錄計算
+  （`push`）；服務不可達時 CLI 只警告
+- 服務端計算的每筆 change 多一個 `state`（`active`／`pending_apply`／`archived`；
+  UI 可忽略未知欄位，schema 仍是 v1）。`pending_apply` 的 status 為
+  「已封存（待落地）」、帶 note_id／archived_at；`archived` 為「已完成」。
+  索引標 `archived` 但沒有 change 文件的（遷移的舊封存）只有名稱與狀態
+- DECISIONS 判定：本機有 DECISIONS.md 以本機為準，否則用服務端鏡像
+  `task-decisions`，都沒有為 None（「無法判定」）
 """
 
 from __future__ import annotations
@@ -36,10 +52,18 @@ from typing import Any
 
 from lore_vault.binding import resolve_binding
 
+from . import remote_store as rs
 from . import specs
 from .archive import _read, _section
 from .vault_client import VaultClient
-from .workspace import SPACE_DEV, Change, Workspace, derive_status
+from .workspace import (
+    SPACE_DEV,
+    STATUS_DONE,
+    STATUS_PENDING_APPLY,
+    Change,
+    Workspace,
+    derive_status,
+)
 
 SNAPSHOT_KEY = "tasks-snapshot"
 SNAPSHOT_MIME = "application/json"
@@ -154,7 +178,11 @@ def snapshot_bytes(
     max_bytes: int = MAX_BYTES,
     include: Callable[[Change], bool] | None = None,
 ) -> bytes:
-    snapshot = build_snapshot(ws, include)
+    return _fit(build_snapshot(ws, include), max_bytes)
+
+
+def _fit(snapshot: dict[str, Any], max_bytes: int) -> bytes:
+    """超過上限時先拿掉已封存 change 的 why，仍超過就拒絕（不截斷）。"""
     data = encode(snapshot)
     if len(data) <= max_bytes:
         return data
@@ -228,6 +256,103 @@ def push(
         changes = len(json.loads(data)["changes"])
         results.append(PushResult(vault_key, updated, len(data), changes))
     return results
+
+
+# ── 服務端計算（MCP-T6）─────────────────────────────────────────────
+
+
+def _remote_entry(
+    change: rs.RemoteChange, rws: rs.RemoteWorkspace, archived_names: set[str]
+) -> dict[str, Any]:
+    entry = _change_entry(change, rws, archived_names, rws.decisions())
+    entry["state"] = change.state
+    if change.state != rs.STATE_ACTIVE:
+        apply = change.doc.get("apply") or {}
+        stamp = change.meta.get("archived_at") or apply.get("archived_at")
+        entry["archived_at"] = _str_or_none(stamp)
+        entry["reasons"] = []
+        entry["status"] = (
+            STATUS_PENDING_APPLY
+            if change.state == rs.STATE_PENDING_APPLY
+            else STATUS_DONE
+        )
+    return entry
+
+
+def _index_only_entry(name: str) -> dict[str, Any]:
+    """索引標 `archived` 但沒有 change 文件（遷移的舊封存）：只知道名稱與狀態。"""
+    return {
+        "name": name,
+        "status": STATUS_DONE,
+        "reasons": [],
+        "blocked_by": [],
+        "depends_on": [],
+        "requires_authorization": False,
+        "tasks": {"done": 0, "total": 0},
+        "source": None,
+        "why": None,
+        "specs": [],
+        "note_id": None,
+        "archived_at": None,
+        "state": rs.STATE_ARCHIVED,
+    }
+
+
+def build_remote_snapshot(
+    changes: list[rs.RemoteChange],
+    archived_names: set[str],
+    decisions: dict[str, bool] | None,
+) -> dict[str, Any]:
+    """`changes`：`list_changes(include_archived=True)` 的結果（含已落地的文件）。
+    順序：進行中（active／pending_apply，依名稱）在前，已落地依封存時間。"""
+    rws = rs.RemoteWorkspace(
+        root=Path("remote"),
+        changes=changes,
+        archived_names=archived_names,
+        decisions_map=decisions,
+    )
+    live = [c for c in changes if c.state != rs.STATE_ARCHIVED]
+    done = [c for c in changes if c.state == rs.STATE_ARCHIVED]
+    entries = [_remote_entry(c, rws, archived_names) for c in live]
+    finished = [_remote_entry(c, rws, archived_names) for c in done]
+    have = {c.name for c in changes}
+    finished += [_index_only_entry(n) for n in sorted(archived_names - have)]
+    finished.sort(key=lambda e: (e["archived_at"] or "", e["name"]))
+    return {"schema": SNAPSHOT_SCHEMA, "changes": entries + finished}
+
+
+async def remote_snapshot_bytes(
+    store: rs.RemoteStore,
+    local: Workspace | None = None,
+    *,
+    max_bytes: int = MAX_BYTES,
+) -> bytes:
+    """服務端內容（`task-index`＋`task-change:*`）算出的快照位元組；
+    `local`：stdio 的本機工作區（只用來讀 DECISIONS.md，其餘不看本機）。"""
+    changes, archived = await store.list_changes(include_archived=True)
+    decisions = None
+    if local is not None:
+        decisions = local.decisions()
+    if decisions is None and any(c.meta.get("blocked_by") for c in changes):
+        decisions = await rs.resolve_decisions(store, None)
+    return _fit(build_remote_snapshot(changes, archived, decisions), max_bytes)
+
+
+async def has_remote_index(store: rs.RemoteStore) -> bool:
+    return await store.get_blob(rs.INDEX_KEY) is not None
+
+
+async def push_remote(
+    store: rs.RemoteStore, local: Workspace | None = None
+) -> PushResult:
+    """以服務端內容計算並整份覆寫該 vault 的 `tasks-snapshot`。失敗拋
+    `remote_store` 的例外或 `SnapshotTooLarge`，由呼叫端決定要不要只警告。"""
+    data = await remote_snapshot_bytes(store, local)
+    response = await store.put_derived(SNAPSHOT_KEY, data)
+    changes = len(json.loads(data)["changes"])
+    return PushResult(
+        store.vault, str(response.get("updated") or ""), len(data), changes
+    )
 
 
 def shape_errors(data: bytes) -> list[str]:
