@@ -125,9 +125,9 @@ side-car 紀錄：`{session_id, prompt_id, injected: [concept_id]}`，不含原�
 "value": …, "part"?: n}`。chunk 有獨立的 FTS（CJK bigram）與向量（bge-m3）索引，只收可索引文件
 （ready、未被取代）。
 
-### 側載（sidecar，schema v17）
+### 側載（sidecar，schema v17／v18）
 
-不屬於知識內容的小型機器狀態（例如任務層推送的進行中 change 快照），`(vault, key)` 單列覆寫、上限 64KB，不檢索、不進快照、隨 vault 刪除與換 space 一併處理。端點與對帳見下方「側載小型機器狀態」。目前 schema 版本為 v17（`storage.migrate.SCHEMA_VERSION`）。
+不屬於知識內容的小型機器狀態（例如任務層推送的進行中 change 快照、change 全文），`(vault, key)` 單列覆寫、每次寫入版本遞增（v18），可選樂觀鎖；上限依 key 前綴（預設 64KB，`task-` 開頭 1MB），不檢索、不進快照、隨 vault 刪除與換 space 一併處理。端點與對帳見下方「側載小型機器狀態」。目前 schema 版本為 v18（`storage.migrate.SCHEMA_VERSION`）。
 
 ## MCP 介面（草案）
 
@@ -164,14 +164,18 @@ spike 接入端點（階段 8，同樣需 bearer；每筆 body 項目 = schema d
 
 **文件下載**：`POST /v1/document_download`，body `{space, vault, id, max_bytes?}`（未知欄位 422），是唯一回二進位的端點。範圍同 `get`：文件不在該 vault／space（含墓碑中的文件）一律 404 `not_found`，`vault="*"` 為目前 space 全部。成功回上傳時的原始位元組：`Content-Type` 為上傳時的 mime、`Content-Disposition: attachment`（ASCII 後備檔名＋RFC 5987 `filename*=UTF-8''…`）、`X-Lore-Vault-Sha256`、`X-Lore-Vault-Document-Id`、`Cache-Control: no-store`。`max_bytes` 給了而文件較大 → 413 `too_large`（依 metadata 判斷，不讀 blob）。讀 blob 時驗 sha256：遺失 500 `blob_missing`、雜湊不符 500 `blob_corrupt`（不回可能損毀的內容）；未設 `blob_dir` 500 `documents_not_configured`。bearer 與 UI session（cookie＋`X-Lore-Vault-UI`）皆可，由同一個中介層處理。不另加 doctor 檢查：這是唯讀資料流，blob 存在與雜湊已由 `documents.blob_exists` 對帳、讀取時再驗一次。
 
-**側載小型機器狀態**（schema v17，D15「UI 已裁決」(a′)，`lore_vault.storage.sidecar`）：通用、**不進任何檢索或快照路徑**的 `(vault, key) → (mime, bytes, updated)`，單列覆寫（put 即取代，不留版本、不留墓碑；真相來源在推送端，遺失可由下一次推送重建）。核心不認識使用者：任務層把進行中 change 的推導狀態以 key `tasks-snapshot` 推上來，給 UI 任務畫面讀。不寫 FTS、不算 embedding、不進 `recall`／`ask`／`list`／`get`，`GET /v1/snapshot` 的排除清單含 `sidecar_blobs`；**不提供 MCP 工具**。bearer 與 UI session（cookie＋`X-Lore-Vault-UI`）皆可，未知欄位 422。
+**側載小型機器狀態**（schema v17，v18 加版本；D15「UI 已裁決」(a′)、「MCP 已裁決」，`lore_vault.storage.sidecar`）：通用、**不進任何檢索或快照路徑**的 `(vault, key) → (mime, bytes, updated, version)`，單列覆寫（put 即取代，不留舊內容、不留墓碑），每次 put `version` 遞增（新列從 1 起，v18 遷移時既有列設為 1）。核心只依 key 前綴決定上限與開關，不解讀內容：任務層把進行中 change 的推導狀態以 key `tasks-snapshot` 推上來給 UI 任務畫面讀（衍生快照，真相在本機，遺失可由下一次推送重建）；`task-` 開頭的 key（`task-change:<name>`、`task-spec-mirror:<capability>` 等，設計 `TASK_LAYER_MCP.md` §1.2）則是**服務端權威**的任務層內容——遺失就是真的遺失，不能當成可重建的快取；備份（`VACUUM INTO` 整庫）涵蓋整張 `sidecar_blobs`。不寫 FTS、不算 embedding、不進 `recall`／`ask`／`list`／`get`，`GET /v1/snapshot` 的排除清單含 `sidecar_blobs`；**不提供 MCP 工具**。bearer 與 UI session（cookie＋`X-Lore-Vault-UI`）皆可，未知欄位 422。
+
+版本鎖：`blob_put` 帶 `expected_version` 時，版本比對與寫入在同一條 SQL（`BEGIN IMMEDIATE` 內）完成，不先讀後寫。省略＝不比對、整份覆寫（`tasks-snapshot` 的既有用法，行為不變，只是版本遞增）；`0`＝預期尚不存在（沒有列就建立為版本 1，已有列即衝突）；正整數＝須等於目前版本。不符回 409 `version_conflict`，`error` 形狀比照 note `update`：`{code, message, expected, current}`，但 `current` 是**完整的目前內容**（同 `blob_get` 單筆形狀，含 `content_base64` 與 `version`，呼叫端據此 rebase 後帶新版本重送）；key 不存在時 `current` 為 null。被拒的寫入不改任何欄位。
+
+**任務層遠端同步開關**（D15「MCP 已裁決」：設開關、預設開啟）：`tasks.remote_sync`（環境變數 `LORE_VAULT_TASKS_REMOTE_SYNC`，預設 true），執行期可由 UI 設定頁切換。關閉時 `task-` 開頭的 `blob_put` 一律 403 `tasks_remote_sync_disabled`、不寫任何東西（先於大小與版本檢查）；`blob_get` 與其他 key（含 `tasks-snapshot`）不受影響——比照 D13 episode 開關「只擋收料、不擋既有查詢」。
 
 | 端點 | 請求 | 回應 | 錯誤 |
 |---|---|---|---|
-| `blob_put` | `{space, vault, key, mime?, content_base64}`（vault 可用別名，存正式 key；`mime` 預設 `application/octet-stream`） | `{updated}` | 400 `space_required`／`vault_required`（缺 vault 或 `*`）／`invalid_key`（key 不是 1–128 個英數與 `. _ -`、英數開頭，即含路徑分隔字元）／`invalid_request`（base64 不合法、mime 不是 `type/subtype`）；404 `unknown_vault`（不存在或在別的 space）；413 `too_large`（解碼後超過 64KB，不截斷） |
-| `blob_get` | `{space, vault?, key}` | 給了 `vault`：`{vault, key, mime, content_base64, updated}`；省略 `vault`（或 `*`）：`{items: [同左]}`＝本 space 內所有存過該 key 的 vault，依 vault key 排序，可能為空陣列 | 404 `not_found`（該 vault 沒有這個 key）、`unknown_vault`；400 `invalid_key` |
+| `blob_put` | `{space, vault, key, mime?, content_base64, expected_version?}`（vault 可用別名，存正式 key；`mime` 預設 `application/octet-stream`；`expected_version` 為非負整數，見上方版本鎖） | `{updated, version}` | 400 `space_required`／`vault_required`（缺 vault 或 `*`）／`invalid_key`（key 不是 1–128 個英數與 `. _ - :`、英數開頭，即含路徑分隔字元）／`invalid_request`（base64 不合法、mime 不是 `type/subtype`）；403 `tasks_remote_sync_disabled`（`task-` 開頭且開關關閉）；404 `unknown_vault`（不存在或在別的 space）；409 `version_conflict`（附目前內容）；413 `too_large`（解碼後超過該 key 的上限：預設 64KB、`task-` 開頭 1MB，不截斷）；422（`expected_version` 為負或非整數） |
+| `blob_get` | `{space, vault?, key}` | 給了 `vault`：`{vault, key, mime, content_base64, updated, version}`；省略 `vault`（或 `*`）：`{items: [同左]}`＝本 space 內所有存過該 key 的 vault，依 vault key 排序，可能為空陣列 | 404 `not_found`（該 vault 沒有這個 key）、`unknown_vault`；400 `invalid_key` |
 
-表 `sidecar_blobs` 刻意無外鍵（同墓碑），欄名用 `vault` 讓換 space 的動態偵測自動涵蓋；另存冗餘的 `space` 欄。`vault_delete` 的規劃 `counts.sidecar_blobs` 列出筆數（綁進確認 token，不要求 force），執行時同一交易內刪除並以資料實況核對；`vault_move_space` 的 `counts` 多 `sidecar_blobs.vault`／`sidecar_blobs.space` 兩項，同一交易內改 key 與 space。doctor `sidecar.orphans`（分類 `sidecar`）：有列指向不存在的 vault、或 `space` 與該 vault 不符為 fail；v17 前的庫為 skipped。
+表 `sidecar_blobs` 刻意無外鍵（同墓碑），欄名用 `vault` 讓換 space 的動態偵測自動涵蓋；另存冗餘的 `space` 欄。`vault_delete` 的規劃 `counts.sidecar_blobs` 列出筆數（綁進確認 token，不要求 force），執行時同一交易內刪除並以資料實況核對；`vault_move_space` 的 `counts` 多 `sidecar_blobs.vault`／`sidecar_blobs.space` 兩項，同一交易內改 key 與 space。doctor `sidecar.orphans`（分類 `sidecar`）：有列指向不存在的 vault、或 `space` 與該 vault 不符為 fail；v17 前的庫為 skipped。doctor `sidecar.version_conflict_integrity`（同分類）：正式庫每列 `version` 須為正整數（表上另有 CHECK），並在獨立的記憶體資料庫以同一個 `put` 實跑一次「帶過期版本／帶 0 寫入既有列」，必須被拒、附目前內容且內容與版本不變，否則 fail（拿掉版本比對時這項會紅）；v18 前的庫為 skipped。
 
 **執行期設定**（D13，`lore_vault.api.settings_admin`；白名單與驗證在 `lore_vault.runtime_settings`、儲存與稽核在 `storage.settings_store`，schema v15）。設定檔／環境變數是「預設值」，DB 的 `settings_overrides` 覆寫其上；讀取端一律經 `AppState.runtime.current()`（程序內快取，設定 API 寫入後立即失效；依據 A9 單一寫入程序，doctor CLI 等其他程序直接讀 DB）。**只允許 UI session**：bearer 請求一律 403 `ui_session_required`（在 body 驗證之前檢查）——bearer 由所有 agent／hook 共用，`/mcp` 也以 bearer 轉發 `/v1`，開放 bearer 等於任何 agent 都能翻隱私開關；其他管理端點開放 bearer 是因為有兩段式確認或墓碑可還原，設定沒有這層保護。
 
@@ -188,6 +192,7 @@ spike 接入端點（階段 8，同樣需 bearer；每筆 body 項目 = schema d
 | 鍵 | 型別／範圍 | 讀取端 |
 |---|---|---|
 | `episodes.ingest` | bool，預設 false | `POST /v1/episodes` 每次請求；`/v1/status` 的 `episodes.ingest_recency` |
+| `tasks.remote_sync` | bool，預設 true | `POST /v1/blob_put` 每次請求（只管 `task-` 開頭的 key） |
 | `ask.enabled` | bool，預設 true | `/v1/ask` 每次請求（關閉 403 `ask_disabled`，不檢索、不呼叫模型）；`ask.provider` 記為 skipped |
 | `ask.snippet_max_chars` | int 500–50000 | `/v1/ask` 每次請求 |
 | `mcp.http_download_max_bytes` | int 1024–25 MiB | HTTP MCP `download` 每次呼叫（`Shell(download_limit=...)`） |

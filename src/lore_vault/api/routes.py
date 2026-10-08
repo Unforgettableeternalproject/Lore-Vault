@@ -19,9 +19,13 @@
 `POST /v1/documents`（T-67）是唯一的 multipart 端點：欄位 `file`、`vault`、`space`
 （必填）、`filename?`、`mime?`；大小上限在讀取 body 時就擋（413 `too_large`）。
 
-`POST /v1/blob_put`／`POST /v1/blob_get`（schema v17）：通用、不檢索的小型機器狀態側載
-（`storage.sidecar`），以 `(vault, key)` 單列覆寫；不進 FTS／embedding／recall／list／
-snapshot，不提供 MCP 工具。內容以 `content_base64` 傳遞，解碼後上限 64KB。
+`POST /v1/blob_put`／`POST /v1/blob_get`（schema v17，v18 加版本）：通用、不檢索的小型
+機器狀態側載（`storage.sidecar`），以 `(vault, key)` 單列覆寫、每次 put 版本遞增；不進
+FTS／embedding／recall／list／snapshot，不提供 MCP 工具。內容以 `content_base64` 傳遞，
+解碼後上限依 key 前綴（預設 64KB，`task-` 開頭 1MB）。`blob_put` 可帶 `expected_version`
+做樂觀鎖，不符回 409 `version_conflict`（附目前 version 與內容）。`task-` 開頭的 key 是
+任務層的權威內容，受 `tasks.remote_sync` 開關管制：關閉時 `blob_put` 回 403
+`tasks_remote_sync_disabled`，讀取不受影響。
 
 `POST /v1/document_download` 是唯一回二進位的端點：body 同其他 RPC（`space`、
 `vault`、`id`，選填 `max_bytes`），成功回原始位元組（Content-Type 為上傳時的 mime、
@@ -83,6 +87,7 @@ from lore_vault.storage.vaults import (
 from .errors import (
     DocumentsNotConfigured,
     PayloadTooLarge,
+    TasksRemoteSyncDisabled,
     VaultExists,
     error_body,
 )
@@ -664,10 +669,7 @@ def document_download(request: Request, req: DocumentDownloadRequest) -> Respons
     )
 
 
-# ── 側載小型機器狀態（schema v17）──
-
-# base64 長度上限：解碼後 MAX_BYTES 的 base64 長度（含 padding）
-_SIDECAR_B64_MAX = 4 * ((storage_sidecar.MAX_BYTES + 2) // 3)
+# ── 側載小型機器狀態（schema v17，v18 加版本）──
 
 
 class BlobPutRequest(_ScopedReq):
@@ -675,6 +677,8 @@ class BlobPutRequest(_ScopedReq):
     key: str
     mime: str | None = None
     content_base64: str
+    # 樂觀鎖：省略＝不比對（整份覆寫）；0＝預期尚不存在；正整數＝須等於目前版本
+    expected_version: int | None = Field(None, ge=0)
 
 
 class BlobGetRequest(_ScopedReq):
@@ -683,32 +687,35 @@ class BlobGetRequest(_ScopedReq):
     key: str
 
 
-def _decode_sidecar(text: str) -> bytes:
-    if len(text) > _SIDECAR_B64_MAX:
-        raise storage_sidecar.SidecarTooLarge(
-            f"內容超過上限 {storage_sidecar.MAX_BYTES} 位元組"
-        )
+def _decode_sidecar(text: str, key: str) -> bytes:
+    limit = storage_sidecar.limit_for_key(key)
+    # base64 長度上限：解碼後 limit 的 base64 長度（含 padding），先擋免得解碼大字串
+    if len(text) > 4 * ((limit + 2) // 3):
+        raise storage_sidecar.SidecarTooLarge(f"內容超過上限 {limit} 位元組")
     try:
         return base64.b64decode(text, validate=True)
     except (binascii.Error, ValueError):
         raise ValueError("content_base64 不是合法的 base64") from None
 
 
-def _sidecar_dict(blob: storage_sidecar.SidecarBlob) -> dict[str, Any]:
-    return {
-        "vault": blob.vault,
-        "key": blob.key,
-        "mime": blob.mime,
-        "content_base64": base64.b64encode(blob.content).decode("ascii"),
-        "updated": blob.updated,
-    }
-
-
 @router.post("/blob_put")
 def blob_put(request: Request, req: BlobPutRequest) -> dict[str, Any]:
-    """覆寫 `(vault, key)` 的內容（不留舊版本）。vault 必填、可用別名；
-    key 含路徑分隔等字元 400 `invalid_key`；解碼後超過 64KB 413 `too_large`。"""
-    content = _decode_sidecar(req.content_base64)
+    """覆寫 `(vault, key)` 的內容（不留舊內容），版本遞增；回 `{updated, version}`。
+
+    vault 必填、可用別名；key 含路徑分隔等字元 400 `invalid_key`；解碼後超過該 key
+    的上限 413 `too_large`；`expected_version` 不符 409 `version_conflict`
+    （`error.current` 為目前內容，key 不存在時為 null）；`task-` 開頭且
+    `tasks.remote_sync` 關閉 403 `tasks_remote_sync_disabled`（不寫任何東西）。"""
+    storage_sidecar.validate_key(req.key)
+    if (
+        storage_sidecar.is_task_key(req.key)
+        and not _state(request).runtime.current().tasks.remote_sync
+    ):
+        raise TasksRemoteSyncDisabled(
+            "服務未開啟任務層遠端同步（設定 tasks.remote_sync）；"
+            "task- 開頭的側載不收，任務層請在本機操作"
+        )
+    content = _decode_sidecar(req.content_base64, req.key)
     with _state(request).connection() as conn:
         blob = storage_sidecar.put(
             conn,
@@ -717,8 +724,9 @@ def blob_put(request: Request, req: BlobPutRequest) -> dict[str, Any]:
             content,
             space=req.space,
             mime=req.mime,
+            expected_version=req.expected_version,
         )
-    return {"updated": blob.updated}
+    return {"updated": blob.updated, "version": blob.version}
 
 
 @router.post("/blob_get")
@@ -728,9 +736,9 @@ def blob_get(request: Request, req: BlobGetRequest) -> dict[str, Any]:
     with _state(request).connection() as conn:
         if storage_sidecar.is_all(req.vault):
             items = storage_sidecar.list_for_key(conn, req.key, space=req.space)
-            return {"items": [_sidecar_dict(b) for b in items]}
+            return {"items": [b.to_dict() for b in items]}
         blob = storage_sidecar.get(conn, req.vault, req.key, space=req.space)
-    return _sidecar_dict(blob)
+    return blob.to_dict()
 
 
 # ── 唯讀快照（T-31）──

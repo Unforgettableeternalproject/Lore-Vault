@@ -59,6 +59,13 @@ snippet_max_chars = 6000
 # 也可用環境變數 LORE_VAULT_EPISODES_INGEST=true，或在 UI 設定頁執行期切換（存 DB、覆寫本值）
 ingest = false
 
+[tasks]
+# 任務層遠端同步：服務是否接受 task- 開頭的側載寫入（進行中 change 全文、主規格鏡像），
+# 讓其他機器與 HTTP MCP 也能操作任務層。預設開啟；要任務層只在本機跑時關閉，
+# 關閉時 blob_put 回 403 tasks_remote_sync_disabled，已同步的內容照常可讀。
+# 也可用環境變數 LORE_VAULT_TASKS_REMOTE_SYNC=false，或在 UI 設定頁執行期切換
+remote_sync = true
+
 [worker]
 # 同一版本最多嘗試幾次，超過標記失敗（doctor enrich.failed 會紅）
 max_attempts = 3
