@@ -282,7 +282,7 @@ MCP 有兩種入口，共用同一份工具定義（名稱、參數、說明、�
 
 用法：`python -m lore_vault.tasks [--root DIR] <init|propose|list|validate|archive|sync|doctor>`，各子指令以 `--help` 為準。change 的狀態（可開工／被擋住／待授權／已完成）由 metadata 與決策紀錄（DECISIONS.md，路徑可設定）推導，不手填；只有 `archive` 會寫入服務，每條 ADDED／MODIFIED requirement 各一則 note、外加一則 change 總結 note，同一 requirement 以 `supersedes` 串成鏈。tasks.md 未勾完的 change 不會被封存，除非明確帶 `--allow-incomplete`（未完成數會記下來）。
 
-給 UI 任務畫面的快照：`propose`／`validate`／`archive`／`list` 結束後（`propose`／`archive` 只在成功時）把推導結果以 `blob_put` 推到該 repo 的 dev vault、key `tasks-snapshot`（見「側載小型機器狀態」），`sync` 只做推送；推送失敗只在 stderr 警告、不改 exit code。快照只含 change 名稱、推導狀態與原因、`blocked_by`（D 編號與是否已裁決）、`depends_on`（是否已封存）、`requires_authorization`、tasks 完成數、`source`、proposal 的 Why 段、spec delta 的 capability／requirement 標題與操作類型、`note_id`、`archived_at`；不含 delta 全文與 tasks.md 逐項文字。內容是確定性的（不含產生時間），同步時間取側載的 `updated`。任務層 doctor 另有 `tasks.snapshot_sync`（本機重算的快照與服務端雜湊不符或從未推送為 warn——本機才是真相來源，不同步只代表 UI 看到舊資料）與 `tasks.snapshot_shape`（服務端內容無法解析成快照 schema v1 為 fail，提示重跑 `sync`）。
+給 UI 任務畫面的快照：`propose`／`validate`／`archive`／`list` 結束後（`propose`／`archive` 只在成功時）把推導結果以 `blob_put` 依 vault 分份推送、key `tasks-snapshot`（見「側載小型機器狀態」）：change 歸屬 metadata 記的 vault，沒記的歸預設 vault（`--vault` 或該 repo 的 binding），每個涉及的 vault 各推一份，封存到別的 vault 後原 vault 的快照也會更新，`sync` 只做推送；推送失敗只在 stderr 警告、不改 exit code。快照只含 change 名稱、推導狀態與原因、`blocked_by`（D 編號與是否已裁決）、`depends_on`（是否已封存）、`requires_authorization`、tasks 完成數、`source`、proposal 的 Why 段、spec delta 的 capability／requirement 標題與操作類型、`note_id`、`archived_at`；不含 delta 全文與 tasks.md 逐項文字。內容是確定性的（不含產生時間），同步時間取側載的 `updated`。任務層 doctor 另有 `tasks.snapshot_sync`（本機重算的快照與服務端雜湊不符或從未推送為 warn——本機才是真相來源，不同步只代表 UI 看到舊資料）與 `tasks.snapshot_shape`（服務端內容無法解析成快照 schema v1 為 fail，提示重跑 `sync`）。
 
 ## 對外接口
 
