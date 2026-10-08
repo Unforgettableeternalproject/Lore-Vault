@@ -9,8 +9,9 @@ import json
 import pytest
 
 from lore_vault.doctor.framework import CheckSkipped, DoctorContext
-from lore_vault.tasks import checks, specs
+from lore_vault.tasks import checks, snapshot, specs
 from lore_vault.tasks import remote_store as rs
+from lore_vault.tasks.workspace import enable_remote, remote_enabled
 
 from .conftest import NOW, SPEC_A, VAULT, TasksDir, delta, requirement
 from .versioned_fake import VersionedVault
@@ -113,16 +114,15 @@ def test_remote_checks_skipped_before_migration(tasks_dir: TasksDir, vv):
 
 
 def test_all_pass_after_migration(tasks_dir: TasksDir, vv):
-    """封存過一個 change、另有 active change：遷移＋sync＋DECISIONS 鏡像後全線 ok。"""
+    """封存過一個 change、另有 active change：只跑 migrate 就全線 ok
+    （migrate 會推 task-decisions 與服務端算法的快照、寫 remote: true）。"""
     tasks_dir.write_main("demo", SPEC_A)
     tasks_dir.propose("old", deltas={"demo": delta(modified=[MOD_ROOT])})
     code, out = tasks_dir.run("archive", "old", "--vault", VAULT, client=vv.client)
     assert code == 0, out
     tasks_dir.propose("c1", deltas={"demo": delta(added=[ADD_EXPORT])})
     _migrate(tasks_dir, vv)
-    code, out = tasks_dir.run("sync", "--vault", VAULT, client=vv.client)
-    assert code == 0, out
-    _decisions_blob(vv, LOCAL_DECISIONS, source_digest="x")
+    assert remote_enabled(tasks_dir.root)
     report = _report(tasks_dir, vv)
     assert {n: c["status"] for n, c in report.items()} == dict.fromkeys(report, "pass")
 
@@ -463,3 +463,76 @@ def test_decisions_mirror_skipped_without_local_file(tasks_dir: TasksDir, vv):
     _decisions_blob(vv, LOCAL_DECISIONS)
     tasks_dir.decisions.unlink()
     assert _decisions_status(tasks_dir, vv) == "skipped"
+
+
+def test_decisions_mirror_missing_in_remote_mode_warns(tasks_dir: TasksDir, vv):
+    """同步模式（remote: true）有本機 DECISIONS.md、服務端沒有鏡像 → warn；
+    非同步模式維持 skipped。"""
+    assert _decisions_status(tasks_dir, vv) == "skipped"
+    enable_remote(tasks_dir.root)
+    result = checks.decisions_mirror_agreement(_ctx(tasks_dir, vv))
+    assert result.status == "warn"
+    assert "remote: true" in result.summary
+    _decisions_blob(vv, LOCAL_DECISIONS)
+    assert _decisions_status(tasks_dir, vv) == "pass"
+
+
+# ── tasks.snapshot_sync（服務端內容算法）──
+
+
+def _snapshot_status(tasks_dir: TasksDir, vv) -> str:
+    return checks.snapshot_sync(_ctx(tasks_dir, vv)).status
+
+
+def _push_remote_snapshot(vv) -> None:
+    import asyncio
+
+    store = rs.RemoteStore(rs.vault_client_post(vv.client()), VAULT)
+    asyncio.run(snapshot.push_remote(store))
+
+
+def test_snapshot_sync_uses_remote_algorithm(tasks_dir: TasksDir, vv):
+    """有 task-index 時比對服務端內容算出的快照：別台機器建的 change 只在服務端，
+    本機算法會誤判成不同步。"""
+    _with_change(tasks_dir, vv)
+    assert _snapshot_status(tasks_dir, vv) == "pass"
+    other = rs.new_doc("other", {"goal": "別台機器"}, "# P\n", "- [ ] t\n")
+    _place(vv, other)
+    # 服務端內容變了、快照還沒重推 → warn
+    assert _snapshot_status(tasks_dir, vv) == "warn"
+    _push_remote_snapshot(vv)
+    result = checks.snapshot_sync(_ctx(tasks_dir, vv))
+    assert result.status == "pass"
+    assert "服務端內容" in result.summary
+
+
+def test_snapshot_sync_local_algorithm_without_index(tasks_dir: TasksDir, vv):
+    """沒有 task-index：維持本機算法（sync 推的本機快照）。"""
+    tasks_dir.write_main("demo", SPEC_A)
+    tasks_dir.propose("c1", "--skip-specs")
+    code, out = tasks_dir.run("sync", "--vault", VAULT, client=vv.client)
+    assert code == 0, out
+    assert _snapshot_status(tasks_dir, vv) == "pass"
+
+
+# ── authorization：CLI 來源 ──
+
+
+def test_authorization_cli_source_passes_without_ui_record(tasks_dir: TasksDir, vv):
+    """CLI `--authorized-by`（meta.authorization.source = cli）是已裁決的合法路徑。"""
+    _with_change(tasks_dir, vv)
+    cli_auth = {**COPIED, "source": rs.AUTHORIZATION_SOURCE_CLI}
+    doc = _auth_doc(note_id="n9", authorization=cli_auth)
+    doc["state"] = rs.STATE_ARCHIVED
+    _place(vv, doc)
+    result = checks.authorization_record_integrity(_ctx(tasks_dir, vv))
+    assert result.status == "pass"
+    assert any("來源 cli" in d for d in result.details)
+    # 來源 cli 卻沒有 authorized_by → fail
+    doc["meta"]["authorization"] = {"source": "cli", "change_version": 1}
+    _place(vv, doc)
+    assert checks.authorization_record_integrity(_ctx(tasks_dir, vv)).status == "fail"
+    # 沒有 source 的仍照 UI 紀錄規則
+    doc["meta"]["authorization"] = dict(COPIED)
+    _place(vv, doc)
+    assert checks.authorization_record_integrity(_ctx(tasks_dir, vv)).status == "fail"

@@ -10,7 +10,8 @@ import json
 import pytest
 
 from lore_vault.tasks import remote_store as rs
-from lore_vault.tasks.workspace import load_workspace
+from lore_vault.tasks import snapshot
+from lore_vault.tasks.workspace import load_workspace, remote_enabled
 
 from .conftest import SPEC_A, VAULT, TasksDir, delta, requirement
 from .versioned_fake import VersionedVault
@@ -65,7 +66,9 @@ def test_migrate_pushes_changes_index_and_mirrors(tasks_dir: TasksDir, vv):
         "c1": "created",
         "c2": "created",
     }
-    assert report["archived"] == {"old": {"action": "indexed", "detail": "archived"}}
+    assert report["archived"] == {
+        "old": {"action": "indexed", "detail": "archived", "version": 1}
+    }
     # 服務端 change 內容＝本機工作副本（不含同步欄位），版本 1
     for name in ("c1", "c2"):
         remote = vv.get_json(rs.change_key(name))
@@ -77,14 +80,34 @@ def test_migrate_pushes_changes_index_and_mirrors(tasks_dir: TasksDir, vv):
         meta = tasks_dir.meta(name)
         assert meta[rs.REMOTE_VERSION_KEY] == 1
         assert meta[rs.REMOTE_DIGEST_KEY] == rs.content_digest(remote)
-    # 索引：active 兩個、舊封存只登記名稱，不推內容、不寫 note
+    # 索引：active 兩個、舊封存登記為 archived；不寫 note
     assert vv.get_json(rs.INDEX_KEY)["changes"] == {
         "c1": {"state": "active"},
         "c2": {"state": "active"},
         "old": {"state": "archived"},
     }
-    assert vv.get_json(rs.change_key("old")) is None
     assert vv.writes == writes
+    # 舊封存推一份 archived 文件：note 連結與 why（proposal）不丟
+    old = vv.get_json(rs.change_key("old"))
+    local_old = tasks_dir.meta("old")
+    assert old["state"] == "archived"
+    assert old["meta"]["note_id"] == local_old["note_id"]
+    assert old["meta"]["archived_at"]
+    assert old["proposal_md"] == (
+        tasks_dir.archived_dir("old") / "proposal.md"
+    ).read_text(encoding="utf-8", newline="")
+    # DECISIONS 鏡像、服務端算法的快照、remote: true
+    assert vv.get_json(rs.DECISIONS_KEY)["decisions"] == {
+        "D6": False,
+        "D12": True,
+        "D13": True,
+    }
+    snap = vv.get_json(snapshot.SNAPSHOT_KEY)
+    entry = next(c for c in snap["changes"] if c["name"] == "old")
+    assert entry["note_id"] == local_old["note_id"]
+    assert entry["why"]
+    assert report["remote_mode"] == "enabled"
+    assert remote_enabled(tasks_dir.root)
     # 鏡像：既有主 spec 原樣、新 capability 為 exists:false
     demo = vv.get_json(rs.mirror_key("demo"))
     assert demo["exists"] is True and demo["source"] == "stdio"
@@ -108,14 +131,19 @@ def test_migrated_copy_is_in_sync_for_mcp(tasks_dir: TasksDir, vv):
         assert (state.state, state.local_version) == ("in_sync", 1)
 
 
+def _task_versions(vv) -> dict:
+    """task- 開頭的側載版本（tasks-snapshot 是衍生快照，每次都重推）。"""
+    return {k: v["version"] for k, v in vv.blobs.items() if k[1].startswith("task-")}
+
+
 def test_migrate_rerun_is_noop(tasks_dir: TasksDir, vv):
     _seed(tasks_dir, vv)
     assert _migrate(tasks_dir, vv)[0] == 0
-    puts = vv.blob_puts
+    versions = _task_versions(vv)
     meta = tasks_dir.meta("c1")
     code, report = _migrate_json(tasks_dir, vv)
     assert code == 0
-    assert vv.blob_puts == puts
+    assert _task_versions(vv) == versions
     assert tasks_dir.meta("c1") == meta
     actions = [
         i["action"]
@@ -123,6 +151,46 @@ def test_migrate_rerun_is_noop(tasks_dir: TasksDir, vv):
         for i in report[group].values()
     ]
     assert set(actions) == {"skipped"}
+    assert report["decisions"]["action"] == "skipped"
+    assert report["remote_mode"] == "already"
+
+
+def test_migrate_adds_doc_for_index_only_archive(tasks_dir: TasksDir, vv):
+    """前一版遷移只登記了名稱：重跑補上 archived 文件。"""
+    _seed(tasks_dir, vv)
+    vv.put_json(rs.INDEX_KEY, {"schema": 1, "changes": {"old": {"state": "archived"}}})
+    code, report = _migrate_json(tasks_dir, vv)
+    assert code == 0, report
+    assert report["archived"]["old"]["action"] == "indexed"
+    assert vv.get_json(rs.change_key("old"))["state"] == "archived"
+
+
+def test_migrate_archived_doc_conflict(tasks_dir: TasksDir, vv):
+    """服務端已有同名 archived 文件、note_id 與內容都不同 → 衝突、不覆寫，
+    也不寫 remote: true。"""
+    _seed(tasks_dir, vv)
+    other = rs.new_doc("old", {"note_id": "n-other"}, "# 別的\n", "")
+    other["state"] = "archived"
+    vv.put_json(rs.change_key("old"), other)
+    code, report = _migrate_json(tasks_dir, vv)
+    assert code == 1
+    assert report["archived"]["old"]["action"] == "conflict"
+    assert vv.get_json(rs.change_key("old")) == other
+    assert report["remote_mode"] is None
+    assert not remote_enabled(tasks_dir.root)
+
+
+def test_migrate_skips_archive_of_other_vault(tasks_dir: TasksDir, vv):
+    _seed(tasks_dir, vv)
+    path = tasks_dir.archived_dir("old") / ".openspec.yaml"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(VAULT, "folder/other"), "utf-8"
+    )
+    code, report = _migrate_json(tasks_dir, vv)
+    assert code == 0, report
+    assert report["archived"]["old"]["action"] == "skipped"
+    assert "folder/other" in report["archived"]["old"]["detail"]
+    assert vv.get_json(rs.change_key("old")) is None
 
 
 def test_migrate_conflict_does_not_overwrite(tasks_dir: TasksDir, vv):
@@ -136,6 +204,7 @@ def test_migrate_conflict_does_not_overwrite(tasks_dir: TasksDir, vv):
     assert report["changes"]["c1"]["action"] == "conflict"
     assert report["changes"]["c2"]["action"] == "created"
     assert vv.get_json(rs.change_key("c1")) == other
+    assert not remote_enabled(tasks_dir.root)
     assert vv.version(rs.change_key("c1")) == 1
     assert rs.REMOTE_VERSION_KEY not in tasks_dir.meta("c1")
 
@@ -225,6 +294,7 @@ def test_migrate_dry_run_writes_nothing(tasks_dir: TasksDir, vv):
     assert vv.blob_puts == puts
     assert vv.get_json(rs.INDEX_KEY) is None
     assert tasks_dir.meta("c1") == meta
+    assert not remote_enabled(tasks_dir.root)
 
 
 def test_migrate_remote_sync_disabled(tasks_dir: TasksDir, vv):
@@ -251,4 +321,6 @@ def test_migrate_text_output(tasks_dir: TasksDir, vv):
     assert f"遷移到 {VAULT}" in out
     assert "change c1：已建立 v1" in out
     assert "封存 old：已登記" in out
-    assert out.rstrip().splitlines()[-1].startswith("合計：")
+    lines = out.rstrip().splitlines()
+    assert lines[-2].startswith("合計：")
+    assert lines[-1].startswith("config.yaml：已寫入 remote: true")

@@ -41,13 +41,19 @@ from . import snapshot, specs
 from .archive import NOTE_DIGESTS_KEY
 from .isolation import DEFAULT_PACKAGE_ROOT, check_core_isolation
 from .vault_client import ServiceError, VaultClient
-from .workspace import SUMMARY_KEY, Change, Workspace, requirement_overlap
+from .workspace import (
+    SUMMARY_KEY,
+    Change,
+    Workspace,
+    remote_enabled,
+    requirement_overlap,
+)
 
 CATEGORY = "tasks"
 # 試用期（OpenSpec CLI）封存、未寫 note 的 change 以此欄位註明原因
 LEGACY_KEY = "legacy_archive"
-# 服務端 DECISIONS 解析結果的鏡像（推送端與格式由 MCP-T6 定）
-DECISIONS_KEY = "task-decisions"
+# 服務端 DECISIONS 解析結果的鏡像（推送端與格式見 remote_store）
+DECISIONS_KEY = rs.DECISIONS_KEY
 PENDING_APPLY_STALE_HOURS = 72
 
 
@@ -302,10 +308,24 @@ def snapshot_sync(ctx: DoctorContext) -> CheckResult:
     """每個涉及的 vault：本機依 vault 分份重算的快照與服務端側載逐位元組相同
     （雜湊比對；分份規則同 `sync`，見 `snapshot.vault_payloads`）。
 
-    不同步只代表 UI 看到舊資料（本機永遠是真相來源），所以是 warn 不是 fail；
+    預設 vault 已有 `task-index`（已遷移／同步模式）時改比對服務端內容算出的快照
+    （`snapshot.remote_snapshot_bytes`，與 `push_remote` 同一算法），只比預設 vault。
+
+    不同步只代表 UI 看到舊資料，所以是 warn 不是 fail；
     快照超過服務端上限、根本推不上去才是 fail。"""
     ws = _workspace(ctx)
     client = _client(ctx)
+    try:
+        vault = snapshot.resolve_vault(client, ws, ctx.settings.get("vault"))
+        store = rs.RemoteStore(rs.vault_client_post(client), vault)
+        if asyncio.run(snapshot.has_remote_index(store)):
+            return _remote_snapshot_sync(client, store, ws)
+    except ServiceError as exc:
+        return _service_error(exc)
+    except rs.RemoteUnreachable as exc:
+        return CheckResult.warn(f"服務無法對帳：{exc.detail}")
+    except rs.RemoteError as exc:
+        return CheckResult.warn(f"服務拒絕對帳請求：{exc.message}")
     try:
         payloads = snapshot.vault_payloads(ws, client, ctx.settings.get("vault"))
     except snapshot.SnapshotTooLarge as exc:
@@ -344,6 +364,42 @@ def snapshot_sync(ctx: DoctorContext) -> CheckResult:
         )
     return CheckResult.ok(
         f"{'、'.join(payloads)} 的任務快照與本機一致", details=details, counts=counts
+    )
+
+
+def _remote_snapshot_sync(
+    client: VaultClient, store: rs.RemoteStore, ws: Workspace
+) -> CheckResult:
+    vault = store.vault
+    try:
+        expected = asyncio.run(snapshot.remote_snapshot_bytes(store, ws))
+    except snapshot.SnapshotTooLarge as exc:
+        return CheckResult.fail(str(exc))
+    except rs.StoreError as exc:
+        return CheckResult.fail(f"服務端任務內容無法解析：{exc.message}")
+    counts = {"vaults": 1, "local_bytes": len(expected)}
+    try:
+        remote = client.get_blob(vault, "dev", snapshot.SNAPSHOT_KEY)
+    except ValueError:
+        return CheckResult.warn(
+            f"{vault} 的服務端快照無法解碼，執行 sync 重推",
+            details=["見 tasks.snapshot_shape"],
+            counts=counts,
+        )
+    if remote is None:
+        problem = f"{vault} 尚未同步任務快照（UI 任務畫面看不到），執行 sync"
+        return CheckResult.warn(problem, details=[problem], counts=counts)
+    if snapshot.digest(remote["content"]) != snapshot.digest(expected):
+        problem = f"{vault} 的任務快照與服務端內容算出的不同，執行 sync 重推"
+        return CheckResult.warn(
+            problem,
+            details=[problem, f"{vault}：服務端同步於 {remote.get('updated')}"],
+            counts=counts,
+        )
+    return CheckResult.ok(
+        f"{vault} 的任務快照與服務端內容一致",
+        details=[f"{vault}：同步於 {remote.get('updated')}（服務端內容算法）"],
+        counts=counts,
     )
 
 
@@ -500,6 +556,7 @@ def authorization_record_integrity(ctx: DoctorContext) -> CheckResult:
         remote = await _load_remote(store)
         fails: list[str] = []
         warns: list[str] = []
+        cli: list[str] = []
         checked = 0
         for name, change in remote.docs.items():
             meta = change.meta
@@ -508,6 +565,18 @@ def authorization_record_integrity(ctx: DoctorContext) -> CheckResult:
             if not (meta.get("notes") or meta.get("note_id")):
                 continue  # 還沒過閘門（沒寫 note），授權與否由 archive 擋
             checked += 1
+            copied = meta.get("authorization")
+            if (
+                isinstance(copied, dict)
+                and copied.get("source") == rs.AUTHORIZATION_SOURCE_CLI
+            ):
+                # CLI `--authorized-by`：艾斯維爾在終端操作的已裁決路徑，沒有 UI 紀錄
+                by = copied.get("authorized_by")
+                if isinstance(by, str) and by.strip():
+                    cli.append(f"{name}：來源 cli（{by.strip()}）")
+                else:
+                    fails.append(f"{name}：authorization 來源 cli 但缺少 authorized_by")
+                continue
             try:
                 record = await store.get_authorization(name)
             except rs.StoreError as exc:
@@ -524,7 +593,6 @@ def authorization_record_integrity(ctx: DoctorContext) -> CheckResult:
                     f"{name}：授權紀錄的 vault 是 {record.vault}，不是 {store.vault}"
                 )
                 continue
-            copied = meta.get("authorization")
             if not isinstance(copied, dict):
                 warns.append(f"{name}：change meta 沒有 archive 時抄下的 authorization")
             elif (
@@ -541,16 +609,18 @@ def authorization_record_integrity(ctx: DoctorContext) -> CheckResult:
         if fails:
             return CheckResult.fail(
                 "有需授權的 change 缺少有效的 UI 核准紀錄",
-                details=fails + warns + remote.bad,
+                details=fails + warns + remote.bad + cli,
                 counts=counts,
             )
         if warns or remote.bad:
             return CheckResult.warn(
                 "授權紀錄與 change 記錄不一致" if warns else "有 change 文件無法讀取",
-                details=warns + remote.bad,
+                details=warns + remote.bad + cli,
                 counts=counts,
             )
-        return CheckResult.ok("需授權的 change 都有 UI 核准紀錄", counts=counts)
+        return CheckResult.ok(
+            "需授權的 change 都有核准紀錄（UI 或 CLI）", details=cli, counts=counts
+        )
 
     return _remote_check(ctx, run)
 
@@ -732,6 +802,11 @@ def decisions_mirror_agreement(ctx: DoctorContext) -> CheckResult:
                 f"找不到 DECISIONS.md（{ws.decisions_path or '未設定 decisions_file'}）"
             )
         blob = await store.get_blob(DECISIONS_KEY)
+        if blob is None and remote_enabled(ws.root):
+            return CheckResult.warn(
+                f"同步模式（config remote: true）但 {store.vault} 的服務端沒有 "
+                f"{DECISIONS_KEY} 鏡像，HTTP 模式判定不了 blocked_by；執行 sync 推送"
+            )
         if blob is None:
             raise CheckSkipped(
                 f"{store.vault} 的服務端尚無 {DECISIONS_KEY} 鏡像（由 stdio 推送）"

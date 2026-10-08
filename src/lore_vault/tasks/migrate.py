@@ -6,20 +6,27 @@
 2. 每個本機 active change：以 `expected_version=0` 建成 `task-change:<name>`
    （`RemoteStore.create_change`，內容為 `remote_store.local_doc`），補進索引，
    再在本機 `.openspec.yaml` 回填 `remote_version`／`remote_digest`
-3. 每個本機已封存的 change：只把名稱以 `archived` 登記進索引（供 `depends_on`
-   判定）；不推內容、不重寫 note（note 早就在服務，見 doctor archive_note_agreement）
+3. 每個本機已封存的 change：推一份 `state: archived` 的 change 文件（meta 帶
+   note_id／archived_at 等、proposal 保留 why，見 `archived_doc`）並以 `archived`
+   登記進索引（供 `depends_on` 判定）；不重寫 note。記錄的 vault 不是目標 vault 的
+   略過
 4. 主 spec 鏡像：本機 `specs/<cap>/spec.md`（與 active change 的新 capability）
    還沒有鏡像的，以 `expected_version=0` 建立
+5. 推送 `task-decisions`（`remote_ops.push_decisions`）與以服務端內容重算的任務快照
+   （`snapshot.push_remote`）
+6. 全部成功（沒有衝突或錯誤）才在本機 `config.yaml` 寫 `remote: true`
+   （`workspace.enable_remote`，同 `init --remote`）
 
 可重跑，且一律不覆寫服務端既有內容：
 - 本機已有 `remote_version` → 已遷移，略過
 - 服務端已有同名 change、本機沒有 `remote_version`：內容雜湊相同 → 只回填本機
   同步欄位（上次跑到一半）；不同 → 衝突，回報後不動
-- 索引已有同名、狀態不是 `archived` 的封存 change → 衝突（`pending_apply` 例外：
-  那是 MCP 段一封存、等 sync_specs 落地，略過）
+- 封存 change：服務端已有 archived 文件且 note_id 或內容相同 → 略過（只補索引）；
+  狀態或內容不同、或索引狀態不是 `archived` → 衝突（`pending_apply` 例外：那是
+  MCP 段一封存、等 sync_specs 落地，略過）
 - 鏡像已存在但與本機不同 → 衝突（正常推送走 stdio validate／init，不在這裡覆寫）
 
-有任何衝突或錯誤 exit 1。`--dry-run` 只讀服務端、列出會做的事。
+有任何衝突或錯誤 exit 1。`--dry-run` 只讀服務端、列出會做的事，不寫 config.yaml。
 """
 
 from __future__ import annotations
@@ -31,10 +38,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from . import remote_ops, snapshot
 from . import remote_store as rs
-from . import snapshot
 from .vault_client import ServiceError, VaultClient
-from .workspace import Change, Workspace
+from .workspace import Change, Workspace, enable_remote
 
 if TYPE_CHECKING:
     from .cli import _Env
@@ -82,13 +89,18 @@ class MigrateReport:
     changes: dict[str, Item] = field(default_factory=dict)
     archived: dict[str, Item] = field(default_factory=dict)
     mirrors: dict[str, Item] = field(default_factory=dict)
+    # decisions／snapshot：遷移結尾的衍生推送
+    extras: dict[str, Item] = field(default_factory=dict)
+    # config.yaml `remote: true`：enabled（本次寫入）／already／None（未寫）
+    remote_mode: str | None = None
+
+    def _groups(self) -> tuple[dict[str, Item], ...]:
+        return (self.changes, self.archived, self.mirrors, self.extras)
 
     @property
     def ok(self) -> bool:
         return not any(
-            item.action in FAILED
-            for group in (self.changes, self.archived, self.mirrors)
-            for item in group.values()
+            item.action in FAILED for group in self._groups() for item in group.values()
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -100,7 +112,14 @@ class MigrateReport:
             "changes": {k: v.to_dict() for k, v in self.changes.items()},
             "archived": {k: v.to_dict() for k, v in self.archived.items()},
             "mirrors": {k: v.to_dict() for k, v in self.mirrors.items()},
+            "decisions": self._extra("decisions"),
+            "snapshot": self._extra("snapshot"),
+            "remote_mode": self.remote_mode,
         }
+
+    def _extra(self, key: str) -> dict[str, Any] | None:
+        item = self.extras.get(key)
+        return item.to_dict() if item else None
 
     def lines(self) -> list[str]:
         head = f"遷移到 {self.vault}"
@@ -113,6 +132,7 @@ class MigrateReport:
             ("change", self.changes),
             ("封存", self.archived),
             ("鏡像", self.mirrors),
+            ("推送", self.extras),
         ):
             for name, item in group.items():
                 version = f" v{item.version}" if item.version is not None else ""
@@ -124,13 +144,15 @@ class MigrateReport:
             if (n := self._count(a))
         ]
         out.append("合計：" + ("、".join(counts) if counts else "無事可做"))
+        if self.remote_mode == "enabled":
+            out.append("config.yaml：已寫入 remote: true（之後 CLI 以服務端為準）")
+        elif self.remote_mode is None and not self.dry_run:
+            out.append("config.yaml：有衝突或錯誤，未寫入 remote: true")
         return out
 
     def _count(self, action: str) -> int:
         return sum(
-            item.action == action
-            for group in (self.changes, self.archived, self.mirrors)
-            for item in group.values()
+            item.action == action for group in self._groups() for item in group.values()
         )
 
 
@@ -200,10 +222,33 @@ async def _migrate_change(
     return Item(CREATED, "", created.version)
 
 
+def archived_doc(change: Change) -> dict[str, Any]:
+    """本機封存目錄 → 服務端最小 change 文件（`state: archived`）：meta 帶 note_id、
+    archived_at、goal／source 等，proposal 保留 why，delta／tasks 照本機。
+    服務端算的快照因此不會丟掉 note 連結與 why。"""
+    doc = rs.local_doc(change)
+    doc["state"] = rs.STATE_ARCHIVED
+    doc["meta"].setdefault("archived_at", change.archived_at())
+    return doc
+
+
+async def _owner(
+    store: rs.RemoteStore, change: Change, cache: dict[str, str]
+) -> str | None:
+    """封存 change 記錄的 vault（經服務解析成正式 key）；沒記回 None。"""
+    key = change.meta.get("vault")
+    if not isinstance(key, str) or not key.strip():
+        return None
+    if key not in cache:
+        cache[key] = await store.resolve_vault(key)
+    return cache[key]
+
+
 async def _migrate_archived(
     store: rs.RemoteStore,
     change: Change,
     indexed: dict[str, str],
+    vaults: dict[str, str],
     *,
     dry_run: bool,
 ) -> Item:
@@ -211,18 +256,50 @@ async def _migrate_archived(
         name = rs.check_name(change.name)
     except rs.StoreError as exc:
         return Item(ERROR, exc.message)
+    if change.meta_error:
+        return Item(ERROR, f"本機 .openspec.yaml 無法解析：{change.meta_error}")
+    try:
+        owner = await _owner(store, change, vaults)
+    except rs.RemoteError as exc:
+        return Item(SKIPPED, f"記錄的 vault 無法解析（{exc.message}），未遷移")
+    if owner is not None and owner != store.vault:
+        return Item(SKIPPED, f"封存於 vault {owner}，不屬於 {store.vault}")
     state = indexed.get(name)
-    if state == rs.STATE_ARCHIVED:
-        return Item(SKIPPED, "已登記")
     if state == rs.STATE_PENDING_APPLY:
         return Item(SKIPPED, "服務端為 pending_apply（等 sync_specs 落地）")
-    if state is not None:
+    if state not in (None, rs.STATE_ARCHIVED):
         return Item(CONFLICT, f"索引中狀態為 {state}，本機卻已封存；未改動")
+    doc = archived_doc(change)
+    try:
+        remote = await store.get_change(name)
+    except rs.StoreError as exc:
+        return Item(ERROR, exc.message)
+    if remote is not None:
+        same_note = change.meta.get("note_id") and remote.meta.get(
+            "note_id"
+        ) == change.meta.get("note_id")
+        if remote.state != rs.STATE_ARCHIVED or not (
+            same_note or remote.digest() == rs.content_digest(doc)
+        ):
+            return Item(
+                CONFLICT,
+                f"服務端已有內容不同的同名 change（{remote.state}），未覆寫",
+                remote.version,
+            )
+        if state is None and not dry_run:
+            await store.set_index_state(name, rs.STATE_ARCHIVED)
+            indexed[name] = rs.STATE_ARCHIVED
+        return Item(SKIPPED, "已遷移", remote.version)
     if dry_run:
-        return Item(PLANNED, "以 archived 登記進索引")
-    await store.set_index_state(name, rs.STATE_ARCHIVED)
+        return Item(PLANNED, "建立 archived change 文件並登記進索引")
+    try:
+        created = await store.create_change(doc)
+    except rs.StoreError as exc:
+        if exc.code == "change_exists":
+            return Item(CONFLICT, "建立時服務端已出現同名 change，重跑以比對內容")
+        return Item(ERROR, exc.message)
     indexed[name] = rs.STATE_ARCHIVED
-    return Item(INDEXED, "archived")
+    return Item(INDEXED, "archived", created.version)
 
 
 async def _pending_caps(store: rs.RemoteStore, indexed: dict[str, str]) -> set[str]:
@@ -293,9 +370,12 @@ async def migrate(
         except rs.RemoteError as exc:
             item = _remote_failure(exc)
         report.changes[change.name] = item
+    vaults: dict[str, str] = {}
     for change in ws.archived():
         try:
-            item = await _migrate_archived(store, change, indexed, dry_run=dry_run)
+            item = await _migrate_archived(
+                store, change, indexed, vaults, dry_run=dry_run
+            )
         except rs.RemoteError as exc:
             item = _remote_failure(exc)
         report.archived[change.name] = item
@@ -313,7 +393,37 @@ async def migrate(
         except rs.RemoteError as exc:
             item = _remote_failure(exc)
         report.mirrors[cap] = item
+    if dry_run:
+        report.extras["decisions"] = Item(PLANNED, "推送 task-decisions")
+        report.extras["snapshot"] = Item(PLANNED, "以服務端內容重算並推送任務快照")
+        return report
+    report.extras["decisions"] = await _push_decisions(store, ws)
+    report.extras["snapshot"] = await _push_snapshot(store, ws)
+    if report.ok:
+        report.remote_mode = "enabled" if enable_remote(ws.root) else "already"
     return report
+
+
+async def _push_decisions(store: rs.RemoteStore, ws: Workspace) -> Item:
+    try:
+        result = await remote_ops.push_decisions(store, ws)
+    except rs.RemoteError as exc:
+        return _remote_failure(exc)
+    except rs.StoreError as exc:
+        return Item(ERROR, exc.message)
+    if result["status"] == "pushed":
+        return Item(CREATED, f"{result['decisions']} 個 D 編號")
+    return Item(SKIPPED, str(result.get("reason") or "與服務端一致"))
+
+
+async def _push_snapshot(store: rs.RemoteStore, ws: Workspace) -> Item:
+    try:
+        result = await snapshot.push_remote(store, ws)
+    except rs.RemoteError as exc:
+        return _remote_failure(exc)
+    except (rs.StoreError, snapshot.SnapshotTooLarge) as exc:
+        return Item(ERROR, getattr(exc, "message", str(exc)))
+    return Item(CREATED, f"{result.changes} 個 change，{result.size_bytes} 位元組")
 
 
 # ── CLI ────────────────────────────────────────────────────────────

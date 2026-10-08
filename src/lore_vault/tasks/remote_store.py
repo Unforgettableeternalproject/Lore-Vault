@@ -10,7 +10,7 @@
 `task-change:<name>`：一個 change 的全部工作內容，**單一版本號**（側載 `version`）::
 
     {"schema": 1, "name": str,
-     "state": "active" | "pending_apply",
+     "state": "active" | "pending_apply" | "archived",
      "meta": {.openspec.yaml 的欄位（不含本機同步欄位 remote_version／remote_digest）},
      "proposal_md": str, "design_md": str | null, "tasks_md": str,
      "deltas": {capability: spec delta 全文},
@@ -51,10 +51,17 @@
 段二（`sync_specs`，MCP-T6）在 `apply` 另記落地進度（write-ahead，中斷可續跑）::
 
     "apply": {..., "applying": {capability: 即將寫入本機的全文 sha256},
-                   "applied_caps": [已寫回本機 specs 的 capability]}
+                   "applied_caps": [已寫回本機 specs 的 capability],
+                   "landed_at": "YYYY-MM-DDTHH:MM:SSZ"}
 
+- `applying`：寫回本機前先記（write-ahead），寫完移進 `applied_caps`；中斷後續跑
+  以本機主 spec 是否已是併入後內容認出已落地的 capability
+- `landed_at`：段二完成（本機 specs 寫回、封存目錄建好）的時間，與 `state:
+  "archived"` 同一次寫入；`apply.archived_at` 仍是段一封存時間
 - 落地完成後 `state` 改 `archived`、索引同步改 `archived`；文件保留（快照與
   doctor 仍要讀 note_id／archived_at／proposal）
+- 遷移（MCP-T7 `tasks migrate`）的舊封存也存成 `state: "archived"` 的文件：
+  `apply` 為 null，meta 帶本機封存的 note_id／archived_at 等，proposal 保留 why
 - 經 CLI `--authorized-by` 封存的 change，meta `authorization` 為
   `{"authorized_by", "authorized_at", "change_version", "source": "cli"}`
   （艾斯維爾在終端操作的已裁決路徑，沒有 UI 授權紀錄）；UI 核准抄進的版本沒有
