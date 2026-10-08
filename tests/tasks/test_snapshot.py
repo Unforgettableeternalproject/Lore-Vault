@@ -241,3 +241,15 @@ def test_propose_push_failure_keeps_exit_0(tasks_dir: TasksDir):
     )
     assert code == 0 and "已建立" in out
     assert "任務快照未同步" in tasks_dir.err
+
+
+def test_archive_pushes_to_the_vault_it_archived_into(tasks_dir: TasksDir, vault):
+    """metadata 記的 vault 與專案 binding 不同：推送打到 archive 實際使用的 vault。"""
+    recorded = "folder/recorded-elsewhere"
+    tasks_dir.propose("c1", "--skip-specs")
+    tasks_dir.set_meta("c1", vault=recorded)
+    code, out = tasks_dir.run("archive", "c1", client=vault.client)
+    assert code == 0, out
+    written = {r["body"]["vault"] for r in vault.requests if r["path"] == "/v1/write"}
+    assert written == {recorded}
+    assert list(vault.blobs) == [(recorded, snapshot.SNAPSHOT_KEY)]

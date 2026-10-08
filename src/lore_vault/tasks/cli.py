@@ -376,10 +376,15 @@ def _auto_sync(
     args: argparse.Namespace,
     env: _Env,
     client_factory: Callable[[], VaultClient] | None,
+    *,
+    vault: str | None = None,
 ) -> None:
-    """子指令結尾的快照推送：任何失敗只在 stderr 警告，不影響 exit code。"""
+    """子指令結尾的快照推送：任何失敗只在 stderr 警告，不影響 exit code。
+
+    `vault`：archive 實際寫入的 vault（與封存 note 同一個）；其餘指令為 None，
+    由 `snapshot.resolve_vault` 以專案目錄 binding 推算。"""
     try:
-        _push(args, env, client_factory, vault=getattr(args, "vault", None))
+        _push(args, env, client_factory, vault=vault)
     except _PUSH_ERRORS as exc:
         env.warn(
             f"警告：任務快照未同步到 Lore Vault（{_detail(exc)}）；"
@@ -411,10 +416,11 @@ def _archive(
     env: _Env,
     client_factory: Callable[[], VaultClient] | None,
     now: _dt.datetime | None,
-) -> int:
+) -> tuple[int, str | None]:
+    """回傳 (exit code, 實際寫入的 vault)；被拒絕時 vault 為 None。"""
     ws = _workspace(args, env)
     if ws is None:
-        return EXIT_FAIL
+        return EXIT_FAIL, None
     try:
         result = archive_change(
             ws,
@@ -428,9 +434,9 @@ def _archive(
         )
     except ArchiveError as exc:
         env.print(f"archive 中止：{exc}", *(f"    {d}" for d in exc.details))
-        return EXIT_FAIL
+        return EXIT_FAIL, None
     env.print(*describe_result(result))
-    return EXIT_OK
+    return EXIT_OK, result.vault or None
 
 
 def _doctor(
@@ -484,6 +490,7 @@ def main(
         return _sync(args, env, client_factory)
     if args.command == "doctor":
         return _doctor(args, env, client_factory)
+    sync_vault: str | None = None
     if args.command == "propose":
         code = _propose(args, env, today)
     elif args.command == "list":
@@ -491,9 +498,9 @@ def main(
     elif args.command == "validate":
         code = _validate(args, env)
     else:
-        code = _archive(args, env, client_factory, now)
+        code, sync_vault = _archive(args, env, client_factory, now)
     if _should_sync(args, env, code):
-        _auto_sync(args, env, client_factory)
+        _auto_sync(args, env, client_factory, vault=sync_vault)
     return code
 
 

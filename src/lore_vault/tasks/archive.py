@@ -53,6 +53,8 @@ class ArchiveResult:
     note_id: str
     written: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
+    # 實際寫入的 vault（正式 key）；結尾的快照推送沿用它，不另以 binding 推算
+    vault: str = ""
 
 
 def _section(text: str, names: tuple[str, ...]) -> str:
@@ -275,6 +277,7 @@ def archive_change(
                 f"vault 與先前記錄不同：{meta.get('vault')} → {vault_key}"
             )
         meta["vault"] = vault_key
+        result.vault = vault_key
         pending = [it for it in _requirement_items(change) if it[0] not in notes]
         heads: dict[str, str | None] = {}
         for key, *_ in list(pending):
