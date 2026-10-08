@@ -451,12 +451,10 @@ def _doctor(
         if args.vault:
             settings["vault"] = args.vault
         if not args.offline:
-            if client_factory is not None:
-                resources["client"] = client_factory()
-            else:
-                client = VaultClient(load_settings(args.client_env, env.environ))
-                if client.settings.push_configured:
-                    resources["client"] = client
+            client = (client_factory or _client_factory(args, env))()
+            # 未設定推送（沒有 client.env）時要對服務的檢查記為 skipped
+            if client.settings.push_configured:
+                resources["client"] = client
     report = checks.default_registry().run(DoctorContext(settings, resources))
     if args.json:
         env.out.write(json.dumps(report.to_dict(), ensure_ascii=False, indent=2) + "\n")

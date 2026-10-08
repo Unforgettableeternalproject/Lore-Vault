@@ -31,6 +31,7 @@ from typing import Any
 
 from lore_vault.binding import resolve_binding
 
+from . import specs
 from .archive import _read, _section
 from .vault_client import VaultClient
 from .workspace import SPACE_DEV, Change, Workspace, derive_status
@@ -182,3 +183,52 @@ def push(ws: Workspace, client: VaultClient, *, vault: str | None = None) -> Pus
     )
     changes = len(json.loads(data)["changes"])
     return PushResult(vault_key, updated, len(data), changes)
+
+
+def shape_errors(data: bytes) -> list[str]:
+    """服務端內容是否符合快照 schema v1（給 doctor `tasks.snapshot_shape`）。"""
+    try:
+        snapshot = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return ["內容不是 UTF-8 JSON"]
+    if not isinstance(snapshot, dict):
+        return ["頂層必須是物件"]
+    errors: list[str] = []
+    if snapshot.get("schema") != SNAPSHOT_SCHEMA:
+        errors.append(
+            f"schema 必須是 {SNAPSHOT_SCHEMA}，得到 {snapshot.get('schema')!r}"
+        )
+    changes = snapshot.get("changes")
+    if not isinstance(changes, list):
+        return [*errors, "changes 必須是陣列"]
+    for i, entry in enumerate(changes):
+        if not isinstance(entry, dict):
+            errors.append(f"changes[{i}] 必須是物件")
+            continue
+        missing = sorted(CHANGE_FIELDS - set(entry))
+        if missing:
+            errors.append(f"changes[{i}] 缺欄位：{', '.join(missing)}")
+            continue
+        if not isinstance(entry["name"], str) or not isinstance(entry["status"], str):
+            errors.append(f"changes[{i}] 的 name／status 必須是字串")
+        tasks = entry["tasks"]
+        if not (
+            isinstance(tasks, dict)
+            and isinstance(tasks.get("done"), int)
+            and isinstance(tasks.get("total"), int)
+        ):
+            errors.append(f"changes[{i}].tasks 必須是 {{done, total}} 整數")
+        for key in ("reasons", "blocked_by", "depends_on", "specs"):
+            if not isinstance(entry[key], list):
+                errors.append(f"changes[{i}].{key} 必須是陣列")
+        for op in entry["specs"] if isinstance(entry["specs"], list) else []:
+            if not isinstance(op, dict) or op.get("op") not in (
+                specs.OP_ADDED,
+                specs.OP_MODIFIED,
+                specs.OP_REMOVED,
+            ):
+                errors.append(
+                    f"changes[{i}].specs 的 op 必須是 ADDED／MODIFIED／REMOVED"
+                )
+                break
+    return errors

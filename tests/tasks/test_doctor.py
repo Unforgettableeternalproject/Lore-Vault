@@ -1,7 +1,8 @@
-"""任務層 doctor 七項檢查：每項各有一個「通過」與一個「破壞後變紅」的情境。"""
+"""任務層 doctor 九項檢查：每項各有一個「通過」與一個「破壞後變紅」的情境。"""
 
 from __future__ import annotations
 
+import base64
 import datetime as dt
 import io
 import json
@@ -12,24 +13,32 @@ import yaml
 from lore_vault.doctor.framework import DoctorContext
 from lore_vault.tasks import checks, cli
 
-from .conftest import NOW, SPEC_A, VAULT, TasksDir, delta, requirement
+from .conftest import (
+    NOW,
+    SPEC_A,
+    VAULT,
+    TasksDir,
+    delta,
+    requirement,
+    unreachable_client,
+)
 
 MOD_ROOT = requirement(
     "資料根目錄", "資料 SHALL 存放於 `~/.x/`。", scenarios=("讀取資料根",)
 )
 
 
-def _report(tasks_dir: TasksDir, client=None) -> dict[str, dict]:
+def _report(tasks_dir: TasksDir, client=None, *extra: str) -> dict[str, dict]:
     # 沒給假服務就 --offline：不可退回讀真實的 ~/.lore-vault/client.env
     flags = () if client else ("--offline",)
-    code, out = tasks_dir.run("doctor", "--json", *flags, client=client)
+    code, out = tasks_dir.run("doctor", "--json", *flags, *extra, client=client)
     data = json.loads(out)
     assert data["exit_code"] == code
     return {c["name"]: c for c in data["checks"]}
 
 
-def _status(tasks_dir: TasksDir, name: str, client=None) -> str:
-    return _report(tasks_dir, client)[name]["status"]
+def _status(tasks_dir: TasksDir, name: str, client=None, *extra: str) -> str:
+    return _report(tasks_dir, client, *extra)[name]["status"]
 
 
 def _archived(tasks_dir: TasksDir, vault, name="c1", block=MOD_ROOT, minutes=0) -> None:
@@ -62,11 +71,11 @@ def test_no_tasks_root_all_skipped_exit_0(tmp_path):
     )
     data = json.loads(out.getvalue())
     assert code == 0
-    assert data["summary"]["total"] == 7
-    assert data["summary"]["skipped"] == 7
+    assert data["summary"]["total"] == 9
+    assert data["summary"]["skipped"] == 9
 
 
-def test_registry_has_seven_checks_and_core_doctor_does_not():
+def test_registry_has_nine_checks_and_core_doctor_does_not():
     names = {c.name for c in checks.default_registry().checks}
     assert names == {
         "tasks.isolation",
@@ -76,6 +85,8 @@ def test_registry_has_seven_checks_and_core_doctor_does_not():
         "tasks.supersedes_chain",
         "tasks.spec_delta_applied",
         "tasks.dependency_exists",
+        "tasks.snapshot_sync",
+        "tasks.snapshot_shape",
     }
     from lore_vault.doctor import default_registry
 
@@ -84,7 +95,8 @@ def test_registry_has_seven_checks_and_core_doctor_does_not():
 
 def test_all_pass_on_healthy_workspace(tasks_dir: TasksDir, vault):
     _archived(tasks_dir, vault)
-    report = _report(tasks_dir, vault.client)
+    # archive 結尾已把快照推到 --vault 指定的 VAULT
+    report = _report(tasks_dir, vault.client, "--vault", VAULT)
     assert {n: c["status"] for n, c in report.items()} == dict.fromkeys(report, "pass")
 
 
@@ -129,6 +141,8 @@ def test_service_checks_skipped_without_client(tasks_dir: TasksDir, vault):
     report = {c["name"]: c["status"] for c in json.loads(out)["checks"]}
     assert report["tasks.archive_note_agreement"] == "skipped"
     assert report["tasks.supersedes_chain"] == "skipped"
+    assert report["tasks.snapshot_sync"] == "skipped"
+    assert report["tasks.snapshot_shape"] == "skipped"
 
 
 def test_requirement_overlap(tasks_dir: TasksDir):
@@ -191,3 +205,58 @@ def test_dependency_exists(tasks_dir: TasksDir):
     assert _status(tasks_dir, "tasks.dependency_exists") == "pass"
     tasks_dir.propose("bad", "--skip-specs", "--depends-on", "ghost")
     assert _status(tasks_dir, "tasks.dependency_exists") == "fail"
+
+
+# ── 任務快照（UI-T3）──
+
+
+def _sync_status(tasks_dir: TasksDir, vault, name="tasks.snapshot_sync") -> str:
+    return _status(tasks_dir, name, vault.client, "--vault", VAULT)
+
+
+def test_snapshot_sync(tasks_dir: TasksDir, vault):
+    tasks_dir.propose("c1", "--skip-specs", "--blocked-by", "D6")
+    # 從未推送：warn（UI 看不到，不是資料損壞）
+    assert _sync_status(tasks_dir, vault) == "warn"
+    assert tasks_dir.run("sync", "--vault", VAULT, client=vault.client)[0] == 0
+    report = _report(tasks_dir, vault.client, "--vault", VAULT)
+    assert report["tasks.snapshot_sync"]["status"] == "pass"
+    # 推送後本機又改了 blocked_by 但沒重推：warn
+    tasks_dir.set_meta("c1", blocked_by=["D12"])
+    report = _report(tasks_dir, vault.client, "--vault", VAULT)
+    assert report["tasks.snapshot_sync"]["status"] == "warn"
+    assert "未重推" in report["tasks.snapshot_sync"]["summary"]
+    assert tasks_dir.run("sync", "--vault", VAULT, client=vault.client)[0] == 0
+    assert _sync_status(tasks_dir, vault) == "pass"
+
+
+def test_snapshot_sync_service_unreachable_is_warn(tasks_dir: TasksDir):
+    tasks_dir.propose("c1", "--skip-specs")
+    status = _status(
+        tasks_dir, "tasks.snapshot_sync", unreachable_client, "--vault", VAULT
+    )
+    assert status == "warn"
+
+
+def _put_raw(vault, content: bytes) -> None:
+    vault.blobs[(VAULT, "tasks-snapshot")] = {
+        "mime": "application/json",
+        "content_base64": base64.b64encode(content).decode("ascii"),
+        "updated": "2026-10-08T12:00:00.000Z",
+    }
+
+
+def test_snapshot_shape(tasks_dir: TasksDir, vault):
+    tasks_dir.propose("c1", "--skip-specs")
+    assert _sync_status(tasks_dir, vault, "tasks.snapshot_shape") == "skipped"
+    assert tasks_dir.run("sync", "--vault", VAULT, client=vault.client)[0] == 0
+    assert _sync_status(tasks_dir, vault, "tasks.snapshot_shape") == "pass"
+    for broken in (
+        b"{not json",
+        b'{"schema": 2, "changes": []}',
+        b'{"schema": 1, "changes": [{"name": "c1"}]}',
+    ):
+        _put_raw(vault, broken)
+        assert _sync_status(tasks_dir, vault, "tasks.snapshot_shape") == "fail"
+        # 內容不同於本機：sync 檢查同時 warn
+        assert _sync_status(tasks_dir, vault) == "warn"

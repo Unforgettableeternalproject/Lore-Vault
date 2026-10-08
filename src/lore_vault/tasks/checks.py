@@ -6,7 +6,9 @@ doctor 框架（`Registry`／`CheckResult`），註冊表在這裡自建。
 context：
 - settings `tasks_root`：任務目錄；未設定（沒啟用任務層）→ 全部 skipped
 - settings `decisions_path`：DECISIONS.md；settings `package_root`：isolation 掃描根
-- resources `client`：`VaultClient`；兩項要對服務的檢查缺少時 skipped
+- settings `vault`：`tasks.snapshot_sync`／`snapshot_shape` 比對的 vault（缺省由專案目錄
+  binding 推算，同 `sync`）
+- resources `client`：`VaultClient`；要對服務的檢查缺少時 skipped
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ from lore_vault.doctor.framework import (
     Registry,
 )
 
-from . import specs
+from . import snapshot, specs
 from .isolation import DEFAULT_PACKAGE_ROOT, check_core_isolation
 from .vault_client import ServiceError, VaultClient
 from .workspace import SUMMARY_KEY, Change, Workspace, requirement_overlap
@@ -246,6 +248,71 @@ def dependency_exists(ctx: DoctorContext) -> CheckResult:
     return CheckResult.ok("depends_on 都存在")
 
 
+def _remote_snapshot(
+    ctx: DoctorContext, ws: Workspace
+) -> tuple[str, dict[str, Any] | None]:
+    client = _client(ctx)
+    vault = snapshot.resolve_vault(client, ws, ctx.settings.get("vault"))
+    return vault, client.get_blob(vault, "dev", snapshot.SNAPSHOT_KEY)
+
+
+def snapshot_sync(ctx: DoctorContext) -> CheckResult:
+    """本機重算的快照與服務端側載逐位元組相同（雜湊比對）。
+
+    不同步只代表 UI 看到舊資料（本機永遠是真相來源），所以是 warn 不是 fail；
+    快照超過服務端上限、根本推不上去才是 fail。"""
+    ws = _workspace(ctx)
+    try:
+        local = snapshot.snapshot_bytes(ws)
+    except snapshot.SnapshotTooLarge as exc:
+        return CheckResult.fail(str(exc))
+    try:
+        vault, remote = _remote_snapshot(ctx, ws)
+    except ServiceError as exc:
+        return _service_error(exc)
+    except ValueError:
+        return CheckResult.warn(
+            "服務端快照無法解碼，執行 sync 重推", details=["見 tasks.snapshot_shape"]
+        )
+    counts = {"local_bytes": len(local)}
+    if remote is None:
+        return CheckResult.warn(
+            f"{vault} 尚未同步任務快照（UI 任務畫面看不到），執行 sync",
+            counts=counts,
+        )
+    counts["remote_bytes"] = len(remote["content"])
+    if snapshot.digest(remote["content"]) != snapshot.digest(local):
+        return CheckResult.warn(
+            f"{vault} 的任務快照與本機不同（本機改過但未重推），執行 sync",
+            details=[f"服務端同步於 {remote.get('updated')}"],
+            counts=counts,
+        )
+    return CheckResult.ok(
+        f"{vault} 的任務快照與本機一致",
+        details=[f"同步於 {remote.get('updated')}"],
+        counts=counts,
+    )
+
+
+def snapshot_shape(ctx: DoctorContext) -> CheckResult:
+    """服務端側載內容能解析成快照 schema v1（壞掉時 UI 無法顯示）。"""
+    ws = _workspace(ctx)
+    try:
+        vault, remote = _remote_snapshot(ctx, ws)
+    except ServiceError as exc:
+        return _service_error(exc)
+    except ValueError:
+        return CheckResult.fail("服務端快照不是合法的 base64，執行 sync 重推")
+    if remote is None:
+        raise CheckSkipped(f"{vault} 尚無任務快照（見 tasks.snapshot_sync）")
+    errors = snapshot.shape_errors(remote["content"])
+    if errors:
+        return CheckResult.fail(
+            "服務端任務快照格式不符，執行 sync 重推", details=errors[:20]
+        )
+    return CheckResult.ok("服務端任務快照格式正確")
+
+
 def default_registry() -> Registry:
     registry = Registry()
     for name, func, description in (
@@ -279,6 +346,16 @@ def default_registry() -> Registry:
             "tasks.dependency_exists",
             dependency_exists,
             "depends_on 的 change 存在於 changes/ 或 archive/",
+        ),
+        (
+            "tasks.snapshot_sync",
+            snapshot_sync,
+            "服務端的任務快照（UI 任務畫面）與本機重算結果一致",
+        ),
+        (
+            "tasks.snapshot_shape",
+            snapshot_shape,
+            "服務端的任務快照能解析成快照 schema v1",
         ),
     ):
         registry.register(name, CATEGORY, description)(func)
