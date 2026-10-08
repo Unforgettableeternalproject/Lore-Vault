@@ -649,12 +649,12 @@ function ApprovalBody({ info, busy, onApprove }: { info: ApprovalInfo; busy: boo
   );
   if (!change) {
     return (
-      <>
+      <div class="lv-stack lv-task-approval">
         {formatError}
         <p class="lv-muted" data-testid="task-approval-no-change">
           服務端沒有這個 change 的內容（尚未經 MCP 或同步推送到服務），無法在這裡核准。
         </p>
-      </>
+      </div>
     );
   }
   const button = (label: string) => (
@@ -663,8 +663,9 @@ function ApprovalBody({ info, busy, onApprove }: { info: ApprovalInfo; busy: boo
     </button>
   );
   const approvable = canApprove(change);
+  // 徽章列、核准紀錄、說明與按鈕之間用 lv-stack 的間距，不靠各元素自帶的 margin
   return (
-    <>
+    <div class="lv-stack lv-task-approval">
       {formatError}
       <div class="lv-meta-line">
         {state === 'approved' ? (
@@ -699,6 +700,6 @@ function ApprovalBody({ info, busy, onApprove }: { info: ApprovalInfo; busy: boo
       ) : state === 'stale' ? (
         button(`重新核准 v${change.version}`)
       ) : null}
-    </>
+    </div>
   );
 }

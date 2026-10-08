@@ -422,11 +422,11 @@ button { font: inherit; }
 }
 .lv-dialog__btn--danger:hover:not(:disabled) { background: var(--status-error); color: var(--bg); }
 .lv-plan { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px 12px; font-size: var(--lv-fs-body); }
-.lv-plan__meta { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 12px; margin: 0 0 8px; }
+.lv-plan__meta { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 12px; align-items: baseline; margin: 0 0 8px; }
 .lv-plan__meta dt { font-family: var(--font-mono); font-size: var(--lv-fs-meta); letter-spacing: .12em; color: var(--ink-mute); }
 .lv-plan__meta dd { margin: 0; word-break: break-all; }
 .lv-plan__counts { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
-.lv-plan__counts li { display: flex; justify-content: space-between; gap: 12px; }
+.lv-plan__counts li { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
 .lv-plan__warn { margin: 8px 0 0; color: var(--lv-gold-text); }
 .lv-plan__note { margin: 8px 0 0; color: var(--ink-mute); }
 
@@ -1308,6 +1308,10 @@ details.lv-check > .lv-check__head { cursor: pointer; }
 .lv-progress::-webkit-progress-value { background: var(--zone-main, var(--accent)); border-radius: var(--lv-radius-control); }
 .lv-progress::-moz-progress-bar { background: var(--zone-main, var(--accent)); border-radius: var(--lv-radius-control); }
 .lv-task-section { margin-top: 28px; }
+/* 核准區塊：徽章列、紀錄、說明、按鈕以 lv-stack 間距分隔；按鈕維持原寬，橫幅不另加上邊距 */
+.lv-task-approval { align-items: flex-start; }
+.lv-task-approval > p { margin: 0; }
+.lv-task-approval > .lv-banner { margin-top: 0; align-self: stretch; }
 .lv-task-specs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .lv-task-spec { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: var(--lv-fs-body); overflow-wrap: anywhere; min-width: 0; }
 @media (max-width: 760px) {
