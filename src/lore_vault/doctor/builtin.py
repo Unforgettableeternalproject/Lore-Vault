@@ -228,6 +228,16 @@ def sidecar_orphans(ctx: DoctorContext) -> CheckResult:
     return _to_result(storage_sidecar.orphans(db))
 
 
+def sidecar_version_conflict_integrity(ctx: DoctorContext) -> CheckResult:
+    """側載版本鎖（schema v18）：過期 `expected_version` 必須被拒。
+
+    v18 前的庫為 skipped。"""
+    db = ctx.require("db")
+    if not storage_sidecar.has_table(db) or not storage_sidecar.has_version_column(db):
+        raise CheckSkipped("資料庫尚無側載版本欄（資料庫版本較舊，尚未遷移）")
+    return _to_result(storage_sidecar.version_conflict_integrity(db))
+
+
 def tombstones_disjoint(ctx: DoctorContext) -> CheckResult:
     return _to_result(storage_manage.tombstones_disjoint(ctx.require("db")))
 
@@ -540,6 +550,14 @@ def default_registry() -> Registry:
             "sidecar",
             sidecar_orphans,
             "側載列指向現存 vault 且 space 相符（vault 刪除／換 space 須同交易處理）",
+        )
+    )
+    registry.add(
+        Check(
+            "sidecar.version_conflict_integrity",
+            "sidecar",
+            sidecar_version_conflict_integrity,
+            "側載帶過期 expected_version 的寫入被拒並附目前內容，不默默覆寫",
         )
     )
     registry.add(

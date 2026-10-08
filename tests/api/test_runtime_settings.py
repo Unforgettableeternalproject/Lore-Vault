@@ -1,8 +1,9 @@
 """D13：episode 收料開關（預設關閉）與執行期設定 API（UI session 限定、稽核、
-修改後不重建 app 立即生效）。"""
+修改後不重建 app 立即生效）；D15 MCP：任務層遠端同步開關（預設開啟）。"""
 
 from __future__ import annotations
 
+import base64
 import json
 from datetime import UTC, datetime, timedelta
 
@@ -14,6 +15,7 @@ from lore_vault.config import (
     Config,
     EmbeddingConfig,
     EpisodesConfig,
+    TasksConfig,
     UiConfig,
     load_config,
 )
@@ -189,6 +191,77 @@ def test_status_skips_ingest_recency_when_off(open_client):
     _set(ui, episodes__ingest=True)
     # 打開後照常檢查（尚無收料為 warn）
     assert check()["status"] == "warn"
+
+
+# ── 任務層遠端同步開關（D15 MCP 已裁決：預設開啟）──
+
+TASK_KEY = "task-change:demo"
+
+
+def _blob_put(bearer, key: str, data: bytes, **extra):
+    return bearer.post(
+        "/v1/blob_put",
+        json={
+            "space": "dev",
+            "vault": VAULT,
+            "key": key,
+            "content_base64": base64.b64encode(data).decode("ascii"),
+            **extra,
+        },
+    )
+
+
+def _blob_get(bearer, key: str):
+    return bearer.post(
+        "/v1/blob_get", json={"space": "dev", "vault": VAULT, "key": key}
+    )
+
+
+def test_tasks_remote_sync_defaults_on_and_env_turns_it_off():
+    assert Config().tasks.remote_sync is True
+    assert load_config(environ={}).tasks.remote_sync is True
+    off = load_config(environ={"LORE_VAULT_TASKS_REMOTE_SYNC": "false"})
+    assert off.tasks.remote_sync is False
+
+
+def test_task_keys_rejected_when_remote_sync_off_but_reads_still_work(open_client):
+    on_bearer, _ = open_client()
+    create_vault(on_bearer, VAULT)
+    assert _blob_put(on_bearer, TASK_KEY, b"one").status_code == 200
+    bearer, _ = open_client(_config(tasks=TasksConfig(remote_sync=False)))
+    body = _error(
+        _blob_put(bearer, TASK_KEY, b"two", expected_version=1),
+        403,
+        "tasks_remote_sync_disabled",
+    )
+    assert "tasks.remote_sync" in body["error"]["message"]
+    # 新 key 也擋（不會先建立）；任何 task- 開頭都算
+    _error(
+        _blob_put(bearer, "task-spec-mirror:cap", b"x"),
+        403,
+        "tasks_remote_sync_disabled",
+    )
+    # 拒收不寫任何東西；已同步的照常可讀
+    got = _blob_get(bearer, TASK_KEY).json()
+    assert (base64.b64decode(got["content_base64"]), got["version"]) == (b"one", 1)
+    assert _blob_get(bearer, "task-spec-mirror:cap").status_code == 404
+    # 其他 key（推導快照 `tasks-snapshot`）不受開關影響
+    assert _blob_put(bearer, "tasks-snapshot", b"{}").status_code == 200
+
+
+def test_remote_sync_toggle_takes_effect_without_rebuilding_app(open_client):
+    bearer, ui = open_client()
+    create_vault(bearer, VAULT)
+    assert _blob_put(bearer, TASK_KEY, b"a").status_code == 200
+    data = _set(ui, tasks__remote_sync=False)
+    item = _item(data, "tasks.remote_sync")
+    assert (item["value"], item["default"], item["source"]) == (False, True, "override")
+    assert item["category"] == "privacy"
+    _error(_blob_put(bearer, TASK_KEY, b"b"), 403, "tasks_remote_sync_disabled")
+    resp = ui.post("/v1/settings_reset", json={"keys": ["tasks.remote_sync"]})
+    assert resp.status_code == 200, resp.text
+    assert _item(resp.json(), "tasks.remote_sync")["source"] == "default"
+    assert _blob_put(bearer, TASK_KEY, b"b").json()["version"] == 2
 
 
 # ── 認證：只允許 UI session ──

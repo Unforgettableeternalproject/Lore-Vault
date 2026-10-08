@@ -32,6 +32,7 @@ from lore_vault.config import (
     McpConfig,
     Secret,
 )
+from lore_vault.mcp import task_plugin
 from lore_vault.mcp.http import LoopbackTransport, build_http_server
 from lore_vault.mcp.server import (
     HTTP_INSTRUCTIONS,
@@ -196,7 +197,10 @@ def _stdio_shell() -> Shell:
 @pytest.mark.anyio
 async def test_tools_list_matches_stdio_exactly(http, db_path, blob_dir):
     over_http = _open(http).tools()
-    stdio_tools = await build_server(_stdio_shell()).list_tools()
+    shell = _stdio_shell()
+    server = build_server(shell)
+    task_plugin.register(server, shell)
+    stdio_tools = await server.list_tools()
     stdio = [
         {
             "name": t.name,
@@ -210,7 +214,9 @@ async def test_tools_list_matches_stdio_exactly(http, db_path, blob_dir):
     ]
     assert got == stdio
     names = [t["name"] for t in got]
-    assert len(names) == 13 and "upload" in names and "vault_resolve" in names
+    # 核心 13 個＋任務層 tasks（經 task_plugin，兩種模式同一份定義）
+    assert len(names) == 14 and names[-1] == "tasks"
+    assert "upload" in names and "vault_resolve" in names
     assert {"download", "delete", "undelete"} <= set(names)
     # 兩步式與墓碑可還原要寫在工具說明裡（兩種模式同一份）
     by_name = {t["name"]: t for t in got}
@@ -497,7 +503,7 @@ async def test_sdk_client_over_http(db_path, blob_dir, mode):
             )
             async with Client(transport, mode=mode) as client:
                 tools = await client.list_tools()
-                assert len(tools.tools) == 13
+                assert len(tools.tools) == 14
                 result = await client.call_tool(
                     "vault_resolve", {"remote_url": "https://github.com/U/SDK.git"}
                 )

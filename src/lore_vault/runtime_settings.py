@@ -78,6 +78,15 @@ SPECS: tuple[SettingSpec, ...] = (
         "已收進來的紀錄仍可讀取。",
     ),
     SettingSpec(
+        "tasks.remote_sync",
+        KIND_BOOL,
+        "privacy",
+        "任務層遠端同步",
+        "開啟後服務接受任務層進行中 change 的全文與主規格鏡像（task- 開頭的側載），"
+        "讓其他機器與 HTTP MCP 也能操作任務層。關閉時服務拒收這些寫入，任務層只能在"
+        "本機操作；已同步的內容仍可讀取。",
+    ),
+    SettingSpec(
         "ask.enabled",
         KIND_BOOL,
         "ask",

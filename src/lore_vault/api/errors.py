@@ -37,12 +37,55 @@ from lore_vault.storage.errors import (
 )
 from lore_vault.storage.manage import AliasConflict, CannotRemoveKey, RetryRefused
 from lore_vault.storage.settings_store import InvalidSettings
-from lore_vault.storage.sidecar import InvalidSidecarKey, SidecarTooLarge
+from lore_vault.storage.sidecar import (
+    InvalidSidecarKey,
+    SidecarTooLarge,
+    SidecarVersionConflict,
+)
 
 CREATE_VAULT_HINT = (
     "以 POST /v1/vaults 建立（key、display；key 由客戶端用 lore_vault.binding 算出），"
     "或確認 key 是否打錯；write 不會自動建立 vault"
 )
+
+
+class TasksRemoteSyncDisabled(Exception):
+    """服務關閉任務層遠端同步（`tasks.remote_sync = false`，D15 MCP 已裁決）。
+
+    403 + `tasks_remote_sync_disabled`：`task-` 開頭的側載 `blob_put` 一律拒收、
+    不寫任何東西；讀取（`blob_get`）與其他 key（如 `tasks-snapshot`）不受影響。"""
+
+
+class AuthorizationWriteForbidden(Exception):
+    """`/v1/blob_put` 收到 `task-authorization:` 前綴（TASK_LAYER_MCP §3.3、MCP-T5）。
+
+    403 + `authorization_write_forbidden`，不論認證方式：授權紀錄只能經
+    `POST /v1/tasks_authorize`（UI session 限定、服務端填授權人）寫入，否則持 bearer
+    token 的 agent 可以自己偽造核准。錯誤碼與任務層 `remote_store.put_blob` 一致。"""
+
+
+class TaskChangeWriteForbidden(Exception):
+    """`/v1/blob_put` 寫 `task-change:` 被授權守衛拒絕（403，`code` 區分原因）。
+
+    - `authorization_downgrade_forbidden`：服務端現有內容標記 `requires_authorization`，
+      新內容取消它
+    - `authorization_required`：需授權的 change 要離開 active 或寫入 archive 簿記，
+      但沒有內容雜湊相符的 UI 核准紀錄
+
+    不論認證方式都適用（守衛規則見 `api.tasks_admin.guard_change_write`）。"""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class TaskAuthorizationRejected(Exception):
+    """`POST /v1/tasks_authorize` 的 change 不能核准（409，`code` 區分原因：
+    `change_invalid`／`change_not_active`／`authorization_not_required`）。"""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class PayloadTooLarge(Exception):
@@ -244,7 +287,25 @@ def install_error_handlers(app: FastAPI) -> None:
     # 執行期設定（D13）
     app.add_exception_handler(InvalidSettings, invalid_settings)
     simple(EpisodeIngestDisabled, 403, "episode_ingest_disabled")
+    simple(TasksRemoteSyncDisabled, 403, "tasks_remote_sync_disabled")
     simple(UiSessionRequired, 403, "ui_session_required")
+    simple(AuthorizationWriteForbidden, 403, "authorization_write_forbidden")
+
+    async def task_authorization_rejected(
+        request: Request, exc: Exception
+    ) -> JSONResponse:
+        assert isinstance(exc, TaskAuthorizationRejected)
+        return _json(409, exc.code, exc)
+
+    app.add_exception_handler(TaskAuthorizationRejected, task_authorization_rejected)
+
+    async def task_change_write_forbidden(
+        request: Request, exc: Exception
+    ) -> JSONResponse:
+        assert isinstance(exc, TaskChangeWriteForbidden)
+        return _json(403, exc.code, exc)
+
+    app.add_exception_handler(TaskChangeWriteForbidden, task_change_write_forbidden)
 
     simple(PayloadTooLarge, 413, "too_large")
     # 側載（schema v17）：兩者都是 ValueError，各自的 handler 先於 invalid_request
@@ -255,4 +316,17 @@ def install_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(InvalidCharacters, invalid_characters)
     app.add_exception_handler(UnknownVault, unknown_vault)
     app.add_exception_handler(VersionConflict, version_conflict)
+
+    async def sidecar_version_conflict(
+        request: Request, exc: Exception
+    ) -> JSONResponse:
+        # 形狀比照 note update：`expected`＋`current`；側載的 current 附完整內容
+        # （設計 TASK_LAYER_MCP §1.2：呼叫端據此 rebase 後帶新版本重送）
+        assert isinstance(exc, SidecarVersionConflict)
+        current = None if exc.current is None else exc.current.to_dict()
+        return _json(
+            409, "version_conflict", exc, expected=exc.expected, current=current
+        )
+
+    app.add_exception_handler(SidecarVersionConflict, sidecar_version_conflict)
     app.add_exception_handler(VaultExists, vault_exists)

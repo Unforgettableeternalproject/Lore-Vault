@@ -8,11 +8,24 @@ context：
 - settings `decisions_path`：DECISIONS.md；settings `package_root`：isolation 掃描根
 - settings `vault`：`tasks.snapshot_sync`／`snapshot_shape` 比對的 vault（缺省由專案目錄
   binding 推算，同 `sync`）
+- settings `now`（datetime，測試注入）、`pending_apply_stale_hours`（預設 72）：
+  `tasks.pending_apply_stale` 的時鐘與門檻
 - resources `client`：`VaultClient`；要對服務的檢查缺少時 skipped
+
+服務端任務內容的對帳（TASK_LAYER_MCP §6：`pending_apply_stale`／
+`authorization_record_integrity`／`version_sync_agreement`／`specs_mirror_agreement`，
+另加 `decisions_mirror_agreement`）經 `remote_store.RemoteStore` 讀版本化側載；
+服務端還沒有 `task-index`（這個 vault 未遷移、也沒跑過 MCP init）時記為 skipped，
+不把純本機的工作區判成異常。
 """
 
 from __future__ import annotations
 
+import asyncio
+import datetime as _dt
+import json
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -23,15 +36,25 @@ from lore_vault.doctor.framework import (
     Registry,
 )
 
-from . import snapshot, specs
+from . import remote_ops, snapshot, specs
+from . import remote_store as rs
 from .archive import NOTE_DIGESTS_KEY
 from .isolation import DEFAULT_PACKAGE_ROOT, check_core_isolation
 from .vault_client import ServiceError, VaultClient
-from .workspace import SUMMARY_KEY, Change, Workspace, requirement_overlap
+from .workspace import (
+    SUMMARY_KEY,
+    Change,
+    Workspace,
+    remote_enabled,
+    requirement_overlap,
+)
 
 CATEGORY = "tasks"
 # 試用期（OpenSpec CLI）封存、未寫 note 的 change 以此欄位註明原因
 LEGACY_KEY = "legacy_archive"
+# 服務端 DECISIONS 解析結果的鏡像（推送端與格式見 remote_store）
+DECISIONS_KEY = rs.DECISIONS_KEY
+PENDING_APPLY_STALE_HOURS = 72
 
 
 def _workspace(ctx: DoctorContext) -> Workspace:
@@ -285,10 +308,24 @@ def snapshot_sync(ctx: DoctorContext) -> CheckResult:
     """每個涉及的 vault：本機依 vault 分份重算的快照與服務端側載逐位元組相同
     （雜湊比對；分份規則同 `sync`，見 `snapshot.vault_payloads`）。
 
-    不同步只代表 UI 看到舊資料（本機永遠是真相來源），所以是 warn 不是 fail；
+    預設 vault 已有 `task-index`（已遷移／同步模式）時改比對服務端內容算出的快照
+    （`snapshot.remote_snapshot_bytes`，與 `push_remote` 同一算法），只比預設 vault。
+
+    不同步只代表 UI 看到舊資料，所以是 warn 不是 fail；
     快照超過服務端上限、根本推不上去才是 fail。"""
     ws = _workspace(ctx)
     client = _client(ctx)
+    try:
+        vault = snapshot.resolve_vault(client, ws, ctx.settings.get("vault"))
+        store = rs.RemoteStore(rs.vault_client_post(client), vault)
+        if asyncio.run(snapshot.has_remote_index(store)):
+            return _remote_snapshot_sync(client, store, ws)
+    except ServiceError as exc:
+        return _service_error(exc)
+    except rs.RemoteUnreachable as exc:
+        return CheckResult.warn(f"服務無法對帳：{exc.detail}")
+    except rs.RemoteError as exc:
+        return CheckResult.warn(f"服務拒絕對帳請求：{exc.message}")
     try:
         payloads = snapshot.vault_payloads(ws, client, ctx.settings.get("vault"))
     except snapshot.SnapshotTooLarge as exc:
@@ -330,6 +367,42 @@ def snapshot_sync(ctx: DoctorContext) -> CheckResult:
     )
 
 
+def _remote_snapshot_sync(
+    client: VaultClient, store: rs.RemoteStore, ws: Workspace
+) -> CheckResult:
+    vault = store.vault
+    try:
+        expected = asyncio.run(snapshot.remote_snapshot_bytes(store, ws))
+    except snapshot.SnapshotTooLarge as exc:
+        return CheckResult.fail(str(exc))
+    except rs.StoreError as exc:
+        return CheckResult.fail(f"服務端任務內容無法解析：{exc.message}")
+    counts = {"vaults": 1, "local_bytes": len(expected)}
+    try:
+        remote = client.get_blob(vault, "dev", snapshot.SNAPSHOT_KEY)
+    except ValueError:
+        return CheckResult.warn(
+            f"{vault} 的服務端快照無法解碼，執行 sync 重推",
+            details=["見 tasks.snapshot_shape"],
+            counts=counts,
+        )
+    if remote is None:
+        problem = f"{vault} 尚未同步任務快照（UI 任務畫面看不到），執行 sync"
+        return CheckResult.warn(problem, details=[problem], counts=counts)
+    if snapshot.digest(remote["content"]) != snapshot.digest(expected):
+        problem = f"{vault} 的任務快照與服務端內容算出的不同，執行 sync 重推"
+        return CheckResult.warn(
+            problem,
+            details=[problem, f"{vault}：服務端同步於 {remote.get('updated')}"],
+            counts=counts,
+        )
+    return CheckResult.ok(
+        f"{vault} 的任務快照與服務端內容一致",
+        details=[f"{vault}：同步於 {remote.get('updated')}（服務端內容算法）"],
+        counts=counts,
+    )
+
+
 def snapshot_shape(ctx: DoctorContext) -> CheckResult:
     """服務端側載內容能解析成快照 schema v1（壞掉時 UI 無法顯示）。"""
     ws = _workspace(ctx)
@@ -349,10 +422,520 @@ def snapshot_shape(ctx: DoctorContext) -> CheckResult:
     return CheckResult.ok("服務端任務快照格式正確")
 
 
+# ── 服務端任務內容（TASK_LAYER_MCP §6）──────────────────────────────
+
+
+@dataclass
+class _Remote:
+    """一次載入的服務端任務內容：索引狀態、能讀到的 change 文件、讀不了的項目。"""
+
+    vault: str
+    entries: dict[str, str]
+    docs: dict[str, rs.RemoteChange] = field(default_factory=dict)
+    bad: list[str] = field(default_factory=list)
+
+
+async def _load_remote(store: rs.RemoteStore) -> _Remote:
+    """索引裡每個名稱都讀 change 文件（含 `archived`：落地後文件若保留
+    `apply`／delta，供鏡像倒退偵測；不存在的跳過）。沒有索引 → skipped。"""
+    index, version = await store.get_index()
+    if version == 0:
+        raise CheckSkipped(
+            f"{store.vault} 的服務端尚無任務索引（未遷移，執行 tasks migrate）"
+        )
+    entries = {
+        str(name): str((entry or {}).get("state") or "")
+        for name, entry in (index.get("changes") or {}).items()
+    }
+    remote = _Remote(store.vault, entries)
+    for name in sorted(entries):
+        try:
+            change = await store.get_change(name)
+        except rs.StoreError as exc:
+            remote.bad.append(f"{name}：{exc.message}")
+            continue
+        if change is not None:
+            remote.docs[name] = change
+    return remote
+
+
+def _remote_check(
+    ctx: DoctorContext,
+    run: Callable[[Workspace, rs.RemoteStore], Awaitable[CheckResult]],
+) -> CheckResult:
+    ws = _workspace(ctx)
+    client = _client(ctx)
+    try:
+        vault = snapshot.resolve_vault(client, ws, ctx.settings.get("vault"))
+        store = rs.RemoteStore(rs.vault_client_post(client), vault)
+        return asyncio.run(run(ws, store))
+    except ServiceError as exc:
+        return _service_error(exc)
+    except rs.RemoteUnreachable as exc:
+        return CheckResult.warn(f"服務無法對帳：{exc.detail}")
+    except rs.RemoteError as exc:
+        return CheckResult.warn(f"服務拒絕對帳請求：{exc.message}")
+    except rs.StoreError as exc:
+        return CheckResult.fail(f"服務端任務內容無法解析：{exc.message}")
+
+
+def _parse_utc(value: object) -> _dt.datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = _dt.datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=_dt.UTC)
+
+
+def _now(ctx: DoctorContext) -> _dt.datetime:
+    now = ctx.settings.get("now")
+    return now if isinstance(now, _dt.datetime) else _dt.datetime.now(_dt.UTC)
+
+
+def _archived_stamp(change: rs.RemoteChange) -> object:
+    return (change.doc.get("apply") or {}).get("archived_at") or change.meta.get(
+        "archived_at"
+    )
+
+
+def pending_apply_stale(ctx: DoctorContext) -> CheckResult:
+    """服務端 `pending_apply`（段一已寫 note、本機 specs/ 未落地）超過門檻
+    （預設 72 小時）仍未落地 → warn；沒有可解析的 `archived_at` 也 warn。"""
+    hours = float(
+        ctx.settings.get("pending_apply_stale_hours") or PENDING_APPLY_STALE_HOURS
+    )
+    limit = _dt.timedelta(hours=hours)
+    now = _now(ctx)
+
+    async def run(ws: Workspace, store: rs.RemoteStore) -> CheckResult:
+        remote = await _load_remote(store)
+        pending = [c for c in remote.docs.values() if c.state == rs.STATE_PENDING_APPLY]
+        stale: list[str] = []
+        details: list[str] = []
+        for change in pending:
+            stamp = _archived_stamp(change)
+            at = _parse_utc(stamp)
+            if at is None:
+                stale.append(
+                    f"{change.name}：pending_apply 但沒有可解析的 archived_at"
+                    f"（{stamp!r}）"
+                )
+                continue
+            age = (now - at).total_seconds() / 3600
+            if now - at > limit:
+                stale.append(
+                    f"{change.name}：{stamp} 段一封存，已 {age:.0f} 小時未落地"
+                    "（在 stdio 執行 sync_specs）"
+                )
+            else:
+                details.append(f"{change.name}：{stamp} 段一封存，{age:.0f} 小時")
+        counts = {"pending_apply": len(pending), "stale": len(stale)}
+        if stale or remote.bad:
+            return CheckResult.warn(
+                f"有 change 停在 pending_apply 超過 {hours:g} 小時"
+                if stale
+                else "有 change 文件無法讀取",
+                details=stale + remote.bad + details,
+                counts=counts,
+            )
+        return CheckResult.ok(
+            f"沒有超過 {hours:g} 小時未落地的 change", details=details, counts=counts
+        )
+
+    return _remote_check(ctx, run)
+
+
+def _local_archive_match(change: rs.RemoteChange, locals_: list[Change]) -> bool:
+    """服務端 archived 文件對得上本機封存目錄（`tasks migrate` 遷入的本機舊封存）：
+    同名且 note_id 相同；都沒有 note_id 時兩邊都要標 `legacy_archive`。"""
+    note_id = change.meta.get("note_id")
+    for local in locals_:
+        if note_id:
+            if local.meta.get("note_id") == note_id:
+                return True
+        elif local.meta.get(LEGACY_KEY) and not local.meta.get("note_id"):
+            return True
+    return False
+
+
+def authorization_record_integrity(ctx: DoctorContext) -> CheckResult:
+    """服務端 change 文件的授權與封存簿記（§3.3）。
+
+    - `requires_authorization: true` 且已離開 active（或 active 但已寫 note）的
+      change：必須有 UI session 寫入的授權紀錄，且 `content_digest` 等於目前內容雜湊。
+      唯一例外是 `archived` 且對得上本機封存目錄（`_local_archive_match`：
+      本機封存、經 `tasks migrate` 遷入）；服務端文件 meta 的 `authorization.source:
+      "cli"` 不算授權依據（可被持 bearer 者偽造）
+    - `pending_apply`／`archived` 卻沒有 note_id：段一一定先寫 note_id 才改狀態，
+      沒有就是文件被改寫；`archived` 對得上本機封存（含 `legacy_archive`）才放行"""
+
+    async def run(ws: Workspace, store: rs.RemoteStore) -> CheckResult:
+        remote = await _load_remote(store)
+        local_archives: dict[str, list[Change]] = {}
+        for local in ws.archived():
+            local_archives.setdefault(local.name, []).append(local)
+        fails: list[str] = []
+        warns: list[str] = []
+        accepted: list[str] = []
+        checked = 0
+        for name, change in remote.docs.items():
+            meta = change.meta
+            state = change.state
+            locals_ = local_archives.get(name, [])
+            from_local = state == rs.STATE_ARCHIVED and _local_archive_match(
+                change, locals_
+            )
+            if state != rs.STATE_ACTIVE and not meta.get("note_id") and not from_local:
+                fails.append(
+                    f"{name}：狀態 {state} 卻沒有 note_id，也對不上本機封存目錄"
+                    "（段一未完成就被改了狀態，或文件被直接改寫）"
+                )
+            if not meta.get("requires_authorization"):
+                continue
+            passed_gate = bool(meta.get("notes") or meta.get("note_id"))
+            if state == rs.STATE_ACTIVE and not passed_gate:
+                continue  # 還沒過閘門（沒寫 note），授權與否由 archive 擋
+            checked += 1
+            problem: str | None = None
+            record: rs.AuthorizationRecord | None = None
+            try:
+                record = await store.get_authorization(name)
+            except rs.StoreError as exc:
+                problem = exc.message
+            if problem is None and record is None:
+                problem = f"服務端沒有 UI 核准紀錄 {rs.authorization_key(name)}"
+            elif record is not None and record.vault and record.vault != store.vault:
+                problem = f"授權紀錄的 vault 是 {record.vault}，不是 {store.vault}"
+            elif record is not None and not record.matches(change):
+                problem = (
+                    f"授權紀錄核准的內容（v{record.change_version}）與目前內容"
+                    f"（v{change.version}）的雜湊不同"
+                )
+            copied = meta.get("authorization")
+            if problem is not None:
+                if from_local:
+                    note = meta.get("note_id")
+                    accepted.append(f"{name}：本機封存遷入（note {note}）")
+                    continue
+                if (
+                    isinstance(copied, dict)
+                    and copied.get("source") == rs.AUTHORIZATION_SOURCE_CLI
+                ):
+                    problem += (
+                        "；meta authorization 標 source: cli，"
+                        "但服務端文件不接受 cli 來源（沒有對應的本機封存）"
+                    )
+                fails.append(f"{name}：{problem}（授權閘門可能被繞過）")
+                continue
+            assert record is not None
+            if not isinstance(copied, dict):
+                warns.append(f"{name}：change meta 沒有 archive 時抄下的 authorization")
+            elif (
+                copied.get("content_digest") != record.content_digest
+                or copied.get("authorized_by") != record.authorized_by
+            ):
+                warns.append(
+                    f"{name}：授權紀錄（v{record.change_version}，"
+                    f"{record.authorized_by}）與 archive 時抄下的"
+                    f"（v{copied.get('change_version')}，"
+                    f"{copied.get('authorized_by')}）不同"
+                )
+        counts = {"checked": checked, "local_archive": len(accepted)}
+        if fails:
+            return CheckResult.fail(
+                "有需授權的 change 缺少有效的 UI 核准紀錄，或封存簿記不完整",
+                details=fails + warns + remote.bad + accepted,
+                counts=counts,
+            )
+        if warns or remote.bad:
+            return CheckResult.warn(
+                "授權紀錄與 change 記錄不一致" if warns else "有 change 文件無法讀取",
+                details=warns + remote.bad + accepted,
+                counts=counts,
+            )
+        return CheckResult.ok(
+            "需授權的 change 都有相符的 UI 核准紀錄（或為本機封存遷入）",
+            details=accepted,
+            counts=counts,
+        )
+
+    return _remote_check(ctx, run)
+
+
+def blocked_archive(ctx: DoctorContext) -> CheckResult:
+    """服務端 `pending_apply`／`archived` 的 change，其 `blocked_by` 依**本機**
+    DECISIONS.md 都已解除。服務端 `task-decisions` 鏡像可被持 bearer 者竄改，讓未裁決的
+    change 在純 HTTP 流程完成 archive 段一；這裡以本機為準重查。本機沒有 DECISIONS.md
+    → skipped。"""
+
+    async def run(ws: Workspace, store: rs.RemoteStore) -> CheckResult:
+        if ws.decisions() is None:
+            raise CheckSkipped("本機沒有 DECISIONS.md，無法重查 blocked_by")
+        remote = await _load_remote(store)
+        fails: list[str] = []
+        for name, change in remote.docs.items():
+            if change.state == rs.STATE_ACTIVE:
+                continue
+            # 本機有 DECISIONS.md，local_blockers 不會回 None
+            blockers = remote_ops.local_blockers(change, ws) or []
+            if blockers:
+                fails.append(
+                    f"{name}：服務端狀態 {change.state}，但依本機 DECISIONS.md 仍被 "
+                    f"{'、'.join(blockers)} 擋住"
+                    "（未裁決或找不到小節；DECISIONS 鏡像可能被改過）"
+                )
+        counts = {"blocked": len(fails)}
+        if fails:
+            return CheckResult.fail(
+                "有未裁決就封存的 change", details=fails + remote.bad, counts=counts
+            )
+        if remote.bad:
+            return CheckResult.warn(
+                "有 change 文件無法讀取", details=remote.bad, counts=counts
+            )
+        return CheckResult.ok(
+            "已封存的 change 都沒有未裁決的 blocked_by", counts=counts
+        )
+
+    return _remote_check(ctx, run)
+
+
+def version_sync_agreement(ctx: DoctorContext) -> CheckResult:
+    """本機 active change 的 `remote_version`／內容與服務端版本化內容比對：
+    (a) 本機版本落後（沒 pull）；(b) 版本一致但內容雜湊不同（本機改了沒推）；
+    本機版本比服務端新（服務端被回退或重建）。服務端已 `pending_apply`／`archived`
+    的不比（本機在 sync_specs 前本來就還在 changes/，見 pending_apply_stale）。"""
+
+    async def run(ws: Workspace, store: rs.RemoteStore) -> CheckResult:
+        remote = await _load_remote(store)
+        warns: list[str] = []
+        details: list[str] = []
+        synced = 0
+        local_names = set()
+        for local in ws.active():
+            name = local.name
+            local_names.add(name)
+            if local.meta_error:
+                warns.append(f"{name}：本機 .openspec.yaml 無法解析")
+                continue
+            raw = local.meta.get(rs.REMOTE_VERSION_KEY)
+            recorded = (
+                raw if isinstance(raw, int) and not isinstance(raw, bool) else None
+            )
+            change = remote.docs.get(name)
+            if change is None:
+                if recorded is None:
+                    warns.append(f"{name}：尚未推送到服務端（執行 tasks migrate）")
+                else:
+                    warns.append(
+                        f"{name}：本機記錄同步過 v{recorded}，服務端卻沒有這個 change"
+                    )
+                continue
+            if change.state != rs.STATE_ACTIVE:
+                details.append(f"{name}：服務端為 {change.state}，不比對工作副本")
+                continue
+            digest = rs.content_digest(rs.local_doc(local))
+            modified = digest != local.meta.get(rs.REMOTE_DIGEST_KEY)
+            if recorded is None:
+                warns.append(
+                    f"{name}：本機沒有 remote_version，服務端為 v{change.version}"
+                    "（執行 pull，或 tasks migrate 回填）"
+                )
+            elif recorded < change.version:
+                warns.append(
+                    f"{name}：本機 v{recorded} 落後服務端 v{change.version}"
+                    "（執行 pull，可能漏看別人的修改）"
+                    + ("；本機另有未推送的修改" if modified else "")
+                )
+            elif recorded > change.version:
+                warns.append(
+                    f"{name}：本機記錄 v{recorded} 比服務端 v{change.version} 新"
+                    "（服務端被回退或重建？）"
+                )
+            elif digest != change.digest():
+                warns.append(
+                    f"{name}：版本一致（v{recorded}）但本機內容與服務端不同"
+                    "（本機修改未成功推送）"
+                )
+            else:
+                synced += 1
+        remote_only = sorted(
+            n
+            for n, c in remote.docs.items()
+            if c.state == rs.STATE_ACTIVE and n not in local_names
+        )
+        if remote_only:
+            details.append("服務端有本機沒有的 change：" + "、".join(remote_only))
+        counts = {"local_active": len(local_names), "in_sync": synced}
+        if warns or remote.bad:
+            return CheckResult.warn(
+                "本機工作副本與服務端版本不一致" if warns else "有 change 文件無法讀取",
+                details=warns + remote.bad + details,
+                counts=counts,
+            )
+        return CheckResult.ok(
+            "本機工作副本與服務端版本一致", details=details, counts=counts
+        )
+
+    return _remote_check(ctx, run)
+
+
+def _single(plan: specs.DeltaPlan, name: str) -> specs.DeltaPlan:
+    return specs.DeltaPlan(
+        added=[b for b in plan.added if b.name == name],
+        modified=[b for b in plan.modified if b.name == name],
+        removed=[n for n in plan.removed if n == name],
+    )
+
+
+def specs_mirror_agreement(ctx: DoctorContext) -> CheckResult:
+    """主 spec 鏡像對帳，兩條規則：
+
+    - 落後（warn）：鏡像與本機 `specs/<cap>/spec.md` 現值不同（或沒有鏡像）。
+      有 `pending_apply` change 正在合併的 capability 不比——鏡像本來就領先 git
+    - 倒退（fail）：鏡像缺少服務端最後一個封存（`pending_apply`／`archived`）change
+      對該 requirement 併入的內容。這是沒 git pull 的機器跑 stdio validate、把舊內容
+      推回鏡像的情況；下一次 archive 會在掉了內容的 base 上合併，再由 sync_specs
+      寫進 git，所以比落後嚴重"""
+
+    async def run(ws: Workspace, store: rs.RemoteStore) -> CheckResult:
+        remote = await _load_remote(store)
+        local = rs.local_main_specs(ws)
+        caps = set(local)
+        for change in ws.active():
+            caps |= set(change.delta_files())
+        landed: list[rs.RemoteChange] = []
+        pending: dict[str, str] = {}
+        for change in remote.docs.values():
+            if change.state == rs.STATE_ACTIVE:
+                caps |= set(change.deltas)
+                continue
+            landed.append(change)
+            if change.state == rs.STATE_PENDING_APPLY:
+                for cap in (change.doc.get("apply") or {}).get("merged_specs") or {}:
+                    pending.setdefault(str(cap), change.name)
+        latest: dict[str, tuple[rs.RemoteChange, str, specs.DeltaPlan, str]] = {}
+        for change in sorted(landed, key=lambda c: (str(_archived_stamp(c)), c.name)):
+            if change.meta.get("skip_specs"):
+                continue
+            for cap, plan in change.plans().items():
+                for _, req in plan.operations():
+                    latest[specs.requirement_key(cap, req)] = (change, cap, plan, req)
+        wanted = {c for c in caps | set(pending) if rs.NAME_RE.match(c)}
+        wanted |= {cap for _, cap, _, _ in latest.values() if rs.NAME_RE.match(cap)}
+        mirrors = {cap: await store.get_mirror(cap) for cap in sorted(wanted)}
+        lag: list[str] = []
+        details: list[str] = []
+        for cap in sorted(c for c in caps if rs.NAME_RE.match(c)):
+            if cap in pending:
+                details.append(f"{cap}：change {pending[cap]} 待落地，鏡像領先 git")
+                continue
+            mirror = mirrors.get(cap)
+            if mirror is None:
+                lag.append(f"{cap}：服務端沒有鏡像（在 stdio 執行 validate 推送）")
+            elif not mirror.same_content(cap in local, local.get(cap)):
+                lag.append(
+                    f"{cap}：鏡像（v{mirror.version}，{mirror.source}）與本機 "
+                    "specs/ 現值不同（鏡像落後，或本機尚未 git pull）"
+                )
+        regress: list[str] = []
+        for key, (change, cap, plan, req) in sorted(latest.items()):
+            mirror = mirrors.get(cap)
+            text = mirror.text if mirror is not None and mirror.exists else None
+            for problem in specs.delta_applied(text, _single(plan, req)):
+                regress.append(
+                    f"{key}：鏡像缺少 {change.name}（{change.state}）併入的內容"
+                    f"（鏡像被舊內容倒退？）：{problem}"
+                )
+        counts = {"capabilities": len(caps), "pending": len(pending)}
+        if regress:
+            return CheckResult.fail(
+                "主 spec 鏡像倒退，缺少已封存 change 的內容",
+                details=regress + lag + remote.bad,
+                counts=counts,
+            )
+        if lag or remote.bad:
+            return CheckResult.warn(
+                "主 spec 鏡像與本機不一致" if lag else "有 change 文件無法讀取",
+                details=lag + remote.bad + details,
+                counts=counts,
+            )
+        return CheckResult.ok("主 spec 鏡像與本機一致", details=details, counts=counts)
+
+    return _remote_check(ctx, run)
+
+
+def decisions_mirror_agreement(ctx: DoctorContext) -> CheckResult:
+    """本機 DECISIONS.md 解析結果與服務端 `task-decisions` 鏡像一致
+    （HTTP 模式判定 `blocked_by` 靠這份）。格式由推送端（MCP-T6）定，這裡只讀
+    `decisions: {Dn: bool}`，其餘欄位缺漏都容忍。"""
+
+    async def run(ws: Workspace, store: rs.RemoteStore) -> CheckResult:
+        local = ws.decisions()
+        if local is None:
+            raise CheckSkipped(
+                f"找不到 DECISIONS.md（{ws.decisions_path or '未設定 decisions_file'}）"
+            )
+        blob = await store.get_blob(DECISIONS_KEY)
+        if blob is None and remote_enabled(ws.root):
+            return CheckResult.warn(
+                f"同步模式（config remote: true）但 {store.vault} 的服務端沒有 "
+                f"{DECISIONS_KEY} 鏡像，HTTP 模式判定不了 blocked_by；執行 sync 推送"
+            )
+        if blob is None:
+            raise CheckSkipped(
+                f"{store.vault} 的服務端尚無 {DECISIONS_KEY} 鏡像（由 stdio 推送）"
+            )
+        try:
+            data = json.loads(blob.content.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            data = None
+        mirrored = data.get("decisions") if isinstance(data, dict) else None
+        if not isinstance(mirrored, dict):
+            return CheckResult.warn(
+                f"{DECISIONS_KEY} 的格式無法辨識（缺少 decisions），在 stdio 重推"
+            )
+        diffs = []
+        for key in sorted(set(local) | {str(k) for k in mirrored}):
+            mine = local.get(key)
+            theirs = mirrored.get(key)
+            if mine is None or not isinstance(theirs, bool) or mine != theirs:
+                diffs.append(f"{key}：本機 {_decision(mine)}，鏡像 {_decision(theirs)}")
+        details = []
+        if isinstance(data, dict) and data.get("source_digest"):
+            details.append(f"鏡像 source_digest：{data['source_digest']}")
+        counts = {"local": len(local), "mirrored": len(mirrored)}
+        if diffs:
+            return CheckResult.warn(
+                "DECISIONS 鏡像與本機不同（在 stdio 重推）",
+                details=diffs + details,
+                counts=counts,
+            )
+        return CheckResult.ok(
+            "DECISIONS 鏡像與本機一致", details=details, counts=counts
+        )
+
+    return _remote_check(ctx, run)
+
+
+def _decision(value: object) -> str:
+    if value is None:
+        return "沒有"
+    if isinstance(value, bool):
+        return "已解除" if value else "未解除"
+    return f"格式不符（{value!r}）"
+
+
 def default_registry() -> Registry:
     registry = Registry()
     for name, func, description in (
-        ("tasks.isolation", isolation, "核心（tasks/ 以外）零 import 任務層"),
+        (
+            "tasks.isolation",
+            isolation,
+            "核心（tasks/ 與 mcp/task_plugin.py 以外）零 import 任務層",
+        ),
         (
             "tasks.archive_note_agreement",
             archive_note_agreement,
@@ -392,6 +975,38 @@ def default_registry() -> Registry:
             "tasks.snapshot_shape",
             snapshot_shape,
             "服務端的任務快照能解析成快照 schema v1",
+        ),
+        (
+            "tasks.pending_apply_stale",
+            pending_apply_stale,
+            "服務端 pending_apply 的 change 未超過門檻（預設 72 小時）仍未落地",
+        ),
+        (
+            "tasks.authorization_record_integrity",
+            authorization_record_integrity,
+            "需授權且已過閘的 change 有內容雜湊相符的 UI 核准紀錄；"
+            "已封存文件都有 note_id",
+        ),
+        (
+            "tasks.blocked_archive",
+            blocked_archive,
+            "服務端已封存（pending_apply／archived）的 change 依本機 DECISIONS "
+            "沒有未裁決的 blocked_by",
+        ),
+        (
+            "tasks.version_sync_agreement",
+            version_sync_agreement,
+            "本機 remote_version／內容與服務端版本化內容一致",
+        ),
+        (
+            "tasks.specs_mirror_agreement",
+            specs_mirror_agreement,
+            "主 spec 鏡像與本機 specs/ 一致，且未倒退掉已封存 change 的內容",
+        ),
+        (
+            "tasks.decisions_mirror_agreement",
+            decisions_mirror_agreement,
+            "本機 DECISIONS 解析結果與服務端 task-decisions 鏡像一致",
         ),
     ):
         registry.register(name, CATEGORY, description)(func)

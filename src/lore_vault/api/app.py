@@ -41,6 +41,7 @@ from .settings import ApiSettings, load_settings, validate_token
 from .settings_admin import router as settings_router
 from .spike import router as spike_router
 from .state import AppState
+from .tasks_admin import router as tasks_router
 from .ui import UiSecurityHeadersMiddleware, static_app
 from .ui import build_router as build_ui_router
 from .ui_auth import UiAuth
@@ -150,6 +151,7 @@ def create_app(
     app.include_router(spike_router)
     app.include_router(manage_router)
     app.include_router(settings_router)
+    app.include_router(tasks_router)
     # /ui/api/* 必須在 /ui 靜態掛載之前註冊（Starlette 依註冊順序比對）
     app.include_router(build_ui_router())
     if ui_static is not None:

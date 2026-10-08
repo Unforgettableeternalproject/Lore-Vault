@@ -1,11 +1,14 @@
-"""側載小型機器狀態（schema v17 `sidecar_blobs`）：遷移、單列覆寫、範圍、
-vault 刪除與換 space 的同交易處理，以及 doctor `sidecar.orphans`。
+"""側載小型機器狀態（schema v17 `sidecar_blobs`，v18 加版本）：遷移、單列覆寫、範圍、
+版本鎖、依 key 前綴的上限、vault 刪除與換 space 的同交易處理，以及 doctor
+`sidecar.orphans`／`sidecar.version_conflict_integrity`。
 
 「拿掉保護會紅」：
 - `test_delete_vault_without_sidecar_step_is_rolled_back`：拿掉刪除步驟 → 筆數核對抓到
 - `test_orphans_red_when_delete_vault_skips_sidecar`：整段拿掉側載處理 → doctor fail
 - `test_move_space_without_space_update_is_rolled_back`：拿掉改 space → 筆數核對抓到
 - `test_orphans_red_when_move_space_skips_sidecar`：整段拿掉 space 改寫 → doctor fail
+- `test_version_integrity_red_when_comparison_removed`：拿掉 UPDATE 的版本比對
+  → doctor fail
 """
 
 from __future__ import annotations
@@ -25,11 +28,11 @@ DEV = "folder/side"
 KEY = "tasks-snapshot"
 
 
-def _doctor(conn) -> str:
+def _doctor(conn, name: str = "sidecar.orphans"):
     report = default_registry().run(
         DoctorContext(resources={"db": conn}), categories=["sidecar"]
     )
-    return next(o for o in report.outcomes if o.name == "sidecar.orphans").result
+    return next(o for o in report.outcomes if o.name == name).result
 
 
 def _status(conn) -> str:
@@ -57,7 +60,7 @@ def test_v17_adds_sidecar_table_and_keeps_data(tmp_path):
             "VALUES ('folder/x', 'x', 'repo', '2026-01-01T00:00:00.000Z')"
         )
         assert not sidecar.has_table(raw)
-        assert migrate(raw) == SCHEMA_VERSION == 17
+        assert migrate(raw, migrations=MIGRATIONS[:17]) == 17
         cols = {r["name"]: r for r in raw.execute("PRAGMA table_info(sidecar_blobs)")}
         assert set(cols) == {"vault", "space", "key", "mime", "content", "updated"}
         pk = sorted((r["pk"], r["name"]) for r in cols.values() if r["pk"])
@@ -65,6 +68,42 @@ def test_v17_adds_sidecar_table_and_keeps_data(tmp_path):
         # 刻意無外鍵（由 admin 同交易處理、doctor 對帳）
         assert raw.execute("PRAGMA foreign_key_list(sidecar_blobs)").fetchall() == []
         assert raw.execute("SELECT key FROM vaults").fetchall()[0][0] == "folder/x"
+    finally:
+        raw.close()
+
+
+def test_v18_adds_version_and_existing_rows_start_at_one(tmp_path):
+    raw = sqlite3.connect(tmp_path / "old.db", isolation_level=None)
+    raw.row_factory = sqlite3.Row
+    try:
+        migrate(raw, migrations=MIGRATIONS[:17])
+        raw.execute(
+            "INSERT INTO vaults (key, display, kind, created) "
+            "VALUES ('folder/x', 'x', 'repo', '2026-01-01T00:00:00.000Z')"
+        )
+        raw.execute(
+            "INSERT INTO sidecar_blobs (vault, space, key, mime, content, updated) "
+            "VALUES ('folder/x', 'dev', 'tasks-snapshot', 'application/json', "
+            "x'7b7d', '2026-01-01T00:00:00.000Z')"
+        )
+        assert not sidecar.has_version_column(raw)
+        # v18 前的庫：版本檢查 skipped（不是 fail）
+        assert _doctor(raw, "sidecar.version_conflict_integrity").status.value == (
+            "skipped"
+        )
+        assert migrate(raw) == SCHEMA_VERSION == 18
+        assert sidecar.has_version_column(raw)
+        blob = sidecar.get(raw, "folder/x", "tasks-snapshot", space="dev")
+        assert (blob.version, blob.content) == (1, b"{}")
+        # 舊列接著用：不帶 expected_version 照舊覆寫並遞增，帶 1 也能接上
+        assert (
+            sidecar.put(raw, "folder/x", "tasks-snapshot", b"a", space="dev").version
+            == 2
+        )
+        # 資料庫層也擋非正整數版本
+        with pytest.raises(sqlite3.IntegrityError):
+            raw.execute("UPDATE sidecar_blobs SET version = 0")
+        assert _doctor(raw, "sidecar.version_conflict_integrity").status.value == "pass"
     finally:
         raw.close()
 
@@ -85,6 +124,117 @@ def test_put_get_roundtrip_and_overwrite(conn, add_vault):
     # 單列語意：舊內容不可讀、mime 也一併覆寫
     assert got.content == b'{"v":2}' and got.mime == sidecar.DEFAULT_MIME
     assert conn.execute("SELECT count(*) FROM sidecar_blobs").fetchone()[0] == 1
+
+
+# ── 版本鎖（v18）──
+
+
+def test_put_without_expected_version_overwrites_and_increments(conn, add_vault):
+    """既有用法（`tasks-snapshot`）：不帶 expected_version 一律覆寫，只是版本遞增。"""
+    add_vault(DEV)
+    versions = [
+        sidecar.put(conn, DEV, KEY, b"%d" % i, space="dev").version for i in range(3)
+    ]
+    assert versions == [1, 2, 3]
+    got = sidecar.get(conn, DEV, KEY, space="dev")
+    assert (got.content, got.version) == (b"2", 3)
+
+
+def test_expected_version_match_and_stale(conn, add_vault):
+    add_vault(DEV)
+    key = "task-change:demo"
+    first = sidecar.put(conn, DEV, key, b"one", space="dev")
+    second = sidecar.put(conn, DEV, key, b"two", space="dev", expected_version=1)
+    assert (first.version, second.version) == (1, 2)
+    with pytest.raises(sidecar.SidecarVersionConflict) as info:
+        sidecar.put(
+            conn, DEV, key, b"stale", space="dev", expected_version=1, mime="text/plain"
+        )
+    exc = info.value
+    assert exc.expected == 1
+    assert exc.current is not None
+    assert (exc.current.version, exc.current.content) == (2, b"two")
+    got = sidecar.get(conn, DEV, key, space="dev")
+    # 被拒的寫入什麼都沒動（內容、mime、版本、時間）
+    assert got == second
+
+
+def test_expected_version_zero_means_must_not_exist(conn, add_vault):
+    add_vault(DEV)
+    key = "task-change:new"
+    created = sidecar.put(conn, DEV, key, b"init", space="dev", expected_version=0)
+    assert created.version == 1
+    with pytest.raises(sidecar.SidecarVersionConflict) as info:
+        sidecar.put(conn, DEV, key, b"again", space="dev", expected_version=0)
+    assert info.value.current is not None and info.value.current.content == b"init"
+    assert sidecar.get(conn, DEV, key, space="dev").content == b"init"
+
+
+def test_expected_version_on_missing_key_conflicts_without_current(conn, add_vault):
+    add_vault(DEV)
+    with pytest.raises(sidecar.SidecarVersionConflict) as info:
+        sidecar.put(
+            conn, DEV, "task-change:none", b"x", space="dev", expected_version=3
+        )
+    assert info.value.current is None
+    assert conn.execute("SELECT count(*) FROM sidecar_blobs").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("bad", [-1, True, 1.0, "1"])
+def test_expected_version_must_be_non_negative_int(conn, add_vault, bad):
+    add_vault(DEV)
+    with pytest.raises(ValueError):
+        sidecar.put(conn, DEV, KEY, b"x", space="dev", expected_version=bad)
+
+
+def test_version_integrity_passes(conn):
+    result = _doctor(conn, "sidecar.version_conflict_integrity")
+    assert result.status.value == "pass", result
+
+
+def test_version_integrity_red_when_comparison_removed(conn, monkeypatch):
+    """拿掉 UPDATE 的 `AND version = :expected`：過期版本的寫入會默默覆寫
+    → doctor fail。"""
+    original = sidecar._put_sql
+
+    def without_comparison(expected_version):
+        return original(expected_version).replace(" AND version = :expected", "")
+
+    monkeypatch.setattr(sidecar, "_put_sql", without_comparison)
+    result = _doctor(conn, "sidecar.version_conflict_integrity")
+    assert result.status.value == "fail"
+    assert any("默默覆寫" in d for d in result.details), result.details
+
+
+# ── 依 key 前綴的上限與 key 格式 ──
+
+
+def test_limit_by_key_prefix(conn, add_vault):
+    add_vault(DEV)
+    assert sidecar.limit_for_key("task-change:x") == sidecar.LARGE_MAX_BYTES
+    assert sidecar.limit_for_key("task-spec-mirror:cap") == sidecar.LARGE_MAX_BYTES
+    # `tasks-snapshot` 第五字元是 s，不屬 `task-` 前綴：維持 64KB
+    assert sidecar.limit_for_key("tasks-snapshot") == sidecar.MAX_BYTES
+    assert sidecar.LARGE_MAX_BYTES < 25 * 1024 * 1024  # 不是無上限
+    big = b"x" * sidecar.LARGE_MAX_BYTES
+    assert sidecar.put(conn, DEV, "task-change:big", big, space="dev").version == 1
+    with pytest.raises(sidecar.SidecarTooLarge):
+        sidecar.put(conn, DEV, "task-change:big", big + b"x", space="dev")
+    with pytest.raises(sidecar.SidecarTooLarge):
+        sidecar.put(
+            conn, DEV, "tasks-snapshot", b"x" * (sidecar.MAX_BYTES + 1), space="dev"
+        )
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["task-change:add-thing", "task-spec-mirror:auth", "task-change:a:merged-spec:b"],
+)
+def test_colon_keys_allowed(conn, add_vault, key):
+    """設計 TASK_LAYER_MCP 的階層式 key（`task-change:<name>` 等）要能寫入。"""
+    add_vault(DEV)
+    assert sidecar.put(conn, DEV, key, b"x", space="dev").key == key
+    assert sidecar.get(conn, DEV, key, space="dev").content == b"x"
 
 
 def test_put_via_alias_stores_canonical_key(conn, add_vault):
@@ -111,7 +261,7 @@ def test_scope_errors(conn, add_vault):
 
 
 @pytest.mark.parametrize(
-    "key", ["", "a/b", "a\\b", "..", ".hidden", "a b", "鍵", "x" * 129]
+    "key", ["", "a/b", "a\\b", "..", ".hidden", "a b", "鍵", "x" * 129, ":a", "C:\\x"]
 )
 def test_invalid_keys(conn, add_vault, key):
     add_vault(DEV)

@@ -831,6 +831,21 @@ def _v17(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+# 側載版本化（v18，D15 MCP 已裁決；設計 TASK_LAYER_MCP §1.2）：
+# - `version` 每次 put 遞增；`blob_put` 帶 `expected_version` 時以 SQL 比對版本做
+#   樂觀鎖，不符回 `version_conflict`（不帶就照舊整份覆寫，只遞增版本）
+# - 既有列一律從 1 起算（ADD COLUMN 的 DEFAULT 直接套到舊列）
+_V18_STATEMENTS: tuple[str, ...] = (
+    "ALTER TABLE sidecar_blobs ADD COLUMN version INTEGER NOT NULL DEFAULT 1"
+    " CHECK (version >= 1)",
+)
+
+
+def _v18(conn: sqlite3.Connection) -> None:
+    for statement in _V18_STATEMENTS:
+        conn.execute(statement)
+
+
 # 有序遷移：索引 i 的函式把版本從 i 升到 i+1。只能往後加，不可改動已發佈的項目。
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _v1,
@@ -850,6 +865,7 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _v15,
     _v16,
     _v17,
+    _v18,
 )
 
 SCHEMA_VERSION = len(MIGRATIONS)

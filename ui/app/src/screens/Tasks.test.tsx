@@ -1,11 +1,11 @@
 /** @vitest-environment happy-dom */
 // 任務層畫面：dev-only 守門、列表四態篩選（預設隱藏已完成）、尚未同步／服務錯誤／格式錯誤、
-// 過時提示、「無法判定」的錯誤色，以及詳情（封存 note 連結、依賴導航、note 找不到）。
+// 過時提示、「無法判定」的錯誤色，以及詳情（封存 note 連結、依賴導航、note 找不到、需授權 change 的核准）。
 import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/preact';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { TaskChange } from '../lib/types';
-import { apiError, base64Utf8, json, makeApi, renderWithApp } from '../test/harness';
+import { apiError, base64Utf8, json, makeApi, renderWithApp, type Handler } from '../test/harness';
 import { Tasks } from './Tasks';
 
 afterEach(() => {
@@ -287,6 +287,144 @@ describe('任務層：詳情', () => {
     cleanup();
     renderWithApp(<Tasks params={[VAULT, 'nope']} />, api);
     await waitFor(() => expect(screen.getByTestId('task-missing')).toBeTruthy());
+  });
+});
+
+describe('任務層：核准', () => {
+  type Change = { version: number; state: string; requires_authorization: boolean; content_digest: string };
+  type Status = { change: Change | null; record: Record<string, unknown> | null };
+
+  const DIGEST_A = 'a'.repeat(64);
+  const DIGEST_B = 'b'.repeat(64);
+
+  function remoteChange(version: number, extra: Partial<Change> = {}): Change {
+    return { version, state: 'active', requires_authorization: true, content_digest: DIGEST_A, ...extra };
+  }
+
+  function record(changeVersion: number, contentDigest = DIGEST_A) {
+    return {
+      schema: 1,
+      vault: VAULT,
+      change: 'auth-one',
+      change_version: changeVersion,
+      content_digest: contentDigest,
+      authorized_by: '艾斯維爾',
+      authorized_at: '2026-10-08T12:00:00Z',
+      principal: { kind: 'ui_session', name: 'aeswir' },
+    };
+  }
+
+  /** 快照走 blob_get；核准狀態走 tasks_authorization_status（approved 由「服務端」依雜湊判定） */
+  function routes(state: Status, extra: Record<string, Handler> = {}): Record<string, Handler> {
+    return {
+      '/v1/blob_get': () => json(blob(MIXED)),
+      '/v1/tasks_authorization_status': () =>
+        json({
+          ...state,
+          approved: state.change !== null && state.record !== null && state.record.content_digest === state.change.content_digest,
+        }),
+      ...extra,
+    };
+  }
+
+  it('尚未核准：顯示服務端目前版本；確認對話框可取消；確認後呼叫核准端點並重新整理', async () => {
+    const state: Status = { change: remoteChange(3), record: null };
+    const { api, callsTo } = makeApi(
+      routes(state, {
+        '/v1/tasks_authorize': () => {
+          state.record = record(3);
+          return json({ record: {}, version: 1, created: true });
+        },
+      }),
+    );
+    const { toast } = renderWithApp(<Tasks params={[VAULT, 'auth-one']} />, api);
+    const panel = await screen.findByTestId('task-approval');
+    await waitFor(() => expect(within(panel).getByTestId('task-approval-state').textContent).toBe('尚未核准'));
+    expect(within(panel).getByTestId('task-approval-version').textContent).toContain('v3');
+    // 核准狀態以 UI 限定端點讀（dev space、指定 vault 與 change），不再自己讀 change／紀錄側載
+    expect(callsTo('/v1/tasks_authorization_status')[0]!.body).toEqual({ space: 'dev', vault: VAULT, change: 'auth-one' });
+    expect(callsTo('/v1/blob_get').map((c) => c.body.key)).toEqual(['tasks-snapshot']);
+
+    fireEvent.click(within(panel).getByRole('button', { name: '核准 v3' }));
+    const dialog = screen.getByRole('dialog');
+    expect(dialog.textContent).toContain('v3');
+    fireEvent.click(within(dialog).getByRole('button', { name: '取消' }));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(callsTo('/v1/tasks_authorize')).toHaveLength(0);
+
+    fireEvent.click(within(panel).getByRole('button', { name: '核准 v3' }));
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '確認核准' }));
+    await waitFor(() => expect(within(panel).getByTestId('task-approval-state').textContent).toBe('已核准'));
+    // 請求只帶 space／vault／change，授權人與版本由服務端填
+    expect(callsTo('/v1/tasks_authorize')[0]!.body).toEqual({ space: 'dev', vault: VAULT, change: 'auth-one' });
+    expect(within(panel).getByTestId('task-approval-record').textContent).toContain('艾斯維爾');
+    expect(within(panel).queryByRole('button', { name: /核准/ })).toBeNull();
+    expect(toast).toHaveBeenCalledWith('已核准 auth-one（v3）', 'success');
+  });
+
+  it('版本前進但內容雜湊相同（封存簿記寫入）：仍是已核准', async () => {
+    const { api } = makeApi(routes({ change: remoteChange(6), record: record(3) }));
+    renderWithApp(<Tasks params={[VAULT, 'auth-one']} />, api);
+    const panel = await screen.findByTestId('task-approval');
+    await waitFor(() => expect(within(panel).getByTestId('task-approval-state').textContent).toBe('已核准'));
+    expect(within(panel).queryByRole('button', { name: /核准/ })).toBeNull();
+  });
+
+  it('核准後又修改內容：顯示「核准已過期」與重新核准按鈕', async () => {
+    const { api } = makeApi(routes({ change: remoteChange(4, { content_digest: DIGEST_B }), record: record(3) }));
+    renderWithApp(<Tasks params={[VAULT, 'auth-one']} />, api);
+    const panel = await screen.findByTestId('task-approval');
+    await waitFor(() => expect(within(panel).getByTestId('task-approval-state').textContent).toBe('核准已過期'));
+    expect(within(panel).getByTestId('task-approval-record').textContent).toContain('v3');
+    expect(within(panel).getByTestId('task-approval-record').textContent).toContain('需要重新核准');
+    expect(within(panel).getByRole('button', { name: '重新核准 v4' })).toBeTruthy();
+  });
+
+  it('回應自稱 approved 但雜湊不符：不標已核准', async () => {
+    const { api } = makeApi({
+      '/v1/blob_get': () => json(blob(MIXED)),
+      '/v1/tasks_authorization_status': () =>
+        json({ change: remoteChange(4, { content_digest: DIGEST_B }), record: record(3), approved: true }),
+    });
+    renderWithApp(<Tasks params={[VAULT, 'auth-one']} />, api);
+    const panel = await screen.findByTestId('task-approval');
+    await waitFor(() => expect(within(panel).getByTestId('task-approval-state').textContent).toBe('核准已過期'));
+  });
+
+  it('服務端沒有 change 內容：不顯示核准按鈕並說明；非 active 也不能核准', async () => {
+    const { api } = makeApi(routes({ change: null, record: null }));
+    renderWithApp(<Tasks params={[VAULT, 'auth-one']} />, api);
+    expect((await screen.findByTestId('task-approval-no-change')).textContent).toContain('無法在這裡核准');
+    expect(within(screen.getByTestId('task-approval')).queryByRole('button')).toBeNull();
+    cleanup();
+
+    const pending = makeApi(routes({ change: remoteChange(5, { state: 'pending_apply' }), record: null }));
+    renderWithApp(<Tasks params={[VAULT, 'auth-one']} />, pending.api);
+    expect((await screen.findByTestId('task-approval-unavailable')).textContent).toContain('pending_apply');
+    expect(within(screen.getByTestId('task-approval')).queryByRole('button')).toBeNull();
+  });
+
+  it('核准失敗：toast 錯誤並重讀狀態，仍是尚未核准', async () => {
+    const { api, callsTo } = makeApi(
+      routes({ change: remoteChange(3), record: null }, { '/v1/tasks_authorize': () => apiError(409, 'change_not_active') }),
+    );
+    const { toast } = renderWithApp(<Tasks params={[VAULT, 'auth-one']} />, api);
+    const panel = await screen.findByTestId('task-approval');
+    fireEvent.click(await within(panel).findByRole('button', { name: '核准 v3' }));
+    const before = callsTo('/v1/tasks_authorization_status').length;
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '確認核准' }));
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.stringContaining('核准失敗'), 'error'));
+    await waitFor(() => expect(callsTo('/v1/tasks_authorization_status').length).toBeGreaterThan(before));
+    expect(within(panel).getByTestId('task-approval-state').textContent).toBe('尚未核准');
+  });
+
+  it('不需授權或已完成的 change 沒有核准區塊，也不讀核准狀態', async () => {
+    const { api, callsTo } = makeApi({ '/v1/blob_get': () => json(blob(MIXED)) });
+    renderWithApp(<Tasks params={[VAULT, 'ready-one']} />, api);
+    await screen.findByTestId('task-synced');
+    expect(screen.queryByTestId('task-approval')).toBeNull();
+    expect(callsTo('/v1/blob_get').map((c) => c.body.key)).toEqual(['tasks-snapshot']);
+    expect(callsTo('/v1/tasks_authorization_status')).toHaveLength(0);
   });
 });
 

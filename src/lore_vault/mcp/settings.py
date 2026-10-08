@@ -51,6 +51,8 @@ class ShellSettings:
     # `download` 一次最多收多少位元組：stdio 殼為 documents.max_file_bytes（寫本機檔）；
     # HTTP 端點為 mcp.http_download_max_bytes（base64 進上下文，刻意設小）
     download_max_bytes: int = 25 * 1024 * 1024
+    # 是否掛上任務層工具（`mcp.tasks_enabled`，見 `task_plugin.register`）
+    tasks_enabled: bool = True
 
 
 def load_shell_settings(
@@ -86,6 +88,7 @@ def load_shell_settings(
         max_upload_bytes=config.documents.max_file_bytes,
         ask_timeout=mcp.ask_timeout,
         download_max_bytes=config.documents.max_file_bytes,
+        tasks_enabled=mcp.tasks_enabled,
     )
 
 

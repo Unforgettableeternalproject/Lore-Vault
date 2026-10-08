@@ -52,7 +52,8 @@ async def test_stdio_lists_exactly_the_expected_tools(tmp_path):
         async with Client(stdio_client(params, errlog=errlog)) as client:
             result = await client.list_tools()
     names = {tool.name for tool in result.tools}
-    assert names == EXPECTED == set(TOOL_NAMES)
+    # 核心工具＋任務層 `tasks`（`mcp.tasks_enabled` 預設開啟，經 task_plugin 掛上）
+    assert names == EXPECTED | {"tasks"} and EXPECTED == set(TOOL_NAMES)
     for tool in result.tools:
         assert tool.description, tool.name
     # 刻意排除的能力沒有被暴露

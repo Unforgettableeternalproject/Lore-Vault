@@ -125,9 +125,9 @@ side-car 紀錄：`{session_id, prompt_id, injected: [concept_id]}`，不含原�
 "value": …, "part"?: n}`。chunk 有獨立的 FTS（CJK bigram）與向量（bge-m3）索引，只收可索引文件
 （ready、未被取代）。
 
-### 側載（sidecar，schema v17）
+### 側載（sidecar，schema v17／v18）
 
-不屬於知識內容的小型機器狀態（例如任務層推送的進行中 change 快照），`(vault, key)` 單列覆寫、上限 64KB，不檢索、不進快照、隨 vault 刪除與換 space 一併處理。端點與對帳見下方「側載小型機器狀態」。目前 schema 版本為 v17（`storage.migrate.SCHEMA_VERSION`）。
+不屬於知識內容的小型機器狀態（例如任務層推送的進行中 change 快照、change 全文），`(vault, key)` 單列覆寫、每次寫入版本遞增（v18），可選樂觀鎖；上限依 key 前綴（預設 64KB，`task-` 開頭 1MB），不檢索、不進快照、隨 vault 刪除與換 space 一併處理。端點與對帳見下方「側載小型機器狀態」。目前 schema 版本為 v18（`storage.migrate.SCHEMA_VERSION`）。
 
 ## MCP 介面（草案）
 
@@ -164,14 +164,18 @@ spike 接入端點（階段 8，同樣需 bearer；每筆 body 項目 = schema d
 
 **文件下載**：`POST /v1/document_download`，body `{space, vault, id, max_bytes?}`（未知欄位 422），是唯一回二進位的端點。範圍同 `get`：文件不在該 vault／space（含墓碑中的文件）一律 404 `not_found`，`vault="*"` 為目前 space 全部。成功回上傳時的原始位元組：`Content-Type` 為上傳時的 mime、`Content-Disposition: attachment`（ASCII 後備檔名＋RFC 5987 `filename*=UTF-8''…`）、`X-Lore-Vault-Sha256`、`X-Lore-Vault-Document-Id`、`Cache-Control: no-store`。`max_bytes` 給了而文件較大 → 413 `too_large`（依 metadata 判斷，不讀 blob）。讀 blob 時驗 sha256：遺失 500 `blob_missing`、雜湊不符 500 `blob_corrupt`（不回可能損毀的內容）；未設 `blob_dir` 500 `documents_not_configured`。bearer 與 UI session（cookie＋`X-Lore-Vault-UI`）皆可，由同一個中介層處理。不另加 doctor 檢查：這是唯讀資料流，blob 存在與雜湊已由 `documents.blob_exists` 對帳、讀取時再驗一次。
 
-**側載小型機器狀態**（schema v17，D15「UI 已裁決」(a′)，`lore_vault.storage.sidecar`）：通用、**不進任何檢索或快照路徑**的 `(vault, key) → (mime, bytes, updated)`，單列覆寫（put 即取代，不留版本、不留墓碑；真相來源在推送端，遺失可由下一次推送重建）。核心不認識使用者：任務層把進行中 change 的推導狀態以 key `tasks-snapshot` 推上來，給 UI 任務畫面讀。不寫 FTS、不算 embedding、不進 `recall`／`ask`／`list`／`get`，`GET /v1/snapshot` 的排除清單含 `sidecar_blobs`；**不提供 MCP 工具**。bearer 與 UI session（cookie＋`X-Lore-Vault-UI`）皆可，未知欄位 422。
+**側載小型機器狀態**（schema v17，v18 加版本；D15「UI 已裁決」(a′)、「MCP 已裁決」，`lore_vault.storage.sidecar`）：通用、**不進任何檢索或快照路徑**的 `(vault, key) → (mime, bytes, updated, version)`，單列覆寫（put 即取代，不留舊內容、不留墓碑），每次 put `version` 遞增（新列從 1 起，v18 遷移時既有列設為 1）。核心只依 key 前綴決定上限與開關，不解讀內容：任務層把進行中 change 的推導狀態以 key `tasks-snapshot` 推上來給 UI 任務畫面讀（衍生快照，真相在本機，遺失可由下一次推送重建）；`task-` 開頭的 key（`task-change:<name>`、`task-spec-mirror:<capability>` 等，設計 `TASK_LAYER_MCP.md` §1.2）則是**服務端權威**的任務層內容——遺失就是真的遺失，不能當成可重建的快取；備份（`VACUUM INTO` 整庫）涵蓋整張 `sidecar_blobs`。不寫 FTS、不算 embedding、不進 `recall`／`ask`／`list`／`get`，`GET /v1/snapshot` 的排除清單含 `sidecar_blobs`；**不提供 MCP 工具**。bearer 與 UI session（cookie＋`X-Lore-Vault-UI`）皆可，未知欄位 422。
+
+版本鎖：`blob_put` 帶 `expected_version` 時，版本比對與寫入在同一條 SQL（`BEGIN IMMEDIATE` 內）完成，不先讀後寫。省略＝不比對、整份覆寫（`tasks-snapshot` 的既有用法，行為不變，只是版本遞增）；`0`＝預期尚不存在（沒有列就建立為版本 1，已有列即衝突）；正整數＝須等於目前版本。不符回 409 `version_conflict`，`error` 形狀比照 note `update`：`{code, message, expected, current}`，但 `current` 是**完整的目前內容**（同 `blob_get` 單筆形狀，含 `content_base64` 與 `version`，呼叫端據此 rebase 後帶新版本重送）；key 不存在時 `current` 為 null。被拒的寫入不改任何欄位。
+
+**任務層遠端同步開關**（D15「MCP 已裁決」：設開關、預設開啟）：`tasks.remote_sync`（環境變數 `LORE_VAULT_TASKS_REMOTE_SYNC`，預設 true），執行期可由 UI 設定頁切換。關閉時 `task-` 開頭的 `blob_put` 一律 403 `tasks_remote_sync_disabled`、不寫任何東西（先於大小與版本檢查）；`blob_get` 與其他 key（含 `tasks-snapshot`）不受影響——比照 D13 episode 開關「只擋收料、不擋既有查詢」。
 
 | 端點 | 請求 | 回應 | 錯誤 |
 |---|---|---|---|
-| `blob_put` | `{space, vault, key, mime?, content_base64}`（vault 可用別名，存正式 key；`mime` 預設 `application/octet-stream`） | `{updated}` | 400 `space_required`／`vault_required`（缺 vault 或 `*`）／`invalid_key`（key 不是 1–128 個英數與 `. _ -`、英數開頭，即含路徑分隔字元）／`invalid_request`（base64 不合法、mime 不是 `type/subtype`）；404 `unknown_vault`（不存在或在別的 space）；413 `too_large`（解碼後超過 64KB，不截斷） |
-| `blob_get` | `{space, vault?, key}` | 給了 `vault`：`{vault, key, mime, content_base64, updated}`；省略 `vault`（或 `*`）：`{items: [同左]}`＝本 space 內所有存過該 key 的 vault，依 vault key 排序，可能為空陣列 | 404 `not_found`（該 vault 沒有這個 key）、`unknown_vault`；400 `invalid_key` |
+| `blob_put` | `{space, vault, key, mime?, content_base64, expected_version?}`（vault 可用別名，存正式 key；`mime` 預設 `application/octet-stream`；`expected_version` 為非負整數，見上方版本鎖） | `{updated, version}` | 400 `space_required`／`vault_required`（缺 vault 或 `*`）／`invalid_key`（key 不是 1–128 個英數與 `. _ - :`、英數開頭，即含路徑分隔字元）／`invalid_request`（base64 不合法、mime 不是 `type/subtype`）；403 `tasks_remote_sync_disabled`（`task-` 開頭且開關關閉）；404 `unknown_vault`（不存在或在別的 space）；409 `version_conflict`（附目前內容）；413 `too_large`（解碼後超過該 key 的上限：預設 64KB、`task-` 開頭 1MB，不截斷）；422（`expected_version` 為負或非整數） |
+| `blob_get` | `{space, vault?, key}` | 給了 `vault`：`{vault, key, mime, content_base64, updated, version}`；省略 `vault`（或 `*`）：`{items: [同左]}`＝本 space 內所有存過該 key 的 vault，依 vault key 排序，可能為空陣列 | 404 `not_found`（該 vault 沒有這個 key）、`unknown_vault`；400 `invalid_key` |
 
-表 `sidecar_blobs` 刻意無外鍵（同墓碑），欄名用 `vault` 讓換 space 的動態偵測自動涵蓋；另存冗餘的 `space` 欄。`vault_delete` 的規劃 `counts.sidecar_blobs` 列出筆數（綁進確認 token，不要求 force），執行時同一交易內刪除並以資料實況核對；`vault_move_space` 的 `counts` 多 `sidecar_blobs.vault`／`sidecar_blobs.space` 兩項，同一交易內改 key 與 space。doctor `sidecar.orphans`（分類 `sidecar`）：有列指向不存在的 vault、或 `space` 與該 vault 不符為 fail；v17 前的庫為 skipped。
+表 `sidecar_blobs` 刻意無外鍵（同墓碑），欄名用 `vault` 讓換 space 的動態偵測自動涵蓋；另存冗餘的 `space` 欄。`vault_delete` 的規劃 `counts.sidecar_blobs` 列出筆數（綁進確認 token，不要求 force），執行時同一交易內刪除並以資料實況核對；`vault_move_space` 的 `counts` 多 `sidecar_blobs.vault`／`sidecar_blobs.space` 兩項，同一交易內改 key 與 space。doctor `sidecar.orphans`（分類 `sidecar`）：有列指向不存在的 vault、或 `space` 與該 vault 不符為 fail；v17 前的庫為 skipped。doctor `sidecar.version_conflict_integrity`（同分類）：正式庫每列 `version` 須為正整數（表上另有 CHECK），並在獨立的記憶體資料庫以同一個 `put` 實跑一次「帶過期版本／帶 0 寫入既有列」，必須被拒、附目前內容且內容與版本不變，否則 fail（拿掉版本比對時這項會紅）；v18 前的庫為 skipped。
 
 **執行期設定**（D13，`lore_vault.api.settings_admin`；白名單與驗證在 `lore_vault.runtime_settings`、儲存與稽核在 `storage.settings_store`，schema v15）。設定檔／環境變數是「預設值」，DB 的 `settings_overrides` 覆寫其上；讀取端一律經 `AppState.runtime.current()`（程序內快取，設定 API 寫入後立即失效；依據 A9 單一寫入程序，doctor CLI 等其他程序直接讀 DB）。**只允許 UI session**：bearer 請求一律 403 `ui_session_required`（在 body 驗證之前檢查）——bearer 由所有 agent／hook 共用，`/mcp` 也以 bearer 轉發 `/v1`，開放 bearer 等於任何 agent 都能翻隱私開關；其他管理端點開放 bearer 是因為有兩段式確認或墓碑可還原，設定沒有這層保護。
 
@@ -188,6 +192,7 @@ spike 接入端點（階段 8，同樣需 bearer；每筆 body 項目 = schema d
 | 鍵 | 型別／範圍 | 讀取端 |
 |---|---|---|
 | `episodes.ingest` | bool，預設 false | `POST /v1/episodes` 每次請求；`/v1/status` 的 `episodes.ingest_recency` |
+| `tasks.remote_sync` | bool，預設 true | `POST /v1/blob_put` 每次請求（只管 `task-` 開頭的 key） |
 | `ask.enabled` | bool，預設 true | `/v1/ask` 每次請求（關閉 403 `ask_disabled`，不檢索、不呼叫模型）；`ask.provider` 記為 skipped |
 | `ask.snippet_max_chars` | int 500–50000 | `/v1/ask` 每次請求 |
 | `mcp.http_download_max_bytes` | int 1024–25 MiB | HTTP MCP `download` 每次呼叫（`Shell(download_limit=...)`） |
@@ -237,12 +242,12 @@ concept／episode 只屬 dev：在 lore／personal 查詢 `vault="*"` 回空、�
 
 MCP 有兩種入口，共用同一份工具定義（名稱、參數、說明、回傳；`mcp.server.build_server` 只註冊一次）：
 
-- **HTTP 端點 `/mcp`**（D12，`mcp.http`）：服務內建的 Streamable HTTP（JSON 回應、有 `Mcp-Session-Id` session；也接受 2026-07-28 無 session 的單次請求），客戶端 `claude mcp add --transport http <服務>/mcp --header "Authorization: Bearer <token>"` 直連。認證與 `/v1/*` 相同（外層 `BearerAuthMiddleware`）；工具在服務行程內經 **in-process ASGI** 轉發到同一個 app 的 `/v1/*`，並沿用呼叫端這次請求的 `Authorization`（或 UI cookie＋`X-Lore-Vault-UI`），principal 判定與直接打 `/v1/*` 相同，拿不到呼叫端 header 時不以服務 token 代打（內層 401）。差異：`vault_resolve` 不收 `cwd`（`cwd_not_supported`），改收 `remote_url`（`git remote get-url origin` 的輸出，以 `binding.normalize_remote` 正規化，與 cwd 解析同 key）或 `key`；`upload` 只收 `filename`＋`content_base64`（`path` 回 `path_not_supported`；base64 先以長度擋 `documents.max_file_bytes`，`/mcp` body 上限＝該值的 base64 長度＋1MB）；`download` 不收 `path`、改回 `content_base64`，上限 `mcp.http_download_max_bytes`（預設 1MB，超過回 `too_large` 並提示改用 stdio 殼或 UI）；沒有快照降級。DNS rebinding 保護關閉（經 tunnel／反向代理時 Host 不是 localhost；保護靠 bearer）
+- **HTTP 端點 `/mcp`**（D12，`mcp.http`）：服務內建的 Streamable HTTP（JSON 回應、有 `Mcp-Session-Id` session；也接受 2026-07-28 無 session 的單次請求），客戶端 `claude mcp add --transport http <服務>/mcp --header "Authorization: Bearer <token>"` 直連。認證與 `/v1/*` 相同（外層 `BearerAuthMiddleware`）；工具在服務行程內經 **in-process ASGI** 轉發到同一個 app 的 `/v1/*`，並沿用呼叫端這次請求的 `Authorization`（或 UI cookie＋`X-Lore-Vault-UI`），principal 判定與直接打 `/v1/*` 相同，拿不到呼叫端 header 時不以服務 token 代打（內層 401）。差異：`vault_resolve` 不收 `cwd`（`cwd_not_supported`），改收 `remote_url`（`git remote get-url origin` 的輸出，以 `binding.normalize_remote` 正規化，與 cwd 解析同 key）或 `key`；`upload` 只收 `filename`＋`content_base64`（`path` 回 `path_not_supported`；base64 先以長度擋 `documents.max_file_bytes`，`/mcp` body 上限＝該值的 base64 長度＋1MB）；`download` 不收 `path`、改回 `content_base64`，上限 `mcp.http_download_max_bytes`（預設 1MB，超過回 `too_large` 並提示改用 stdio 殼或 UI）；任務層 `tasks` 必須帶 `vault`、不讀寫任何本機檔案（回應不含本機路徑），`sync_specs` 在任何服務呼叫之前回 `path_not_supported`，`blocked_by` 只能依 `task-decisions` 鏡像判定（從未推過鏡像時狀態為「無法判定」）；沒有快照降級。DNS rebinding 保護關閉（經 tunnel／反向代理時 Host 不是 localhost；保護靠 bearer）
 - **本地 stdio 殼**（`python -m lore_vault.mcp`，A15），完整客戶端：服務連線失敗、逾時或 502／503／504、Cloudflare 521–524／530 時，`recall`／`get`／`list`／`vault_resolve` 改讀本地快照、只走 lexical 並標 `degraded`；`write`／`update` 直接失敗不排佇列；401／403／其他 4xx 與 500 直接報錯不降級。降級查詢同樣以殼的目前 space 過濾（快照保留 `vaults.space`）。
 
 殼持有「目前 space」：stdio 每個殼行程一份；HTTP 端點依 MCP session（`Mcp-Session-Id`）各一份（最多記 1024 個，淘汰最久沒用的）。只在記憶體、不持久化，新行程／新 session 一律 `dev`。HTTP 沒有 session 的連線（stateless、2026-07-28 單次請求）只能用 `dev`：`space(action="set")` 回 `session_required`，不寫進共用狀態（避免改到別的 agent 的 space）。其他工具沒有 space 參數，殼在每個 `/v1/*` 請求自動注入目前 space（唯一出口 `Shell._send`）。
 
-目標是讓 agent 用最少的上下文拿到足夠決策的資訊。工具數量刻意壓低（目前 13 個；`ask` 依 D11 加入，`download`／`delete`／`undelete` 為 agent 的檔案與刪除操作）。
+目標是讓 agent 用最少的上下文拿到足夠決策的資訊。工具數量刻意壓低（核心 13 個；`ask` 依 D11 加入，`download`／`delete`／`undelete` 為 agent 的檔案與刪除操作）。任務層的 `tasks` 不在 `build_server` 內註冊：`mcp.tasks_enabled`（預設 true，環境變數 `LORE_VAULT_MCP_TASKS_ENABLED`）為真時，由唯一的組合層 `mcp/task_plugin.py` 在 `build_server` 之後掛上 stdio 殼與 HTTP 端點；這是啟動時（HTTP 為每次 lifespan）決定的設定，不在執行期設定頁。
 
 | 工具 | 回傳 | 說明 |
 |---|---|---|
@@ -259,6 +264,7 @@ MCP 有兩種入口，共用同一份工具定義（名稱、參數、說明、�
 | `delete(vault, id, reason?, confirm_token?)` | 服務的兩段式回應＋`kind`（`note`／`document`）；規劃另帶 `next_step`，執行另帶 `undelete_hint` | 依 id 前綴分派：`doc:` → `document_delete`、`chunk:` 拒絕（`invalid_request`）、其餘 → `note_delete`；語義與錯誤同上方兩段式確認（`invalid_confirm_token`／`confirm_token_expired`／`plan_changed` 附新 plan 與 token）。工具說明要求 agent 把規劃給使用者看、取得明確同意才送第二步，不可自動連打。不能刪 vault。服務不可達直接失敗（不降級） |
 | `undelete(id)` | 服務回應＋`kind` | 同樣依前綴分派到 `note_undelete`／`document_undelete`（範圍為目前 space，沒有 `vault` 參數，與端點一致）；`not_restorable` 附 `reason` |
 | `status(vault?)` | 健康狀態、最近更新、管線狀態 | 合併 doctor 摘要與 health alert；stdio 殼另附 `shell`（本地快照對帳），HTTP 端點另附 `mcp: {mode, space}` |
+| `tasks(action, vault?, …)` | 依 action；錯誤為工具錯誤附 `hint` | 任務層（`mcp.tasks_enabled` 時才有，見下方「任務層」），固定 dev space。`init(vault?, display?)`、`propose(name, goal?, source?, blocked_by?, depends_on?, requires_authorization?, skip_specs?)`、`edit(name, expected_version, proposal_md?, design_md?, tasks_md?, deltas?, …metadata)`（給了的欄位整段取代；版本不符回 `version_conflict` 附 `current`；`requires_authorization` 只能 false→true）、`pull(name, overwrite?)`、`list(vault?, status_filter?)`、`validate(name?, record_base?, rebase?)`、`archive(name, reason?, allow_incomplete?, confirm_token?, author?)`（兩段式確認，同 `delete`；**不接受任何授權參數**）、`sync_specs(name?, overwrite?)`（只限 stdio）。vault：stdio 可省略（殼工作目錄 binding），HTTP 必填。本機 `openspec/` 只在 stdio、且 vault 等於殼工作目錄 binding 時讀寫；主 spec 與 DECISIONS 鏡像只由 stdio 的 init／validate（主 spec 另含 sync_specs）推送 |
 
 刻意**不做**：chat（多輪對話）、model 管理、source 匯入；服務設定只經 UI（上方「執行期設定」，不提供 MCP 工具）。`ask` 是單次問答、只整理檢索片段（D11）。
 
@@ -278,11 +284,26 @@ MCP 有兩種入口，共用同一份工具定義（名稱、參數、說明、�
 
 ## 任務層（選用附加層）
 
-`src/lore_vault/tasks/` 是可整個拿掉的附加層：借用 OpenSpec 的目錄格式與生命週期（change → spec delta → archive），以 Python 自行實作，不需安裝 OpenSpec CLI，也不佔 MCP 工具配額。依賴方向是單向的——任務層透過 HTTP 呼叫服務，核心不 import 任務層（有 AST 測試守住）。
+`src/lore_vault/tasks/` 是可整個拿掉的附加層：借用 OpenSpec 的目錄格式與生命週期（change → spec delta → archive），以 Python 自行實作，不需安裝 OpenSpec CLI；MCP 只多一個 `tasks(action=)` 工具（見 MCP 介面表）。依賴方向是單向的——任務層透過 HTTP 呼叫服務，核心不 import 任務層（有 AST 測試守住），唯一具名例外是組合層 `mcp/task_plugin.py`（硬編單一路徑，其他檔案照樣受檢）。
 
-用法：`python -m lore_vault.tasks [--root DIR] <init|propose|list|validate|archive|sync|doctor>`，各子指令以 `--help` 為準。change 的狀態（可開工／被擋住／待授權／已完成）由 metadata 與決策紀錄（DECISIONS.md，路徑可設定）推導，不手填；只有 `archive` 會寫入服務，每條 ADDED／MODIFIED requirement 各一則 note、外加一則 change 總結 note，同一 requirement 以 `supersedes` 串成鏈。tasks.md 未勾完的 change 不會被封存，除非明確帶 `--allow-incomplete`（未完成數會記下來）。
+用法：`python -m lore_vault.tasks [--root DIR] <init|propose|list|validate|archive|sync|push|pull|sync-specs|migrate|doctor>`，或 MCP `tasks(action=)`，各子指令以 `--help` 為準。change 的狀態（可開工／被擋住／無法判定／待授權／已封存（待落地）／已完成）由 metadata 與決策紀錄（DECISIONS.md，路徑可設定）推導，不手填。封存時每條 ADDED／MODIFIED requirement 各一則 note、外加一則 change 總結 note，同一 requirement 以 `supersedes` 串成鏈。tasks.md 未勾完的 change 不會被封存，除非明確帶 `--allow-incomplete`（未完成數會記下來）。
 
-給 UI 任務畫面的快照：`propose`／`validate`／`archive`／`list` 結束後（`propose`／`archive` 只在成功時）把推導結果以 `blob_put` 依 vault 分份推送、key `tasks-snapshot`（見「側載小型機器狀態」）：change 歸屬 metadata 記的 vault，沒記的歸預設 vault（`--vault` 或該 repo 的 binding），每個涉及的 vault 各推一份，封存到別的 vault 後原 vault 的快照也會更新，`sync` 只做推送；推送失敗只在 stderr 警告、不改 exit code。快照只含 change 名稱、推導狀態與原因、`blocked_by`（D 編號與是否已裁決）、`depends_on`（是否已封存）、`requires_authorization`、tasks 完成數、`source`、proposal 的 Why 段、spec delta 的 capability／requirement 標題與操作類型、`note_id`、`archived_at`；不含 delta 全文與 tasks.md 逐項文字。內容是確定性的（不含產生時間），同步時間取側載的 `updated`。任務層 doctor 另有 `tasks.snapshot_sync`（本機重算的快照與服務端雜湊不符或從未推送為 warn——本機才是真相來源，不同步只代表 UI 看到舊資料）與 `tasks.snapshot_shape`（服務端內容無法解析成快照 schema v1 為 fail，提示重跑 `sync`）。
+**混合同步**（D15「MCP 已裁決」，設計 `TASK_LAYER_MCP.md`，格式見 `tasks/remote_store.py` docstring）：進行中 change 的全文存在服務端版本化側載（`task-change:<name>`，單一版本號涵蓋整份內容；`task-index` 負責列舉），**服務端為權威**；本機 `openspec/changes/<name>/` 是工作副本，`.openspec.yaml` 另記 `remote_version`／`remote_digest`，本機內容雜湊與 `remote_digest` 不同＝有未推送的修改。寫入一律帶 `expected_version` 做 CAS，過期回 `version_conflict`，pull／edit 不覆寫本機未推送的修改，沒有「本機永遠贏」的路徑。主 spec（`specs/<cap>/spec.md`）仍以 git 為權威，服務端只存唯讀鏡像 `task-spec-mirror:<capability>` 供驗證；DECISIONS.md 的解析結果（只有 D 編號與是否解除）鏡像為 `task-decisions`，給讀不到檔案的 HTTP 判定 `blocked_by`。兩種鏡像都只由 stdio（MCP 殼或 CLI 同步模式）從本機推送；有本機 DECISIONS.md 時一律以本機為準。CLI 的同步模式需要任務目錄 `config.yaml` 標 `remote: true`（`init --remote`、MCP stdio `init` 或 `migrate` 成功時寫入）、沒帶 `--offline`、且 `client.env` 有服務位址與 token；否則照舊純本機。既有 `openspec/` 以 `migrate` 一次推上服務端（可重跑、不覆寫服務端既有內容）。服務端寫入受 `tasks.remote_sync` 開關管制（見「側載小型機器狀態」）。
+
+**archive 兩段式**：段一（服務端可做的部分，MCP 的 HTTP／stdio 與 CLI 同步模式共用 `tasks/remote_ops.py`）以鏡像為主 spec 現值跑同一套驗證與併回試算，通過才寫 note（write-ahead 記在同一份 change 文件，CLI 與 MCP 對同一個 change 不會重複寫），再把鏡像推進為併入後內容、change 狀態改 `pending_apply`（UI 顯示「已封存（待落地）」）。段二 `sync_specs`／`sync-specs`（只限有本機 repo 的 stdio）把併入後全文寫回本機 `specs/`、建 `changes/archive/<date>-<name>/`、服務端狀態與索引改 `archived`；寫前記 `apply.applying`（write-ahead），中斷可續跑。本機主 spec 與封存時的基準不一致（git 被別人改過）回 `spec_base_mismatch`、一個檔案都不寫。落地（`land()`）前**重查**兩件事，不信段一的判定：需授權的 change 要有內容雜湊相符的核准紀錄，`blocked_by` 以**本機** DECISIONS.md 重新判定（服務端的 DECISIONS 鏡像可被持 bearer 者改寫），仍有未解除的 D 回 `blocked`、不寫檔案；本機沒有 DECISIONS.md 時照舊落地並附警告。CLI 同步模式的 `archive` 一次做完兩段。
+
+**授權閘門**（`requires_authorization`，D15「MCP 已裁決」）：MCP 與 CLI 同步模式只認服務端的 UI 核准紀錄 `task-authorization:<name>`，MCP `archive` 沒有任何授權參數；CLI `--authorized-by` 只在 `--offline`／純本機模式有效，同步模式帶了直接拒絕。核准紀錄綁定核准當下的**內容雜湊**（`api.task_format.authorization_digest`：name、proposal／design／tasks、deltas 與 meta，排除 archive 簿記欄位），之後內容再改即失效（`authorization_stale`），archive 自己的簿記寫入不會讓核准失效；`change_version` 只供顯示。
+
+| 端點 | 契約 |
+|---|---|
+| `POST /v1/tasks_authorize` | **只收 UI session**（bearer 一律 403 `ui_session_required`，在 body 驗證之前）。body `{space?: "dev", vault, change}`，其餘欄位 422；`authorized_by`／`principal`（`{kind: "ui_session", name}`）／`authorized_at`／`change_version`／`content_digest` 全由服務端填。change 須存在（404 `not_found`）、可解析（409 `change_invalid`）、`state` 為 active（409 `change_not_active`）、有標記（409 `authorization_not_required`）；同一內容雜湊已核准時不重寫（`created: false`）。`tasks.remote_sync` 關閉時 403 `tasks_remote_sync_disabled`。不提供撤銷：再改一次 change 就失效 |
+| `POST /v1/tasks_authorization_status` | 同樣只收 UI session、唯讀：回服務端 change 的版本／狀態／內容雜湊、授權紀錄與 `approved`（紀錄雜湊等於目前內容雜湊）。UI 任務頁的「核准」區塊據此顯示，雜湊只在服務端算 |
+
+服務端寫入守衛（不論 bearer 或 UI session，因為 bearer 由所有 agent 共用、AI 可以直接打 HTTP）：`blob_put` 對 `task-authorization:` 前綴一律 403 `authorization_write_forbidden`，`/v1/tasks_authorize` 是唯一寫入路徑；`task-change:` 的寫入經 `api.tasks_admin.guard_change_write`——現有內容需授權時不可取消標記（403 `authorization_downgrade_forbidden`），離開 active 或改動 archive 簿記時必須有雜湊相符的核准紀錄（403 `authorization_required`），新建即為非 active 的需授權 change 同樣要求紀錄（唯一例外是 `migrate` 遷入、帶 `note_id`／`legacy_archive` 的舊封存）。守衛讀到的版本即寫入的 CAS 版本，讀寫之間被改過回 `version_conflict`。
+
+任務層 doctor（`python -m lore_vault.tasks doctor`，自帶 registry、不進核心 `/v1/status`）在既有七項與兩項快照檢查之外，對服務端內容另有六項（`--offline`、未設定 `client.env`，或服務端尚無對應內容（例如未遷移、沒有 `task-index`）時 skipped）：`tasks.pending_apply_stale`（`pending_apply` 超過 72 小時未落地，warn）、`tasks.authorization_record_integrity`（需授權且已過閘的 change 必須有雜湊相符的 UI 核准紀錄；已封存文件須有 `note_id`）、`tasks.blocked_archive`（已封存的 change 依本機 DECISIONS 不得仍有未裁決的 `blocked_by`）、`tasks.version_sync_agreement`（本機 `remote_version`／內容與服務端一致）、`tasks.specs_mirror_agreement`（鏡像落後本機 warn；鏡像倒退掉已封存 change 併入的內容 fail）、`tasks.decisions_mirror_agreement`（本機 DECISIONS 解析結果與鏡像一致）。核心 doctor 另有 `sidecar.version_conflict_integrity`（見「側載小型機器狀態」，schema v18）。
+
+給 UI 任務畫面的快照：`propose`／`validate`／`archive`／`list` 結束後（`propose`／`archive` 只在成功時）把推導結果以 `blob_put` 依 vault 分份推送、key `tasks-snapshot`（見「側載小型機器狀態」）：change 歸屬 metadata 記的 vault，沒記的歸預設 vault（`--vault` 或該 repo 的 binding），每個涉及的 vault 各推一份，封存到別的 vault 後原 vault 的快照也會更新，`sync` 只做推送；推送失敗只在 stderr 警告、不改 exit code。快照只含 change 名稱、推導狀態與原因、`blocked_by`（D 編號與是否已裁決）、`depends_on`（是否已封存）、`requires_authorization`、tasks 完成數、`source`、proposal 的 Why 段、spec delta 的 capability／requirement 標題與操作類型、`note_id`、`archived_at`；不含 delta 全文與 tasks.md 逐項文字。內容是確定性的（不含產生時間），同步時間取側載的 `updated`。vault 已有服務端 `task-index`（已遷移／同步模式）時，快照一律以服務端內容計算（`snapshot.push_remote`，CLI 與 MCP 同一套）；MCP 的 propose／edit／validate（有記 base）／archive／sync_specs 成功後也會推送，失敗只記在回應的 `snapshot`。任務層 doctor 另有 `tasks.snapshot_sync`（重算的快照與服務端雜湊不符或從未推送為 warn——不同步只代表 UI 看到舊資料；有 `task-index` 時改比對服務端內容算出的快照）與 `tasks.snapshot_shape`（服務端內容無法解析成快照 schema v1 為 fail，提示重跑 `sync`）。
 
 ## 對外接口
 

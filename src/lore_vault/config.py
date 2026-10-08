@@ -189,6 +189,9 @@ class McpConfig:
     # HTTP 端點（/mcp）的 `download` 以 base64 回傳原始檔的大小上限（位元組）。
     # 內容會進 agent 的上下文，刻意設小；超過時請改用 stdio 殼（寫本機檔）或 UI
     http_download_max_bytes: int = 1024 * 1024
+    # 是否把任務層工具（`mcp/task_plugin.py`）掛上 stdio 殼與 HTTP 端點；
+    # 關閉時只有核心工具。與任務層遠端同步的寫入開關是兩回事
+    tasks_enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -231,6 +234,18 @@ class EpisodesConfig:
 
 
 @dataclass(frozen=True)
+class TasksConfig:
+    """任務層服務端（D15 MCP 已裁決）。"""
+
+    # 任務層遠端同步：服務是否接受 `task-` 開頭的側載寫入（change 全文、主 spec 鏡像，
+    # 設計 TASK_LAYER_MCP §1.2）。預設開啟（任務內容是使用者主動建立的工程資料）；
+    # 自架者要任務層只在本機跑時以 `LORE_VAULT_TASKS_REMOTE_SYNC=false` 關閉。關閉時
+    # `blob_put` 回 403 `tasks_remote_sync_disabled`，讀取不受影響。
+    # 執行期可由 UI 設定頁覆寫（`runtime_settings`）
+    remote_sync: bool = True
+
+
+@dataclass(frozen=True)
 class UiConfig:
     """使用者 UI（A21）：靜態檔位置與本地身分驗證（session cookie、帳號密碼登入）。
 
@@ -270,6 +285,7 @@ class Config:
     documents: DocumentsConfig = field(default_factory=DocumentsConfig)
     ui: UiConfig = field(default_factory=UiConfig)
     episodes: EpisodesConfig = field(default_factory=EpisodesConfig)
+    tasks: TasksConfig = field(default_factory=TasksConfig)
 
 
 _SECTIONS: dict[str, type] = {
@@ -284,6 +300,7 @@ _SECTIONS: dict[str, type] = {
     "documents": DocumentsConfig,
     "ui": UiConfig,
     "episodes": EpisodesConfig,
+    "tasks": TasksConfig,
 }
 
 # 布林設定可接受的寫法（環境變數是字串；TOML 可直接寫 true／false）

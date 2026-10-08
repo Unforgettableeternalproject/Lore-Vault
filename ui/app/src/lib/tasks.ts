@@ -242,3 +242,106 @@ export function filterRows(rows: TaskRow[], filter: TaskFilter): TaskRow[] {
 export function blockerLabel(resolved: boolean | null): string {
   return resolved === true ? '已裁決' : resolved === false ? '未裁決' : '無法判定';
 }
+
+// ── 人類核准（TASK_LAYER_MCP §3.3、MCP-T5）──
+// 核准綁定 change 的「內容雜湊」（服務端算，排除 archive 簿記）：版本號會因 archive 的簿記寫入前進，
+// 不能拿來判斷核准是否過期。狀態一律讀 UI session 限定的 `/v1/tasks_authorization_status`
+// （服務端目前 change 與授權紀錄、`approved`＝紀錄雜湊等於目前內容雜湊），前端不重算雜湊。
+// 核准只能經 `/v1/tasks_authorize`（UI session 限定）。
+
+/** 服務端 change 的核准相關欄位 */
+export interface RemoteChange {
+  version: number;
+  /** `active`／`pending_apply`／`archived`（只有 active 可以核准） */
+  state: string;
+  requiresAuthorization: boolean;
+  contentDigest: string;
+}
+
+export interface AuthorizationRecord {
+  /** 核准當下的服務端版本（只供顯示；是否過期看內容雜湊） */
+  changeVersion: number;
+  contentDigest: string;
+  authorizedBy: string;
+  authorizedAt: string;
+}
+
+/** 核准狀態：服務端沒有 change（無法核准）、尚未核准、已核准目前內容、核准的是舊內容（之後又改過） */
+export type ApprovalState = 'no-change' | 'none' | 'approved' | 'stale';
+
+export interface ApprovalInfo {
+  change: RemoteChange | null;
+  record: AuthorizationRecord | null;
+  /** 服務端判定：紀錄的內容雜湊等於 change 目前的內容雜湊 */
+  approved: boolean;
+  /** 回應格式不正確時的說明（不靜默當成「未核准」） */
+  error: string | null;
+}
+
+function parseStatusChange(raw: unknown): RemoteChange | string | null {
+  if (raw === null) return null;
+  if (!isRecord(raw)) return '服務端的 change 狀態格式不正確';
+  if (typeof raw.version !== 'number' || typeof raw.state !== 'string' || typeof raw.content_digest !== 'string') {
+    return '服務端的 change 狀態缺少版本、狀態或內容雜湊';
+  }
+  return {
+    version: raw.version,
+    state: raw.state,
+    requiresAuthorization: raw.requires_authorization === true,
+    contentDigest: raw.content_digest,
+  };
+}
+
+function parseStatusRecord(raw: unknown): AuthorizationRecord | string | null {
+  if (raw === null || raw === undefined) return null;
+  if (!isRecord(raw)) return '授權紀錄格式不正確';
+  const version = raw.change_version;
+  if (typeof version !== 'number' || !Number.isInteger(version) || version < 1) return '授權紀錄缺少 change_version';
+  if (typeof raw.content_digest !== 'string' || !raw.content_digest) return '授權紀錄缺少 content_digest';
+  if (typeof raw.authorized_by !== 'string' || !raw.authorized_by) return '授權紀錄缺少 authorized_by';
+  if (!isRecord(raw.principal) || raw.principal.kind !== 'ui_session') return '授權紀錄不是 UI 核准';
+  return {
+    changeVersion: version,
+    contentDigest: raw.content_digest,
+    authorizedBy: raw.authorized_by,
+    authorizedAt: typeof raw.authorized_at === 'string' ? raw.authorized_at : '',
+  };
+}
+
+/** `/v1/tasks_authorization_status` 回應 → ApprovalInfo（格式不對的部分當成不存在並附說明） */
+export function parseApprovalStatus(data: unknown): ApprovalInfo {
+  if (!isRecord(data)) return { change: null, record: null, approved: false, error: '核准狀態回應格式不正確' };
+  const change = parseStatusChange(data.change ?? null);
+  const record = parseStatusRecord(data.record);
+  const error = typeof change === 'string' ? change : typeof record === 'string' ? record : null;
+  const okChange = typeof change === 'string' ? null : change;
+  const okRecord = typeof record === 'string' ? null : record;
+  return {
+    change: okChange,
+    record: okRecord,
+    // 服務端判定為準；另核對雜湊，避免回應自相矛盾時誤標已核准
+    approved: data.approved === true && okChange !== null && okRecord !== null && okRecord.contentDigest === okChange.contentDigest,
+    error,
+  };
+}
+
+/** 讀服務端 change 與授權紀錄的核准狀態（一次請求；change 不存在時 `change: null`）。 */
+export async function fetchApproval(api: ApiClient, vault: string, name: string, signal?: AbortSignal): Promise<ApprovalInfo> {
+  const { data } = await api.post<unknown>('/v1/tasks_authorization_status', { space: 'dev', vault, change: name }, signal);
+  return parseApprovalStatus(data);
+}
+
+export function approvalState(info: Pick<ApprovalInfo, 'change' | 'record' | 'approved'>): ApprovalState {
+  if (!info.change) return 'no-change';
+  if (!info.record) return 'none';
+  return info.approved ? 'approved' : 'stale';
+}
+
+/** 服務端 change 可以核准：存在、進行中、標記 requires_authorization */
+export function canApprove(change: RemoteChange | null): boolean {
+  return change !== null && change.state === 'active' && change.requiresAuthorization;
+}
+
+export async function approveChange(api: ApiClient, vault: string, name: string): Promise<void> {
+  await api.post('/v1/tasks_authorize', { space: 'dev', vault, change: name });
+}

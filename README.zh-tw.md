@@ -38,7 +38,7 @@
   另有本機 stdio 殼作為完整客戶端
 - **Web UI**：搜尋、瀏覽與編輯 note，文件、vault 管理，健康檢查與維護
 - **維運**：doctor 對帳檢查、`VACUUM INTO` 驗證式備份、啟動時自動遷移 schema
-- **任務層（選用附加層）**：以 `python -m lore_vault.tasks` 管理 OpenSpec 格式的 change 與 spec delta，
+- **任務層（選用附加層）**：以 `python -m lore_vault.tasks` 或 MCP `tasks` 工具管理 OpenSpec 格式的 change 與 spec delta，
   archive 時把結論寫成 note；核心不 import 它，可整個不用，見
   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#任務層選用附加層)
 
