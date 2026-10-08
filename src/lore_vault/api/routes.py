@@ -27,7 +27,10 @@ FTS／embedding／recall／list／snapshot，不提供 MCP 工具。內容以 `c
 任務層的權威內容，受 `tasks.remote_sync` 開關管制：關閉時 `blob_put` 回 403
 `tasks_remote_sync_disabled`，讀取不受影響。`task-authorization:` 開頭（任務層的人類核准
 紀錄）不論認證方式一律 403 `authorization_write_forbidden`，唯一寫入路徑是 UI session
-限定的 `POST /v1/tasks_authorize`（`api.tasks_admin`）。
+限定的 `POST /v1/tasks_authorize`（`api.tasks_admin`）。`task-change:` 開頭的寫入經
+`tasks_admin.guard_change_write`：需授權的 change 不可取消標記，要離開 active 或寫入
+archive 簿記必須有內容雜湊相符的 UI 核准紀錄（403 `authorization_downgrade_forbidden`／
+`authorization_required`），並以守衛讀到的版本做 CAS。
 
 `POST /v1/document_download` 是唯一回二進位的端點：body 同其他 RPC（`space`、
 `vault`、`id`，選填 `max_bytes`），成功回原始位元組（Content-Type 為上傳時的 mime、
@@ -97,6 +100,8 @@ from .errors import (
 from .principals import principal_of
 from .state import AppState
 from .tasks_admin import AUTHORIZATION_PREFIX as AUTHORIZATION_KEY_PREFIX
+from .tasks_admin import CHANGE_PREFIX as CHANGE_KEY_PREFIX
+from .tasks_admin import guard_change_write
 
 router = APIRouter(prefix="/v1")
 
@@ -711,7 +716,7 @@ def blob_put(request: Request, req: BlobPutRequest) -> dict[str, Any]:
     （`error.current` 為目前內容，key 不存在時為 null）；`task-authorization:`
     開頭一律 403 `authorization_write_forbidden`（只能經 `/v1/tasks_authorize`）；
     `task-` 開頭且 `tasks.remote_sync` 關閉 403 `tasks_remote_sync_disabled`
-    （不寫任何東西）。"""
+    （不寫任何東西）；`task-change:` 開頭先過授權守衛（`guard_change_write`）。"""
     storage_sidecar.validate_key(req.key)
     if req.key.startswith(AUTHORIZATION_KEY_PREFIX):
         # 不論 bearer 或 UI session：授權紀錄只能經 /v1/tasks_authorize 寫入
@@ -729,6 +734,17 @@ def blob_put(request: Request, req: BlobPutRequest) -> dict[str, Any]:
         )
     content = _decode_sidecar(req.content_base64, req.key)
     with _state(request).connection() as conn:
+        expected = req.expected_version
+        if req.key.startswith(CHANGE_KEY_PREFIX):
+            # 不論認證方式：需授權 change 的閘門在服務端強制（bearer 由所有 agent 共用）
+            expected = guard_change_write(
+                conn,
+                req.vault,
+                req.key,
+                content,
+                space=req.space,
+                expected_version=req.expected_version,
+            )
         blob = storage_sidecar.put(
             conn,
             req.vault,
@@ -736,7 +752,7 @@ def blob_put(request: Request, req: BlobPutRequest) -> dict[str, Any]:
             content,
             space=req.space,
             mime=req.mime,
-            expected_version=req.expected_version,
+            expected_version=expected,
         )
     return {"updated": blob.updated, "version": blob.version}
 

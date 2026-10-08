@@ -62,13 +62,18 @@ def put_authorization(
     *,
     kind: str = "ui_session",
     by: str = "艾斯維爾",
+    digest: str | None = None,
 ) -> None:
-    """模擬 MCP-T5 的 UI 核准端點寫入授權紀錄（本卡只讀）。"""
+    """模擬 MCP-T5 的 UI 核准端點寫入授權紀錄（本卡只讀）；`content_digest` 預設為
+    服務端 change 目前內容的雜湊（同 `/v1/tasks_authorize`）。"""
+    if digest is None:
+        digest = rs.authorization_digest(blob(db_path, rs.change_key(name)))
     record = {
         "schema": 1,
         "vault": VAULT,
         "change": name,
         "change_version": change_version,
+        "content_digest": digest,
         "authorized_by": by,
         "authorized_at": "2026-10-08T12:00:00Z",
         "principal": {"kind": kind, "name": "aeswir"},
@@ -471,6 +476,9 @@ async def test_ui_authorization_record_allows_archive(db, spec_project):
     doc = blob(db, "task-change:guarded")
     assert doc["meta"]["authorized_by"] == "艾斯維爾"
     assert doc["meta"]["authorization"]["change_version"] == version
+    assert doc["meta"]["authorization"]["content_digest"] == rs.authorization_digest(
+        doc
+    )
     assert all("授權：艾斯維爾" in n["body"] for n in notes(db))
 
 

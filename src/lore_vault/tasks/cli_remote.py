@@ -13,8 +13,8 @@
 - `archive`：服務端兩段式一次做完——段一（寫 note、推進鏡像、`pending_apply`）與
   MCP 共用 `remote_ops`，note 的 write-ahead 記錄存在同一份版本化 change 文件，
   CLI 與 MCP 對同一個 change 不會重複寫 note；段二（`sync_specs`）接著在本機落地。
-  `--authorized-by` 維持本機 CLI 的慣例性閘門（已裁決），meta `authorization`
-  記 `source: "cli"`
+  `requires_authorization` 的 change 與 MCP 一樣只認 UI 核准紀錄（內容雜湊相符）；
+  `--authorized-by` 只在 `--offline`／純本機模式有效，同步模式帶了它直接拒絕
 - 服務不可達：propose／list／validate 退回本機模式並在 stderr 警告；
   archive／push／pull／sync-specs 失敗（exit 1）
 """
@@ -56,7 +56,15 @@ CONFLICT_HINT = (
 )
 
 PENDING_REASON = "執行 sync-specs 落地本機 specs/"
-AUTH_REASON = "需艾斯維爾授權（archive 須帶 --authorized-by，或在 UI 核准）"
+AUTH_REASON = "需艾斯維爾授權（請在 UI 任務頁核准）"
+AUTHORIZED_BY_REJECTED = (
+    "archive 中止：服務端同步模式不接受 --authorized-by（需授權的 change 一律要在"
+    " UI 任務頁核准）"
+)
+AUTHORIZED_BY_HINT = (
+    "    請使用者在 UI 任務頁核准後，不帶 --authorized-by 重跑；"
+    "只在本機封存（不進服務端）時才用 --offline --authorized-by"
+)
 
 
 class Offline(Exception):
@@ -372,18 +380,9 @@ def archive(
     """服務端兩段式：對齊 → 推鏡像 → 段一（note、鏡像推進、pending_apply）→ 段二落地。
     已是 pending_apply 的 change 直接落地（續跑）。"""
     name = args.name
-    authorized_by = (args.authorized_by or "").strip() or None
-    local = ws.find_active(name)
-    # 授權閘門：本機工作副本看得到時，在任何網路呼叫之前
-    if (
-        local is not None
-        and local.meta.get("requires_authorization")
-        and not authorized_by
-    ):
-        env.print(
-            f"archive 中止：{name} 標記 requires_authorization: true，"
-            "須帶 --authorized-by <名字>"
-        )
+    # 同步模式只認 UI 核准紀錄：帶 --authorized-by 在任何網路呼叫之前拒絕
+    if (getattr(args, "authorized_by", None) or "").strip():
+        env.print(AUTHORIZED_BY_REJECTED, AUTHORIZED_BY_HINT)
         return EXIT_FAIL
     clock = (lambda: now) if now is not None else (lambda: _dt.datetime.now(_dt.UTC))
     lines: list[str] = []
@@ -396,11 +395,11 @@ def archive(
             lines.append(note)
         phase1: dict[str, Any] | None = None
         if change.state == rs.STATE_ACTIVE:
-            if change.meta.get("requires_authorization") and not authorized_by:
-                raise rs.StoreError(
-                    "authorization_required",
-                    f"{name} 標記 requires_authorization: true，"
-                    "須帶 --authorized-by <名字>",
+            record = await remote_ops.check_authorization(store, change)
+            if record is not None:
+                lines.append(
+                    f"UI 核准：{record.authorized_by}（{record.authorized_at}，"
+                    f"v{record.change_version}）"
                 )
             changes, _ = await store.list_changes()
             await remote_ops.push_mirrors(store, ws, changes)
@@ -408,23 +407,18 @@ def archive(
                 store,
                 change,
                 local=ws,
-                authorized_by=authorized_by,
-                authorized_version=change.version if authorized_by else None,
+                authorized_by=record.authorized_by if record else None,
+                authorized_version=record.change_version if record else None,
                 allow_incomplete=args.allow_incomplete,
                 reason=None,
-            )
-            authorization = (
-                remote_ops.cli_authorization(authorized_by, change.version, clock())
-                if authorized_by
-                else None
             )
             phase1 = await remote_ops.archive_execute(
                 store,
                 change,
                 merged,
                 mirrors,
-                authorized_by=authorized_by,
-                authorization=authorization,
+                authorized_by=record.authorized_by if record else None,
+                authorization=record.to_meta() if record else None,
                 reason=None,
                 author=args.author,
                 now=clock(),

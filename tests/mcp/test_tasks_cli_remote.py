@@ -6,7 +6,8 @@ MCP 的部分以 HTTP 殼另外接同一個資料庫，驗證兩條路徑看到�
 - 本機修改以 `remote_version` 做 CAS 推送；衝突時拒絕並提示 pull，不覆寫服務端
 - validate 先對齊工作副本（拉服務端修改），record_base 改到的 base 推回服務端
 - archive 一次做完兩段；MCP 已做完段一的 change 只落地、不重寫 note
-- `--authorized-by` 維持本機閘門（網路呼叫之前），meta 記 `source: cli`
+- 需授權的 change 只認 UI 核准紀錄（內容雜湊相符）；同步模式帶 `--authorized-by`
+  在網路呼叫之前拒絕（只在 `--offline` 有效）；段二落地前再查一次紀錄
 - `--offline` 是純本機模式；本機模式的 archive 拒絕已同步到服務端的 change
 - 服務不可達：propose／validate 退回本機並警告
 - 快照一律由服務端內容計算
@@ -25,6 +26,7 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+from lore_vault.api import routes as api_routes
 from lore_vault.hooks.client_env import load_client_settings
 from lore_vault.storage import sidecar as storage_sidecar
 from lore_vault.storage.db import connect
@@ -35,9 +37,10 @@ from lore_vault.tasks.vault_client import (
     ServiceUnavailable,
     VaultClient,
 )
+from lore_vault.tasks.workspace import load_workspace, trial_merge
 
 from .conftest import TOKEN, add_vault
-from .test_tasks_archive_mcp import DONE_TASKS, _archive, notes
+from .test_tasks_archive_mcp import DONE_TASKS, _archive, notes, put_authorization
 from .test_tasks_mcp import (
     DECISIONS,
     DELTA_ADDED,
@@ -303,21 +306,86 @@ def test_cli_lands_mcp_phase_one_without_rewriting_notes(remote: Cli, db_path, p
     assert "~/.demo2/" in remote.spec()
 
 
-def test_cli_authorized_by_gate_and_cli_source(remote: Cli, db_path):
+def test_cli_sync_mode_requires_ui_authorization(remote: Cli, db_path):
     remote.ok("propose", "c1", "--skip-specs", "--requires-authorization")
     remote.write("changes/c1/tasks.md", DONE_TASKS)
     remote.ok("push", "c1")
+    # 同步模式帶 --authorized-by：在任何網路呼叫之前拒絕，提示到 UI 核准
     remote.client.paths.clear()
+    code, out = remote.run("archive", "c1", "--authorized-by", "艾斯維爾")
+    assert code == 1 and "--authorized-by" in out and "UI" in out
+    assert "--offline" in out
+    assert remote.client.paths == []
+    # 沒有 UI 核准紀錄：authorization_required，不寫任何 note
     code, out = remote.run("archive", "c1")
-    assert code == 1 and "--authorized-by" in out
-    assert remote.client.paths == []  # 閘門在任何網路呼叫之前
-    out = remote.ok("archive", "c1", "--authorized-by", "艾斯維爾")
+    assert code == 1 and "UI 核准" in out
+    assert notes(db_path) == []
+    assert blob(db_path, "task-change:c1")["state"] == "active"
+    # UI 核准目前內容後才能封存；meta 抄下的是 UI 紀錄（沒有 source: cli）
+    put_authorization(db_path, "c1", blob(db_path, "task-change:c1")["_version"])
+    out = remote.ok("archive", "c1")
+    assert "UI 核准：艾斯維爾" in out
     doc = blob(db_path, "task-change:c1")
+    assert doc["state"] == "archived"
     auth = doc["meta"]["authorization"]
-    assert auth["source"] == "cli" and auth["authorized_by"] == "艾斯維爾"
-    assert auth["change_version"] >= 1 and auth["authorized_at"]
+    assert "source" not in auth and auth["authorized_by"] == "艾斯維爾"
+    assert auth["content_digest"] == rs.authorization_digest(doc)
     assert doc["meta"]["authorized_by"] == "艾斯維爾"
     assert all("授權：艾斯維爾" in n["body"] for n in notes(db_path))
+
+
+def _forge_pending_apply(db_path: Path, name: str, merged: str) -> None:
+    """繞過 `/v1/blob_put` 守衛（直接寫儲存層）把需授權 change 改成 pending_apply，
+    模擬服務端守衛失效時的防禦縱深：段二落地必須自己重查授權紀錄。"""
+    doc = {
+        k: v for k, v in blob(db_path, rs.change_key(name)).items() if k != "_version"
+    }
+    doc["state"] = "pending_apply"
+    doc["meta"]["note_id"] = "01FAKE"
+    doc["apply"] = {
+        "archived_at": "2026-10-08T12:00:00Z",
+        "merged_specs": {"demo": merged},
+        "mirror_versions": {},
+    }
+    conn = connect(db_path)
+    try:
+        storage_sidecar.put(
+            conn,
+            VAULT,
+            rs.change_key(name),
+            rs.encode(doc),
+            space="dev",
+            mime="application/json",
+        )
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("approved", [False, True])
+def test_sync_specs_rechecks_authorization_before_landing(
+    remote: Cli, db_path, approved, monkeypatch
+):
+    _ready(remote, "c1", DELTA_ADDED, "--requires-authorization")
+    # 假設服務端守衛失效（段二自己的寫入也不擋）：只剩落地前的授權檢查
+    monkeypatch.setattr(
+        api_routes,
+        "guard_change_write",
+        lambda *a, expected_version, **kw: expected_version,
+    )
+    before = remote.spec()
+    if approved:
+        # 核准的是另一份內容（之後被改過）：雜湊不符，同樣不落地
+        put_authorization(db_path, "c1", 1, digest="0" * 64)
+    # 偽造的 merged_specs 與 delta 真正併入的結果相同：
+    # 拿掉落地前的授權檢查就會寫進主 spec
+    ws = load_workspace(remote.root, environ={})
+    merged, errors = trial_merge(ws.find_active("c1"), ws)
+    assert not errors and merged["demo"] != before
+    _forge_pending_apply(db_path, "c1", merged["demo"])
+    code, out = remote.run("sync-specs")
+    assert code == 1 and "核准" in out, out
+    assert remote.spec() == before
+    assert blob(db_path, "task-change:c1")["state"] == "pending_apply"
 
 
 def test_offline_archive_refuses_server_tracked_change(remote: Cli, db_path):

@@ -62,10 +62,9 @@
   doctor 仍要讀 note_id／archived_at／proposal）
 - 遷移（MCP-T7 `tasks migrate`）的舊封存也存成 `state: "archived"` 的文件：
   `apply` 為 null，meta 帶本機封存的 note_id／archived_at 等，proposal 保留 why
-- 經 CLI `--authorized-by` 封存的 change，meta `authorization` 為
-  `{"authorized_by", "authorized_at", "change_version", "source": "cli"}`
-  （艾斯維爾在終端操作的已裁決路徑，沒有 UI 授權紀錄）；UI 核准抄進的版本沒有
-  `source` 欄位
+- 服務端同步模式一律以 UI 核准紀錄過閘（MCP 與 CLI 相同）；CLI `--authorized-by`
+  只在 `--offline`／純本機模式有效。舊版 CLI 寫過的 meta `authorization`
+  `{"source": "cli", ...}` 不再被 doctor 接受為服務端文件的授權依據
 
 `task-decisions`：DECISIONS.md 解析結果的鏡像（HTTP 讀不到 DECISIONS.md）::
 
@@ -80,16 +79,20 @@
 `task-authorization:<name>`：`requires_authorization` 的人類核准紀錄（§3.3）::
 
     {"schema": 1, "vault": 正式 key, "change": name, "change_version": int,
+     "content_digest": sha256 hex,
      "authorized_by": str, "authorized_at": "YYYY-MM-DDTHH:MM:SSZ",
      "principal": {"kind": "ui_session", "name": str}}
 
-- **本模組只讀不寫**（`put_blob` 拒絕此前綴）；寫入端點與 UI 按鈕是 MCP-T5：
-  只收 UI session（cookie＋`X-Lore-Vault-UI`），`principal` 由服務端依認證填，
-  且 `/v1/blob_put` 必須拒絕非 UI session 寫入此前綴（在那之前持 bearer 者可偽造）
-- `change_version`：核准當下的 change 版本；之後再 edit 即失效
-  （`authorization_stale`）。
-  archive 開始時把紀錄抄進 meta `authorization`，續跑以它比對、不因自身寫入的版本遞增
-  而失效
+- **本模組只讀不寫**（`put_blob` 拒絕此前綴）；寫入端點是 `POST /v1/tasks_authorize`
+  （只收 UI session，`principal` 由服務端依認證填），`/v1/blob_put` 對此前綴一律 403
+- `content_digest`：核准當下 change 的內容雜湊（`authorization_digest`，定義在核心
+  `lore_vault.api.task_format`：name、proposal／design／tasks、deltas 與 meta 去掉
+  archive 簿記欄位 `BOOKKEEPING_META_KEYS`）。是否失效（`authorization_stale`）一律
+  以它比對，archive 段一／段二的簿記寫入不會讓核准失效；`change_version` 只供顯示。
+  缺 `content_digest` 的舊紀錄視為無效（需重新核准）
+- 服務端守衛（`api.tasks_admin.guard_change_write`）：需授權 change 不可取消標記；
+  離開 active 或寫入 archive 簿記時必須有雜湊相符的紀錄。段二落地（`land`）前再比對
+  一次。archive 開始時把紀錄抄進 meta `authorization`（含 `content_digest`）供稽核
 
 ## 本機工作副本（stdio）
 
@@ -111,6 +114,8 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from lore_vault.api import task_format as tf
+
 from . import specs
 from .workspace import (
     META_FILE,
@@ -122,30 +127,35 @@ from .workspace import (
     write_yaml,
 )
 
-SCHEMA = 1
+# 與服務端守衛共用的定義（核心 `api.task_format`，只有一份）
+SCHEMA = tf.SCHEMA
 MIME = "application/json"
-CHANGE_PREFIX = "task-change:"
+CHANGE_PREFIX = tf.CHANGE_PREFIX
 INDEX_KEY = "task-index"
 MIRROR_PREFIX = "task-spec-mirror:"
-AUTHORIZATION_PREFIX = "task-authorization:"
+AUTHORIZATION_PREFIX = tf.AUTHORIZATION_PREFIX
 DECISIONS_KEY = "task-decisions"
 
-STATE_ACTIVE = "active"
-STATE_PENDING_APPLY = "pending_apply"
-STATE_ARCHIVED = "archived"
-STATES = (STATE_ACTIVE, STATE_PENDING_APPLY, STATE_ARCHIVED)
+STATE_ACTIVE = tf.STATE_ACTIVE
+STATE_PENDING_APPLY = tf.STATE_PENDING_APPLY
+STATE_ARCHIVED = tf.STATE_ARCHIVED
+STATES = tf.STATES
 
 # 本機 `.openspec.yaml` 的同步欄位（不進服務端文件）
 REMOTE_VERSION_KEY = "remote_version"
 REMOTE_DIGEST_KEY = "remote_digest"
-SYNC_FIELDS = (REMOTE_VERSION_KEY, REMOTE_DIGEST_KEY)
+SYNC_FIELDS = tf.SYNC_META_KEYS
+# archive 簿記欄位（不算核准綁定的內容）與核准內容雜湊
+BOOKKEEPING_META_KEYS = tf.BOOKKEEPING_META_KEYS
+authorization_digest = tf.authorization_digest
 
 MIRROR_SOURCE_STDIO = "stdio"
 # archive 段一推進鏡像的 write-ahead（語意同本機的 spec_applying／spec_applied_caps）
 MIRROR_APPLYING_KEY = "mirror_applying"
 MIRROR_APPLIED_KEY = "mirror_applied_caps"
-PRINCIPAL_UI = "ui_session"
-# CLI `--authorized-by` 記進 meta `authorization` 的來源
+PRINCIPAL_UI = tf.PRINCIPAL_UI
+# 舊版 CLI `--authorized-by` 記進 meta `authorization` 的來源
+# （doctor 不接受為服務端文件的授權依據）
 AUTHORIZATION_SOURCE_CLI = "cli"
 # 段二落地的 write-ahead（`apply` 內）
 APPLY_APPLYING_KEY = "applying"
@@ -222,9 +232,7 @@ class VersionConflict(StoreError):
 
 
 def encode(data: Mapping[str, Any]) -> bytes:
-    return json.dumps(
-        data, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
+    return tf.encode(data)
 
 
 def _decode(content: bytes, key: str) -> dict[str, Any]:
@@ -462,6 +470,7 @@ class AuthorizationRecord:
     vault: str
     change: str
     change_version: int
+    content_digest: str
     authorized_by: str
     authorized_at: str
     principal_kind: str
@@ -473,7 +482,12 @@ class AuthorizationRecord:
             "authorized_by": self.authorized_by,
             "authorized_at": self.authorized_at,
             "change_version": self.change_version,
+            "content_digest": self.content_digest,
         }
+
+    def matches(self, change: RemoteChange) -> bool:
+        """紀錄核准的內容是否就是 change 目前的內容（簿記欄位不算）。"""
+        return self.content_digest == authorization_digest(change.to_doc())
 
 
 def parse_authorization(data: Mapping[str, Any], name: str) -> AuthorizationRecord:
@@ -488,6 +502,8 @@ def parse_authorization(data: Mapping[str, Any], name: str) -> AuthorizationReco
         problems.append("缺少 authorized_by")
     if isinstance(version, bool) or not isinstance(version, int) or version < 1:
         problems.append("change_version 必須是正整數")
+    if not tf.is_digest(data.get("content_digest")):
+        problems.append("缺少 content_digest（舊格式紀錄，請在 UI 重新核准）")
     if not isinstance(data.get("authorized_at"), str):
         problems.append("缺少 authorized_at")
     if not (isinstance(principal, dict) and principal.get("kind") == PRINCIPAL_UI):
@@ -501,6 +517,7 @@ def parse_authorization(data: Mapping[str, Any], name: str) -> AuthorizationReco
         vault=str(data.get("vault") or ""),
         change=name,
         change_version=int(version),  # type: ignore[arg-type]
+        content_digest=str(data["content_digest"]),
         authorized_by=by.strip(),
         authorized_at=str(data["authorized_at"]),
         principal_kind=PRINCIPAL_UI,

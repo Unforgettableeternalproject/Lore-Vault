@@ -547,56 +547,93 @@ def pending_apply_stale(ctx: DoctorContext) -> CheckResult:
     return _remote_check(ctx, run)
 
 
+def _local_archive_match(change: rs.RemoteChange, locals_: list[Change]) -> bool:
+    """服務端 archived 文件對得上本機封存目錄（`tasks migrate` 遷入的本機舊封存）：
+    同名且 note_id 相同；都沒有 note_id 時兩邊都要標 `legacy_archive`。"""
+    note_id = change.meta.get("note_id")
+    for local in locals_:
+        if note_id:
+            if local.meta.get("note_id") == note_id:
+                return True
+        elif local.meta.get(LEGACY_KEY) and not local.meta.get("note_id"):
+            return True
+    return False
+
+
 def authorization_record_integrity(ctx: DoctorContext) -> CheckResult:
-    """服務端每個 `requires_authorization: true` 且已寫 note 的 change，都要有
-    UI session 寫入的授權紀錄（§3.3）。只看服務端文件：本機 `archive/` 的舊封存
-    走 CLI `--authorized-by`，沒有 UI 紀錄是正常的。"""
+    """服務端 change 文件的授權與封存簿記（§3.3）。
+
+    - `requires_authorization: true` 且已離開 active（或 active 但已寫 note）的
+      change：必須有 UI session 寫入的授權紀錄，且 `content_digest` 等於目前內容雜湊。
+      唯一例外是 `archived` 且對得上本機封存目錄（`_local_archive_match`：
+      本機封存、經 `tasks migrate` 遷入）；服務端文件 meta 的 `authorization.source:
+      "cli"` 不算授權依據（可被持 bearer 者偽造）
+    - `pending_apply`／`archived` 卻沒有 note_id：段一一定先寫 note_id 才改狀態，
+      沒有就是文件被改寫；`archived` 對得上本機封存（含 `legacy_archive`）才放行"""
 
     async def run(ws: Workspace, store: rs.RemoteStore) -> CheckResult:
         remote = await _load_remote(store)
+        local_archives: dict[str, list[Change]] = {}
+        for local in ws.archived():
+            local_archives.setdefault(local.name, []).append(local)
         fails: list[str] = []
         warns: list[str] = []
-        cli: list[str] = []
+        accepted: list[str] = []
         checked = 0
         for name, change in remote.docs.items():
             meta = change.meta
+            state = change.state
+            locals_ = local_archives.get(name, [])
+            from_local = state == rs.STATE_ARCHIVED and _local_archive_match(
+                change, locals_
+            )
+            if state != rs.STATE_ACTIVE and not meta.get("note_id") and not from_local:
+                fails.append(
+                    f"{name}：狀態 {state} 卻沒有 note_id，也對不上本機封存目錄"
+                    "（段一未完成就被改了狀態，或文件被直接改寫）"
+                )
             if not meta.get("requires_authorization"):
                 continue
-            if not (meta.get("notes") or meta.get("note_id")):
+            passed_gate = bool(meta.get("notes") or meta.get("note_id"))
+            if state == rs.STATE_ACTIVE and not passed_gate:
                 continue  # 還沒過閘門（沒寫 note），授權與否由 archive 擋
             checked += 1
-            copied = meta.get("authorization")
-            if (
-                isinstance(copied, dict)
-                and copied.get("source") == rs.AUTHORIZATION_SOURCE_CLI
-            ):
-                # CLI `--authorized-by`：艾斯維爾在終端操作的已裁決路徑，沒有 UI 紀錄
-                by = copied.get("authorized_by")
-                if isinstance(by, str) and by.strip():
-                    cli.append(f"{name}：來源 cli（{by.strip()}）")
-                else:
-                    fails.append(f"{name}：authorization 來源 cli 但缺少 authorized_by")
-                continue
+            problem: str | None = None
+            record: rs.AuthorizationRecord | None = None
             try:
                 record = await store.get_authorization(name)
             except rs.StoreError as exc:
-                fails.append(f"{name}：{exc.message}")
-                continue
-            if record is None:
-                fails.append(
-                    f"{name}：已寫 note 但服務端沒有 UI 核准紀錄 "
-                    f"{rs.authorization_key(name)}（授權閘門可能被繞過）"
+                problem = exc.message
+            if problem is None and record is None:
+                problem = f"服務端沒有 UI 核准紀錄 {rs.authorization_key(name)}"
+            elif record is not None and record.vault and record.vault != store.vault:
+                problem = f"授權紀錄的 vault 是 {record.vault}，不是 {store.vault}"
+            elif record is not None and not record.matches(change):
+                problem = (
+                    f"授權紀錄核准的內容（v{record.change_version}）與目前內容"
+                    f"（v{change.version}）的雜湊不同"
                 )
+            copied = meta.get("authorization")
+            if problem is not None:
+                if from_local:
+                    note = meta.get("note_id")
+                    accepted.append(f"{name}：本機封存遷入（note {note}）")
+                    continue
+                if (
+                    isinstance(copied, dict)
+                    and copied.get("source") == rs.AUTHORIZATION_SOURCE_CLI
+                ):
+                    problem += (
+                        "；meta authorization 標 source: cli，"
+                        "但服務端文件不接受 cli 來源（沒有對應的本機封存）"
+                    )
+                fails.append(f"{name}：{problem}（授權閘門可能被繞過）")
                 continue
-            if record.vault and record.vault != store.vault:
-                fails.append(
-                    f"{name}：授權紀錄的 vault 是 {record.vault}，不是 {store.vault}"
-                )
-                continue
+            assert record is not None
             if not isinstance(copied, dict):
                 warns.append(f"{name}：change meta 沒有 archive 時抄下的 authorization")
             elif (
-                copied.get("change_version") != record.change_version
+                copied.get("content_digest") != record.content_digest
                 or copied.get("authorized_by") != record.authorized_by
             ):
                 warns.append(
@@ -605,21 +642,23 @@ def authorization_record_integrity(ctx: DoctorContext) -> CheckResult:
                     f"（v{copied.get('change_version')}，"
                     f"{copied.get('authorized_by')}）不同"
                 )
-        counts = {"checked": checked}
+        counts = {"checked": checked, "local_archive": len(accepted)}
         if fails:
             return CheckResult.fail(
-                "有需授權的 change 缺少有效的 UI 核准紀錄",
-                details=fails + warns + remote.bad + cli,
+                "有需授權的 change 缺少有效的 UI 核准紀錄，或封存簿記不完整",
+                details=fails + warns + remote.bad + accepted,
                 counts=counts,
             )
         if warns or remote.bad:
             return CheckResult.warn(
                 "授權紀錄與 change 記錄不一致" if warns else "有 change 文件無法讀取",
-                details=warns + remote.bad + cli,
+                details=warns + remote.bad + accepted,
                 counts=counts,
             )
         return CheckResult.ok(
-            "需授權的 change 都有核准紀錄（UI 或 CLI）", details=cli, counts=counts
+            "需授權的 change 都有相符的 UI 核准紀錄（或為本機封存遷入）",
+            details=accepted,
+            counts=counts,
         )
 
     return _remote_check(ctx, run)
@@ -907,7 +946,8 @@ def default_registry() -> Registry:
         (
             "tasks.authorization_record_integrity",
             authorization_record_integrity,
-            "需授權且已寫 note 的 change 在服務端有 UI session 的核准紀錄",
+            "需授權且已過閘的 change 有內容雜湊相符的 UI 核准紀錄；"
+            "已封存文件都有 note_id",
         ),
         (
             "tasks.version_sync_agreement",

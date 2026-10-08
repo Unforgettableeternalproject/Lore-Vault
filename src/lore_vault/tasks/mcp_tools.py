@@ -752,35 +752,9 @@ class TaskOps:
         self, store: rs.RemoteStore, change: rs.RemoteChange
     ) -> rs.AuthorizationRecord | None:
         """§3.3 授權閘門：`requires_authorization` 的 change 必須有 UI 核准紀錄，
-        且核准的是目前版本（archive 已開始時以 meta 記下的核准版本比對）。
+        且核准的是目前內容（內容雜湊比對，archive 簿記不算，續跑不會失效）。
         只讀授權紀錄，不做其他服務呼叫。"""
-        if not change.meta.get("requires_authorization"):
-            return None
-        try:
-            record = await store.get_authorization(change.name)
-        except rs.StoreError as exc:
-            raise rs.StoreError("authorization_required", exc.message) from None
-        if record is None:
-            raise rs.StoreError(
-                "authorization_required",
-                f"{change.name} 標記 requires_authorization: true，"
-                "尚未有使用者在 UI 核准的紀錄",
-            )
-        started = change.meta.get("authorization")
-        if (
-            isinstance(started, dict)
-            and started.get("change_version") == record.change_version
-        ):
-            return record
-        if record.change_version != change.version:
-            raise rs.StoreError(
-                "authorization_stale",
-                f"{change.name} 的核准針對 v{record.change_version}，"
-                f"目前已是 v{change.version}（核准後內容又被修改）",
-                authorized_version=record.change_version,
-                current_version=change.version,
-            )
-        return record
+        return await remote_ops.check_authorization(store, change)
 
     async def archive(
         self,

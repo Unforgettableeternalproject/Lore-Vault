@@ -185,12 +185,14 @@ def _auth_doc(**meta) -> dict:
     return doc
 
 
-def _record(**changes) -> dict:
+def _record(doc: dict | None = None, **changes) -> dict:
+    """UI 核准紀錄；`content_digest` 預設為 `doc`（預設 `_auth_doc()`）的內容雜湊。"""
     return {
         "schema": 1,
         "vault": VAULT,
         "change": "auth1",
         "change_version": 1,
+        "content_digest": rs.authorization_digest(doc or _auth_doc()),
         "authorized_by": "艾斯維爾",
         "authorized_at": "2026-10-08T11:00:00Z",
         "principal": {"kind": "ui_session", "name": "bernie"},
@@ -202,7 +204,18 @@ COPIED = {
     "authorized_by": "艾斯維爾",
     "authorized_at": "2026-10-08T11:00:00Z",
     "change_version": 1,
+    "content_digest": rs.authorization_digest(_auth_doc()),
 }
+
+
+def _local_archive(tasks_dir: TasksDir, name: str, **meta) -> None:
+    """本機封存目錄（`tasks migrate` 遷入服務端的來源）。"""
+    path = tasks_dir.root / "changes" / "archive" / f"2026-10-01-{name}"
+    path.mkdir(parents=True)
+    (path / ".openspec.yaml").write_text(
+        json.dumps({"schema": "spec-driven", **meta}, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
 
 def test_authorization_record_integrity(tasks_dir: TasksDir, vv):
@@ -216,7 +229,7 @@ def test_authorization_record_integrity(tasks_dir: TasksDir, vv):
     result = check(_ctx(tasks_dir, vv))
     assert result.status == "fail"
     assert any("task-authorization:auth1" in d for d in result.details)
-    # 有 UI session 的紀錄 → 通過
+    # 有 UI session 的紀錄、雜湊相符 → 通過（archive 簿記不影響雜湊）
     vv.put_json(rs.authorization_key("auth1"), _record())
     assert check(_ctx(tasks_dir, vv)).status == "pass"
     # principal 不是 UI session（bearer／MCP 自己寫的）
@@ -225,6 +238,27 @@ def test_authorization_record_integrity(tasks_dir: TasksDir, vv):
     # 紀錄屬於別的 vault
     vv.put_json(rs.authorization_key("auth1"), _record(vault="folder/other"))
     assert check(_ctx(tasks_dir, vv)).status == "fail"
+    # 缺 content_digest 的舊紀錄 → 無效
+    old = _record()
+    del old["content_digest"]
+    vv.put_json(rs.authorization_key("auth1"), old)
+    assert check(_ctx(tasks_dir, vv)).status == "fail"
+
+
+def test_authorization_record_digest_must_match_content(tasks_dir: TasksDir, vv):
+    """核准後內容又被改（直接寫服務端）→ 雜湊不符 fail。"""
+    _with_change(tasks_dir, vv)
+    doc = _auth_doc(note_id="n9", authorization=COPIED)
+    doc["state"] = rs.STATE_PENDING_APPLY
+    vv.put_json(rs.authorization_key("auth1"), _record())
+    _place(vv, doc)
+    check = checks.authorization_record_integrity
+    assert check(_ctx(tasks_dir, vv)).status == "pass"
+    doc["deltas"] = {"demo": delta(added=[ADD_EXPORT])}
+    _place(vv, doc)
+    result = check(_ctx(tasks_dir, vv))
+    assert result.status == "fail"
+    assert any("雜湊不同" in d for d in result.details)
 
 
 def test_authorization_record_mismatch_with_copy_warns(tasks_dir: TasksDir, vv):
@@ -232,7 +266,8 @@ def test_authorization_record_mismatch_with_copy_warns(tasks_dir: TasksDir, vv):
     _place(
         vv,
         _auth_doc(
-            notes={"summary": "n1"}, authorization={**COPIED, "change_version": 3}
+            notes={"summary": "n1"},
+            authorization={**COPIED, "content_digest": "0" * 64},
         ),
     )
     vv.put_json(rs.authorization_key("auth1"), _record())
@@ -248,6 +283,37 @@ def test_authorization_applies_to_landed_docs(tasks_dir: TasksDir, vv):
     _place(vv, doc)
     result = checks.authorization_record_integrity(_ctx(tasks_dir, vv))
     assert result.status == "fail"
+
+
+@pytest.mark.parametrize("state", [rs.STATE_PENDING_APPLY, rs.STATE_ARCHIVED])
+def test_authorization_without_note_is_not_skipped(tasks_dir: TasksDir, vv, state):
+    """直接寫服務端把需授權 change 改成 pending_apply／archived、不寫 note：
+    舊版以「沒有 note」跳過，現在照樣要求紀錄，且缺 note_id 本身也 fail。"""
+    _with_change(tasks_dir, vv)
+    doc = _auth_doc()
+    doc["state"] = state
+    doc["apply"] = {"archived_at": "2026-10-08T12:00:00Z", "merged_specs": {}}
+    _place(vv, doc)
+    result = checks.authorization_record_integrity(_ctx(tasks_dir, vv))
+    assert result.status == "fail"
+    assert any("task-authorization:auth1" in d for d in result.details)
+    assert any("沒有 note_id" in d for d in result.details)
+
+
+def test_archived_without_note_id_needs_local_archive(tasks_dir: TasksDir, vv):
+    """不需授權的 change 也一樣：archived 卻沒有 note_id，只有對得上本機
+    legacy_archive 封存才放行；pending_apply 沒有 note_id 一律 fail。"""
+    _with_change(tasks_dir, vv)
+    check = checks.authorization_record_integrity
+    doc = rs.new_doc("free1", {"vault": VAULT}, "# P\n", "- [x] t\n")
+    doc["state"] = rs.STATE_ARCHIVED
+    _place(vv, doc)
+    assert check(_ctx(tasks_dir, vv)).status == "fail"
+    _local_archive(tasks_dir, "free1", legacy_archive="OpenSpec 試用")
+    assert check(_ctx(tasks_dir, vv)).status == "pass"
+    doc["state"] = rs.STATE_PENDING_APPLY
+    _place(vv, doc)
+    assert check(_ctx(tasks_dir, vv)).status == "fail"
 
 
 # ── tasks.version_sync_agreement ──
@@ -518,21 +584,37 @@ def test_snapshot_sync_local_algorithm_without_index(tasks_dir: TasksDir, vv):
 # ── authorization：CLI 來源 ──
 
 
-def test_authorization_cli_source_passes_without_ui_record(tasks_dir: TasksDir, vv):
-    """CLI `--authorized-by`（meta.authorization.source = cli）是已裁決的合法路徑。"""
+def test_authorization_cli_source_only_for_local_archive(tasks_dir: TasksDir, vv):
+    """meta `authorization.source: cli` 不再讓服務端文件過關（持 bearer 者可偽造）；
+    只有對得上本機封存目錄（本機封存後經 migrate 遷入）的 archived 文件放行。"""
     _with_change(tasks_dir, vv)
+    check = checks.authorization_record_integrity
     cli_auth = {**COPIED, "source": rs.AUTHORIZATION_SOURCE_CLI}
-    doc = _auth_doc(note_id="n9", authorization=cli_auth)
+    # 偽造：直接寫服務端的 pending_apply／archived，自稱 cli 來源
+    for state in (rs.STATE_PENDING_APPLY, rs.STATE_ARCHIVED):
+        doc = _auth_doc(note_id="n9", authorization=cli_auth)
+        doc["state"] = state
+        _place(vv, doc)
+        result = check(_ctx(tasks_dir, vv))
+        assert result.status == "fail", state
+        assert any("source: cli" in d for d in result.details)
+    # 本機封存目錄的 note_id 不同 → 仍 fail
+    _local_archive(tasks_dir, "auth1", note_id="other", authorized_by="艾斯維爾")
+    assert check(_ctx(tasks_dir, vv)).status == "fail"
+
+
+def test_authorization_accepts_migrated_local_archive(tasks_dir: TasksDir, vv):
+    _with_change(tasks_dir, vv)
+    check = checks.authorization_record_integrity
+    doc = _auth_doc(note_id="n9", authorized_by="艾斯維爾")
     doc["state"] = rs.STATE_ARCHIVED
     _place(vv, doc)
-    result = checks.authorization_record_integrity(_ctx(tasks_dir, vv))
+    assert check(_ctx(tasks_dir, vv)).status == "fail"
+    _local_archive(tasks_dir, "auth1", note_id="n9", authorized_by="艾斯維爾")
+    result = check(_ctx(tasks_dir, vv))
     assert result.status == "pass"
-    assert any("來源 cli" in d for d in result.details)
-    # 來源 cli 卻沒有 authorized_by → fail
-    doc["meta"]["authorization"] = {"source": "cli", "change_version": 1}
+    assert any("本機封存遷入" in d for d in result.details)
+    # pending_apply 不適用本機封存例外（段二會落地它）
+    doc["state"] = rs.STATE_PENDING_APPLY
     _place(vv, doc)
-    assert checks.authorization_record_integrity(_ctx(tasks_dir, vv)).status == "fail"
-    # 沒有 source 的仍照 UI 紀錄規則
-    doc["meta"]["authorization"] = dict(COPIED)
-    _place(vv, doc)
-    assert checks.authorization_record_integrity(_ctx(tasks_dir, vv)).status == "fail"
+    assert check(_ctx(tasks_dir, vv)).status == "fail"

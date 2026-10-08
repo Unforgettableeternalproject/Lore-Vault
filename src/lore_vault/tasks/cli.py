@@ -169,7 +169,11 @@ def _parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("archive", help="寫 note、併主 spec、搬到 archive/")
     p.add_argument("name")
-    p.add_argument("--authorized-by", help="requires_authorization 的 change 必填")
+    p.add_argument(
+        "--authorized-by",
+        help="純本機模式（--offline）下 requires_authorization 的 change 必填；"
+        "服務端同步模式不接受，改在 UI 任務頁核准",
+    )
     p.add_argument(
         "--allow-incomplete",
         action="store_true",

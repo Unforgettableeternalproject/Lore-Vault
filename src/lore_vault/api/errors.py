@@ -64,6 +64,21 @@ class AuthorizationWriteForbidden(Exception):
     token 的 agent 可以自己偽造核准。錯誤碼與任務層 `remote_store.put_blob` 一致。"""
 
 
+class TaskChangeWriteForbidden(Exception):
+    """`/v1/blob_put` 寫 `task-change:` 被授權守衛拒絕（403，`code` 區分原因）。
+
+    - `authorization_downgrade_forbidden`：服務端現有內容標記 `requires_authorization`，
+      新內容取消它
+    - `authorization_required`：需授權的 change 要離開 active 或寫入 archive 簿記，
+      但沒有內容雜湊相符的 UI 核准紀錄
+
+    不論認證方式都適用（守衛規則見 `api.tasks_admin.guard_change_write`）。"""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 class TaskAuthorizationRejected(Exception):
     """`POST /v1/tasks_authorize` 的 change 不能核准（409，`code` 區分原因：
     `change_invalid`／`change_not_active`／`authorization_not_required`）。"""
@@ -283,6 +298,14 @@ def install_error_handlers(app: FastAPI) -> None:
         return _json(409, exc.code, exc)
 
     app.add_exception_handler(TaskAuthorizationRejected, task_authorization_rejected)
+
+    async def task_change_write_forbidden(
+        request: Request, exc: Exception
+    ) -> JSONResponse:
+        assert isinstance(exc, TaskChangeWriteForbidden)
+        return _json(403, exc.code, exc)
+
+    app.add_exception_handler(TaskChangeWriteForbidden, task_change_write_forbidden)
 
     simple(PayloadTooLarge, 413, "too_large")
     # 側載（schema v17）：兩者都是 ValueError，各自的 handler 先於 invalid_request

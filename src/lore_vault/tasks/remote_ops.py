@@ -6,9 +6,11 @@ HTTP 為 None），不綁 MCP 的 `Shell`：
 - `remote_workspace`：驗證／推導用的工作區（主 spec 讀鏡像，DECISIONS 依
   `remote_store.resolve_decisions`：本機優先、其次鏡像）
 - `push_mirrors`／`push_decisions`：stdio 把本機 `specs/` 與 DECISIONS 解析結果推成鏡像
+- `check_authorization`：§3.3 授權閘門（MCP archive、CLI 同步模式 archive、段二
+  `land` 共用）：`requires_authorization` 的 change 必須有 UI 核准紀錄，且其
+  `content_digest` 等於目前內容雜湊
 - `archive_plan`／`archive_execute`：archive 段一（§1.4）；授權閘門由呼叫端先做
-  （MCP 讀 UI 授權紀錄；CLI 是 `--authorized-by`，見 `cli_authorization`）
-- `sync_specs`：archive 段二（落地），只能在有本機 repo 的 stdio 執行
+- `sync_specs`：archive 段二（落地），只能在有本機 repo 的 stdio 執行；落地前重查授權
 
 `archive_execute` 在 worker thread 跑同步的 note 寫入（`archive.write_notes`，經
 `remote_store.ThreadBridgeClient` 回到事件迴圈），呼叫端必須在 anyio 事件迴圈內
@@ -183,16 +185,39 @@ def rejected(exc: ArchiveError) -> rs.StoreError:
     return rs.StoreError("archive_rejected", str(exc), details=list(exc.details))
 
 
-def cli_authorization(
-    authorized_by: str, change_version: int, now: datetime
-) -> dict[str, Any]:
-    """CLI `--authorized-by` 記進 meta `authorization` 的內容（來源標 `cli`）。"""
-    return {
-        "authorized_by": authorized_by,
-        "authorized_at": utc_stamp(now),
-        "change_version": change_version,
-        "source": rs.AUTHORIZATION_SOURCE_CLI,
-    }
+async def check_authorization(
+    store: rs.RemoteStore,
+    change: rs.RemoteChange,
+    *,
+    stale_code: str = "authorization_stale",
+) -> rs.AuthorizationRecord | None:
+    """§3.3 授權閘門：`requires_authorization` 的 change 必須有 UI 核准紀錄，且紀錄的
+    `content_digest` 等於 change 目前的內容雜湊（archive 簿記不算，續跑不會失效）。
+    不需授權回 None；只讀授權紀錄，不做其他服務呼叫。
+
+    沒有紀錄或格式不合格 → `authorization_required`；內容已改過 → `stale_code`
+    （archive 用 `authorization_stale`，段二落地用 `authorization_required`）。"""
+    if not change.meta.get("requires_authorization"):
+        return None
+    try:
+        record = await store.get_authorization(change.name)
+    except rs.StoreError as exc:
+        raise rs.StoreError("authorization_required", exc.message) from None
+    if record is None:
+        raise rs.StoreError(
+            "authorization_required",
+            f"{change.name} 標記 requires_authorization: true，"
+            "尚未有使用者在 UI 核准的紀錄",
+        )
+    if not record.matches(change):
+        raise rs.StoreError(
+            stale_code,
+            f"{change.name} 的核准針對 v{record.change_version} 的內容，"
+            f"目前 v{change.version} 的內容已不同（核准後又被修改）",
+            authorized_version=record.change_version,
+            current_version=change.version,
+        )
+    return record
 
 
 def reconcile_mirror_applying(
@@ -484,7 +509,12 @@ async def land(
        `apply.applied_caps`；寫完、還沒記就中斷時，續跑由第 1 步認出已落地
     3. 封存記錄：暫存目錄寫完再改名；目的目錄已存在且 note_id 相同＝上次已建
     4. 移除本機工作副本，服務端狀態與索引改 `archived`
+
+    需授權的 change 落地前重查 UI 核准紀錄（`check_authorization`，不符一律
+    `authorization_required`）：服務端文件可被持 bearer 者直接改寫，不能只信
+    `pending_apply` 這個狀態。
     """
+    await check_authorization(store, change, stale_code="authorization_required")
     apply = change.doc.get("apply")
     if not isinstance(apply, dict):
         raise rs.StoreError(
