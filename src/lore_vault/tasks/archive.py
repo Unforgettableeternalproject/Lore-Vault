@@ -2,6 +2,8 @@
 
 順序與不變式：
 1. `requires_authorization: true` 而沒給 `--authorized-by`：在任何讀寫與網路呼叫前拒絕
+1b. tasks.md 有未勾選項目：拒絕（不動檔案、不碰服務）；`--allow-incomplete` 明確略過，
+   未完成數記進 `incomplete_at_archive`，續跑時以此記錄放行
 2. 本機全驗：metadata、格式、requirement_overlap、base 過時、狀態（被擋住拒絕）、
    delta 併回試算——任一失敗即停，服務一次都不碰
 3. 先查完每條待寫 requirement 的鏈頭（同 topic 中 `superseded_by` 為空者）；
@@ -138,6 +140,9 @@ def _summary_body(
         if text:
             parts += ["", f"## {heading}", "", text]
     parts += ["", "## 進度", "", f"tasks.md：{done}/{total} 完成"]
+    incomplete = change.meta.get("incomplete_at_archive")
+    if incomplete:
+        parts.append(f"封存時未完成：{incomplete} 項（以 --allow-incomplete 略過）")
     if req_notes:
         parts += ["", "## Requirements", ""]
         parts += [f"- [[{specs.requirement_topic(k)}]]（{k}）" for k in req_notes]
@@ -212,6 +217,7 @@ def archive_change(
     *,
     client_factory: Callable[[], VaultClient],
     authorized_by: str | None = None,
+    allow_incomplete: bool = False,
     vault: str | None = None,
     author: str = DEFAULT_AUTHOR,
     now: _dt.datetime | None = None,
@@ -226,6 +232,18 @@ def archive_change(
             f"{name} 標記 requires_authorization: true，須帶 --authorized-by <名字>"
         )
     authorized_by = (authorized_by or "").strip() or None
+    # 1b. 未完成的 tasks：在任何寫入之前；續跑只認第一次留下的略過記錄
+    done, total = change.tasks_progress()
+    incomplete = total - done
+    if incomplete > 0:
+        if not allow_incomplete and "incomplete_at_archive" not in meta:
+            raise ArchiveError(
+                f"{name} 的 tasks.md 尚未完成（{done}/{total} 完成，"
+                f"未完成 {incomplete} 項），不可封存",
+                ["勾完 tasks.md，或確認要略過時帶 --allow-incomplete"],
+            )
+        # 只改記憶體中的 metadata，第一次 change.save() 時才落地
+        meta["incomplete_at_archive"] = incomplete
 
     # 2. 本機全驗
     resumed_merge = bool(meta.get("spec_applied"))

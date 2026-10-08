@@ -48,6 +48,15 @@ def test_propose_writes_all_fields(tasks_dir: TasksDir):
         assert (tasks_dir.change_dir("add-x") / name).is_file()
 
 
+def test_propose_hint_depends_on_skip_specs(tasks_dir: TasksDir):
+    code, out = tasks_dir.run("propose", "with-spec")
+    assert code == 0 and "validate with-spec --record-base" in out
+    code, out = tasks_dir.run("propose", "pure", "--skip-specs")
+    assert code == 0, out
+    assert "--record-base" not in out and "spec delta" not in out
+    assert "proposal.md" in out and "tasks.md" in out and "archive pure" in out
+
+
 def test_propose_rejects_bad_input(tasks_dir: TasksDir):
     assert tasks_dir.run("propose", "Bad_Name")[0] == 1
     assert tasks_dir.run("propose", "ok", "--blocked-by", "X1")[0] == 1

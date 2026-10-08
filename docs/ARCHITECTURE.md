@@ -267,7 +267,7 @@ MCP 有兩種入口，共用同一份工具定義（名稱、參數、說明、�
 
 `src/lore_vault/tasks/` 是可整個拿掉的附加層：借用 OpenSpec 的目錄格式與生命週期（change → spec delta → archive），以 Python 自行實作，不需安裝 OpenSpec CLI，也不佔 MCP 工具配額。依賴方向是單向的——任務層透過 HTTP 呼叫服務，核心不 import 任務層（有 AST 測試守住）。
 
-用法：`python -m lore_vault.tasks [--root DIR] <init|propose|list|validate|archive|doctor>`，各子指令以 `--help` 為準。change 的狀態（可開工／被擋住／待授權／已完成）由 metadata 與決策紀錄（DECISIONS.md，路徑可設定）推導，不手填；只有 `archive` 會寫入服務，每條 ADDED／MODIFIED requirement 各一則 note、外加一則 change 總結 note，同一 requirement 以 `supersedes` 串成鏈。
+用法：`python -m lore_vault.tasks [--root DIR] <init|propose|list|validate|archive|doctor>`，各子指令以 `--help` 為準。change 的狀態（可開工／被擋住／待授權／已完成）由 metadata 與決策紀錄（DECISIONS.md，路徑可設定）推導，不手填；只有 `archive` 會寫入服務，每條 ADDED／MODIFIED requirement 各一則 note、外加一則 change 總結 note，同一 requirement 以 `supersedes` 串成鏈。tasks.md 未勾完的 change 不會被封存，除非明確帶 `--allow-incomplete`（未完成數會記下來）。
 
 ## 對外接口
 

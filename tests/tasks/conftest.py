@@ -146,9 +146,18 @@ class TasksDir:
             encoding="utf-8"
         )
 
-    def propose(self, name: str, *flags: str, deltas: dict[str, str] | None = None):
+    def propose(
+        self,
+        name: str,
+        *flags: str,
+        deltas: dict[str, str] | None = None,
+        complete: bool = True,
+    ):
+        """`complete`：預設把 tasks.md 全部勾完（archive 會拒絕未完成的 tasks）。"""
         code, out = self.run("propose", name, *flags)
         assert code == 0, out
+        if complete:
+            self.check_all_tasks(name)
         for cap, text in (deltas or {}).items():
             path = self.change_dir(name) / "specs" / cap / "spec.md"
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -156,6 +165,13 @@ class TasksDir:
         if deltas:
             code, out = self.run("validate", name, "--record-base")
             assert code == 0, out
+
+    def check_all_tasks(self, name: str) -> None:
+        path = self.change_dir(name) / "tasks.md"
+        path.write_text(
+            path.read_text(encoding="utf-8").replace("- [ ]", "- [x]"),
+            encoding="utf-8",
+        )
 
 
 @pytest.fixture

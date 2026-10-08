@@ -112,6 +112,11 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("name")
     p.add_argument("--authorized-by", help="requires_authorization 的 change 必填")
     p.add_argument(
+        "--allow-incomplete",
+        action="store_true",
+        help="tasks.md 尚有未勾選項目時仍封存（未完成數記進 .openspec.yaml）",
+    )
+    p.add_argument(
         "--vault", help="Lore Vault vault key（預設由專案目錄 binding 推算）"
     )
     p.add_argument("--client-env", help="客戶端設定檔（預設 ~/.lore-vault/client.env）")
@@ -201,11 +206,17 @@ def _propose(args: argparse.Namespace, env: _Env, today: str) -> int:
         _PROPOSAL_TEMPLATE.format(source_line=source_line), encoding="utf-8"
     )
     (path / "tasks.md").write_text(_TASKS_TEMPLATE, encoding="utf-8")
-    env.print(
-        f"已建立 {path}",
-        "新增 spec delta（specs/<capability>/spec.md）後執行 "
-        f"validate {name} --record-base 記錄 base",
-    )
+    if args.skip_specs:
+        hint = (
+            "無規格的純任務：編輯 proposal.md 與 tasks.md，"
+            f"完成並勾完 tasks.md 後執行 archive {name}"
+        )
+    else:
+        hint = (
+            "新增 spec delta（specs/<capability>/spec.md）後執行 "
+            f"validate {name} --record-base 記錄 base"
+        )
+    env.print(f"已建立 {path}", hint)
     return EXIT_OK
 
 
@@ -315,6 +326,7 @@ def _archive(
             args.name,
             client_factory=client_factory or _client_factory(args, env),
             authorized_by=args.authorized_by,
+            allow_incomplete=args.allow_incomplete,
             vault=args.vault,
             author=args.author,
             now=now,

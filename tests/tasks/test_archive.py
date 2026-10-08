@@ -227,3 +227,89 @@ def test_orphan_notes_from_lost_metadata_are_adopted(tasks_dir: TasksDir, vault)
     meta = tasks_dir.meta("c1")
     assert meta["notes"] == ids
     assert meta["note_id"] == ids["summary"]
+
+
+def _setup_incomplete(tasks_dir: TasksDir, name: str = "c1") -> None:
+    tasks_dir.write_main("demo", SPEC_A)
+    tasks_dir.propose(
+        name,
+        deltas={"demo": delta(added=[requirement("新功能")], modified=[MOD_ROOT])},
+        complete=False,
+    )
+
+
+def test_incomplete_tasks_refused_before_any_request_or_write(
+    tasks_dir: TasksDir, vault
+):
+    _setup_incomplete(tasks_dir)
+    change = tasks_dir.change_dir("c1")
+    before = {p: p.read_bytes() for p in tasks_dir.root.rglob("*") if p.is_file()}
+    code, out = _archive(tasks_dir, "c1", vault.client)
+    assert code == 1
+    assert "0/2" in out and "--allow-incomplete" in out
+    assert vault.requests == []
+    assert change.is_dir()
+    after = {p: p.read_bytes() for p in tasks_dir.root.rglob("*") if p.is_file()}
+    assert after == before
+
+
+def test_incomplete_check_runs_after_authorization_gate(tasks_dir: TasksDir, vault):
+    tasks_dir.propose(
+        "guarded", "--skip-specs", "--requires-authorization", complete=False
+    )
+    code, out = _archive(tasks_dir, "guarded", vault.client)
+    assert code == 1 and "--authorized-by" in out
+    code, out = _archive(
+        tasks_dir, "guarded", vault.client, "--authorized-by", "艾斯維爾"
+    )
+    assert code == 1 and "--allow-incomplete" in out
+    assert vault.requests == []
+
+
+def test_allow_incomplete_records_count(tasks_dir: TasksDir, vault):
+    _setup_incomplete(tasks_dir)
+    code, out = _archive(tasks_dir, "c1", vault.client, "--allow-incomplete")
+    assert code == 0, out
+    meta = tasks_dir.meta("c1")
+    assert meta["incomplete_at_archive"] == 2
+    body = vault.notes[meta["note_id"]]["body"]
+    assert "0/2" in body and "封存時未完成：2 項" in body
+
+
+def test_complete_tasks_leave_no_incomplete_record(tasks_dir: TasksDir, vault):
+    _setup_two_reqs(tasks_dir)
+    assert _archive(tasks_dir, "c1", vault.client)[0] == 0
+    meta = tasks_dir.meta("c1")
+    assert "incomplete_at_archive" not in meta
+    assert "封存時未完成" not in vault.notes[meta["note_id"]]["body"]
+
+
+def test_resume_cannot_bypass_incomplete_check(tasks_dir: TasksDir, vault):
+    # 已勾完時寫了一部分 note，之後 tasks 又變成未完成：續跑仍須拒絕
+    _setup_two_reqs(tasks_dir)
+    with FakeVault(fail_write_at=2) as flaky:
+        assert _archive(tasks_dir, "c1", flaky.client)[0] == 1
+        assert len(tasks_dir.meta("c1")["notes"]) == 1
+    tasks_md = tasks_dir.change_dir("c1") / "tasks.md"
+    tasks_md.write_text(
+        tasks_md.read_text(encoding="utf-8").replace("- [x]", "- [ ]", 1),
+        encoding="utf-8",
+    )
+    code, out = _archive(tasks_dir, "c1", vault.client)
+    assert code == 1 and "1/2" in out
+    assert vault.requests == []
+
+
+def test_resume_honours_first_allow_incomplete(tasks_dir: TasksDir):
+    _setup_incomplete(tasks_dir)
+    with FakeVault(fail_write_at=2) as flaky:
+        code, _ = _archive(tasks_dir, "c1", flaky.client, "--allow-incomplete")
+        assert code == 1
+        meta = tasks_dir.meta("c1")
+        assert len(meta["notes"]) == 1 and meta["incomplete_at_archive"] == 2
+        flaky.fail_write_at = None
+        code, out = _archive(tasks_dir, "c1", flaky.client)
+        assert code == 0, out
+        meta = tasks_dir.meta("c1")
+        assert meta["incomplete_at_archive"] == 2
+        assert "封存時未完成：2 項" in flaky.notes[meta["note_id"]]["body"]
