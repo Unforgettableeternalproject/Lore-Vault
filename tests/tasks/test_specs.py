@@ -6,7 +6,7 @@ import pytest
 
 from lore_vault.tasks import specs
 
-from .conftest import SPEC_A, delta, requirement
+from .conftest import SPEC_A, TasksDir, delta, requirement
 
 
 def test_parse_delta_sections_and_fence():
@@ -53,6 +53,27 @@ def test_apply_delta_new_spec_only_added():
     merged = specs.apply_delta(None, plan, "newcap", "c1")
     assert merged.startswith("# newcap Specification")
     assert specs.parse_main(merged).block("X") is not None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [delta(removed=["X"]), delta(added=[requirement("Y")], removed=["X"])],
+)
+def test_apply_delta_new_spec_rejects_removed(text):
+    """主 spec 不存在時 REMOVED 與 MODIFIED 一樣報錯，不可建出空 spec 過關。"""
+    with pytest.raises(specs.DeltaError) as exc:
+        specs.apply_delta(None, specs.parse_delta(text), "newcap", "c1")
+    assert "只能用 ADDED" in str(exc.value)
+
+
+def test_validate_rejects_removed_only_delta_without_main_spec(tasks_dir: TasksDir):
+    tasks_dir.propose("c1")
+    path = tasks_dir.change_dir("c1") / "specs" / "newcap" / "spec.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(delta(removed=["X"]), encoding="utf-8")
+    code, out = tasks_dir.run("validate", "c1", "--record-base")
+    assert code == 1 and "只能用 ADDED" in out
+    assert not (tasks_dir.root / "specs" / "newcap").exists()
 
 
 @pytest.mark.parametrize(

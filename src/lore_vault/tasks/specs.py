@@ -319,7 +319,8 @@ def apply_delta(
         raise DeltaError(errors)
     is_new = main_text is None
     if is_new:
-        if plan.modified:
+        # REMOVED 與 MODIFIED 一樣：沒有主 spec 可改，否則會建出空 spec 過關
+        if plan.modified or plan.removed:
             raise DeltaError([f"{capability}：主 spec 不存在，只能用 ADDED"])
         main_text = skeleton(capability, change_name, plan.purpose)
     spec = parse_main(main_text)
