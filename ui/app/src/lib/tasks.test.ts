@@ -6,7 +6,6 @@ import {
   decodeBase64Utf8,
   fetchTaskSnapshots,
   filterRows,
-  groupCounts,
   isStale,
   parseSnapshot,
   statusGroup,
@@ -99,15 +98,14 @@ describe('狀態分組與呈現', () => {
     change: change({ name: `c${i}`, status }),
   }));
 
-  it('篩選四態；預設（全部）隱藏已完成，勾「含已完成」才列出', () => {
+  it('篩選：預設「未完成」排除已完成；各狀態單選；「全部」含已完成', () => {
     const names = (r: TaskRow[]) => r.map((x) => x.change.name);
-    expect(names(filterRows(rows, '', false))).toEqual(['c0', 'c1', 'c2', 'c3']);
-    expect(names(filterRows(rows, '', true))).toEqual(['c0', 'c1', 'c2', 'c3', 'c4']);
-    expect(names(filterRows(rows, 'ready', false))).toEqual(['c0']);
-    expect(names(filterRows(rows, 'blocked', false))).toEqual(['c1', 'c2']);
-    expect(names(filterRows(rows, 'auth', false))).toEqual(['c3']);
-    expect(names(filterRows(rows, 'done', false))).toEqual(['c4']);
-    expect(groupCounts(rows)).toEqual({ ready: 1, blocked: 2, auth: 1, done: 1 });
+    expect(names(filterRows(rows, ''))).toEqual(['c0', 'c1', 'c2', 'c3']);
+    expect(names(filterRows(rows, 'all'))).toEqual(['c0', 'c1', 'c2', 'c3', 'c4']);
+    expect(names(filterRows(rows, 'ready'))).toEqual(['c0']);
+    expect(names(filterRows(rows, 'blocked'))).toEqual(['c1', 'c2']);
+    expect(names(filterRows(rows, 'auth'))).toEqual(['c3']);
+    expect(names(filterRows(rows, 'done'))).toEqual(['c4']);
   });
 });
 

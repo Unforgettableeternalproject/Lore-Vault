@@ -3,7 +3,7 @@
 // 任務層只屬於 dev space，其他 space 只顯示說明（比照記憶層）。
 import { useEffect, useState } from 'preact/hooks';
 
-import { ChipGroup, FilterPanel } from '../components/Filters';
+import { ChipGroup, FilterPanel, queryChoice, screenQuery, useQuerySync } from '../components/Filters';
 import { Badge, Banner, EmptyState, ErrorState, Loading } from '../components/ui';
 import { VaultPicker } from '../components/VaultPicker';
 import { ALL, useApp, vaultName } from '../lib/context';
@@ -15,13 +15,14 @@ import {
   blockerLabel,
   fetchTaskSnapshots,
   filterRows,
-  groupCounts,
   isStale,
   statusGroup,
   statusView,
   STATUS_DONE,
   STATUS_UNKNOWN,
   taskRows,
+  TASK_FILTER_IDS,
+  TASK_FILTERS,
   TASK_STALE_HOURS,
   type TaskFilter,
   type TaskGroup,
@@ -98,103 +99,107 @@ function useSnapshots(vault: string) {
 
 function TaskList() {
   const { vault, vaults } = useApp();
-  const [filter, setFilter] = useState<TaskFilter>('');
-  const [includeDone, setIncludeDone] = useState(false);
+  // 篩選初值取自網址（重新整理、從詳情返回都保留），與筆記、文件同一套
+  const [initial] = useState(() => screenQuery('tasks'));
+  const [filter, setFilter] = useState<TaskFilter>(() => queryChoice(initial, 'status', TASK_FILTER_IDS, ''));
+  useQuerySync('tasks', { status: filter });
   const { data, error, loading, retry } = useSnapshots(vault);
+  const single = vault !== ALL;
 
-  const rows = data ? taskRows(data).sort((a, b) => GROUP_ORDER[statusGroup(a.change.status)] - GROUP_ORDER[statusGroup(b.change.status)]) : [];
-  const counts = groupCounts(rows);
-  const visible = filterRows(rows, filter, includeDone);
-  const options = [
-    { id: '' as const, label: `全部 ${includeDone ? rows.length : rows.length - counts.done}` },
-    { id: 'ready' as const, label: `可開工 ${counts.ready}` },
-    { id: 'blocked' as const, label: `被擋住 ${counts.blocked}` },
-    { id: 'auth' as const, label: `待授權 ${counts.auth}` },
-    { id: 'done' as const, label: `已完成 ${counts.done}` },
-  ];
-  const showVault = vault === ALL;
+  const groups = (data ?? []).map((s) => ({ snap: s, rows: filterRows(sortRows(taskRows([s])), filter) }));
+  const total = groups.reduce((n, g) => n + (g.snap.snapshot?.changes.length ?? 0), 0);
+  const shown = groups.reduce((n, g) => n + g.rows.length, 0);
+  // 篩選後沒有項目的 vault 不顯示；快照格式不對的 vault 一律顯示（錯誤不能被篩掉）
+  const visible = groups.filter((g) => g.rows.length > 0 || g.snap.error);
+  const filterLabel = TASK_FILTERS.find((f) => f.id === filter)?.label ?? '';
 
   return (
     <div class="lv-tasks-view">
       <FilterPanel
+        active={filter !== ''}
+        onClear={() => setFilter('')}
         summary={
           <>
-            範圍：{vaultName({ vaults }, vault)}
-            {filter === '' && !includeDone ? ' · 已完成的 change 已隱藏' : ''}
+            範圍：{vaultName({ vaults }, vault)} · {filterLabel}
           </>
         }
       >
         <div class="lv-filter-panel__row">
           <VaultPicker />
-          <ChipGroup label="狀態" groupLabel="change 狀態" options={options} value={filter} onChange={setFilter} mono={false} />
-          <label class="lv-check">
-            <input
-              type="checkbox"
-              checked={includeDone}
-              disabled={filter !== ''}
-              onChange={(e) => setIncludeDone((e.target as HTMLInputElement).checked)}
-            />
-            <span>含已完成</span>
-          </label>
+          <ChipGroup label="狀態" groupLabel="change 狀態" options={TASK_FILTERS} value={filter} onChange={setFilter} mono={false} />
         </div>
       </FilterPanel>
 
       {error !== null && <ErrorState error={error} onRetry={retry} />}
       {loading && !data && <Loading />}
-      {data && error === null && <SyncList snapshots={data} showVault={showVault} />}
       {data && error === null && data.length === 0 && (
         <EmptyState testId="tasks-not-synced" title="尚未同步">
-          {vault === ALL ? '這個 space 還沒有任何 repo 推送任務層快照。' : '這個 vault 還沒有推送任務層快照。'}
+          {single ? '這個 vault 還沒有推送任務層快照。' : '這個 space 還沒有任何 repo 推送任務層快照。'}
           在 repo 執行任務層的 sync（或 propose／validate／archive／list）後，這裡會顯示最新狀態。
         </EmptyState>
       )}
-      {data && error === null && data.length > 0 && rows.length === 0 && data.some((s) => s.snapshot) && (
+      {data && error === null && data.length > 0 && total === 0 && data.some((s) => s.snapshot) && !data.some((s) => s.error) && (
         <EmptyState testId="tasks-empty" title="快照裡沒有任何 change">任務層目前沒有進行中或已封存的 change。</EmptyState>
       )}
-      {rows.length > 0 && visible.length === 0 && (
+      {data && error === null && total > 0 && shown === 0 && (
         <EmptyState testId="tasks-filter-empty" title="沒有符合篩選的 change">
-          {filter === '' && !includeDone ? '目前只有已完成的 change；勾選「含已完成」即可列出。' : '換一個狀態或 vault 再試一次。'}
+          {filter === '' ? '目前沒有未完成的 change；選「已完成」或「全部」可列出已完成的項目。' : '換一個狀態或 vault 再試一次。'}
         </EmptyState>
       )}
-      {visible.length > 0 && (
-        <ul class="lv-tasks" data-testid="tasks" aria-busy={loading} aria-label="change 列表">
-          {visible.map((r) => (
-            <TaskRowView key={`${r.vault}:${r.change.name}`} row={r} showVault={showVault} />
+      {data && error === null && visible.length > 0 && (
+        <div class="lv-task-groups" data-testid="tasks" aria-busy={loading}>
+          {visible.map((g) => (
+            <TaskGroupView key={g.snap.vault} snap={g.snap} rows={g.rows} header={!single} />
           ))}
-        </ul>
+        </div>
       )}
     </div>
   );
 }
 
-/** 各 vault 的同步時間；超過門檻標「可能已過時」，快照格式不對時以錯誤顯示。 */
-function SyncList({ snapshots, showVault }: { snapshots: VaultSnapshot[]; showVault: boolean }) {
+function sortRows(rows: TaskRow[]): TaskRow[] {
+  return rows.sort((a, b) => GROUP_ORDER[statusGroup(a.change.status)] - GROUP_ORDER[statusGroup(b.change.status)]);
+}
+
+/** 單一 vault 的區塊：標頭（vault 名、同步時間、過時標示）、格式錯誤橫幅、該 vault 的 change。
+ *  只看單一 vault 時不另加標頭，同步資訊以一行 metadata 呈現。 */
+function TaskGroupView({ snap, rows, header }: { snap: VaultSnapshot; rows: TaskRow[]; header: boolean }) {
   const { vaults } = useApp();
-  if (snapshots.length === 0) return null;
+  const stale = isStale(snap.updated);
+  const name = vaultName({ vaults }, snap.vault);
+  const sync = (
+    <>
+      <span title={formatTime(snap.updated)} data-testid="task-synced">
+        同步於 {formatAge(hoursSince(snap.updated))}
+      </span>
+      {stale && <StaleBadge />}
+    </>
+  );
   return (
-    <ul class="lv-task-syncs" data-testid="task-syncs" aria-label="快照同步時間">
-      {snapshots.map((s) => {
-        const stale = isStale(s.updated);
-        return (
-          <li key={s.vault} class="lv-task-sync" data-stale={String(stale)}>
-            {showVault && (
-              <Badge tone="vault" label="vault" title={s.vault}>
-                {vaultName({ vaults }, s.vault)}
-              </Badge>
-            )}
-            <span class="lv-task-sync__time" title={formatTime(s.updated)}>
-              同步於 {formatAge(hoursSince(s.updated))}
-            </span>
-            {stale && <StaleBadge />}
-            {s.error && (
-              <Banner tone="error" label="INVALID" title="快照格式不正確" testId="task-snapshot-invalid">
-                {s.error}。請在該 repo 重跑任務層的 sync。
-              </Banner>
-            )}
-          </li>
-        );
-      })}
-    </ul>
+    <section class="lv-task-group" data-testid="task-group" data-vault={snap.vault} data-stale={String(stale)} aria-label={`${name} 的 change`}>
+      {header ? (
+        <header class="lv-task-group__head">
+          <h2 class="lv-task-group__title" title={snap.vault}>
+            {name}
+          </h2>
+          <div class="lv-meta-line">{sync}</div>
+        </header>
+      ) : (
+        <div class="lv-meta-line lv-task-group__sync">{sync}</div>
+      )}
+      {snap.error && (
+        <Banner tone="error" label="INVALID" title="快照格式不正確" testId="task-snapshot-invalid">
+          {snap.error}。請在該 repo 重跑任務層的 sync。
+        </Banner>
+      )}
+      {rows.length > 0 && (
+        <ul class="lv-tasks" aria-label={`${name} 的 change 列表`}>
+          {rows.map((r) => (
+            <TaskRowView key={r.change.name} row={r} />
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 
@@ -244,8 +249,8 @@ function BlockerBadges({ change }: { change: TaskChange }) {
   );
 }
 
-function TaskRowView({ row, showVault }: { row: TaskRow; showVault: boolean }) {
-  const { vaults, navigate } = useApp();
+function TaskRowView({ row }: { row: TaskRow }) {
+  const { navigate } = useApp();
   const { change } = row;
   const href = routePath('tasks', [row.vault, change.name]);
   return (
@@ -268,11 +273,6 @@ function TaskRowView({ row, showVault }: { row: TaskRow; showVault: boolean }) {
               需授權
             </Badge>
           )}
-          {showVault && (
-            <Badge tone="vault" label="vault" title={row.vault}>
-              {vaultName({ vaults }, row.vault)}
-            </Badge>
-          )}
           {change.source && (
             <Badge tone="kind" label="來源卡">
               {change.source}
@@ -281,11 +281,8 @@ function TaskRowView({ row, showVault }: { row: TaskRow; showVault: boolean }) {
           <BlockerBadges change={change} />
         </div>
       </div>
-      <div class="lv-concept__side">
+      <div class="lv-task__side">
         <Progress tasks={change.tasks} />
-        <Badge tone="time" label="同步" title={formatTime(row.updated)}>
-          同步 {formatAge(hoursSince(row.updated))}
-        </Badge>
       </div>
     </li>
   );

@@ -219,18 +219,24 @@ export function taskRows(snapshots: VaultSnapshot[]): TaskRow[] {
   return snapshots.flatMap((s) => (s.snapshot ? s.snapshot.changes.map((change) => ({ vault: s.vault, updated: s.updated, change })) : []));
 }
 
-/** 篩選值：空字串＝全部（依 includeDone 決定是否含已完成） */
-export type TaskFilter = '' | TaskGroup;
+/** 篩選值：空字串＝未完成（預設，可開工＋被擋住＋待授權），`all`＝含已完成的全部 */
+export type TaskFilter = '' | TaskGroup | 'all';
 
-export function filterRows(rows: TaskRow[], filter: TaskFilter, includeDone: boolean): TaskRow[] {
-  if (filter) return rows.filter((r) => statusGroup(r.change.status) === filter);
-  return includeDone ? rows : rows.filter((r) => statusGroup(r.change.status) !== 'done');
-}
+export const TASK_FILTERS: readonly { id: TaskFilter; label: string }[] = [
+  { id: '', label: '未完成' },
+  { id: 'ready', label: '可開工' },
+  { id: 'blocked', label: '被擋住' },
+  { id: 'auth', label: '待授權' },
+  { id: 'done', label: '已完成' },
+  { id: 'all', label: '全部' },
+];
 
-export function groupCounts(rows: TaskRow[]): Record<TaskGroup, number> {
-  const counts: Record<TaskGroup, number> = { ready: 0, blocked: 0, auth: 0, done: 0 };
-  for (const r of rows) counts[statusGroup(r.change.status)]++;
-  return counts;
+export const TASK_FILTER_IDS: readonly TaskFilter[] = TASK_FILTERS.map((f) => f.id);
+
+export function filterRows(rows: TaskRow[], filter: TaskFilter): TaskRow[] {
+  if (filter === 'all') return rows;
+  if (filter === '') return rows.filter((r) => statusGroup(r.change.status) !== 'done');
+  return rows.filter((r) => statusGroup(r.change.status) === filter);
 }
 
 export function blockerLabel(resolved: boolean | null): string {

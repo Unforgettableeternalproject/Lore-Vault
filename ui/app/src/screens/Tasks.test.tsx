@@ -8,7 +8,11 @@ import type { TaskChange } from '../lib/types';
 import { apiError, base64Utf8, json, makeApi, renderWithApp } from '../test/harness';
 import { Tasks } from './Tasks';
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  // 篩選會寫回網址查詢字串（happy-dom 的網址跨測試共用），每個測試後重設
+  window.history.replaceState(null, '', '/ui/tasks');
+});
 
 const VAULT = 'github.com/org/lore-vault';
 const FRESH = new Date(Date.now() - 2 * 3_600_000).toISOString();
@@ -77,16 +81,19 @@ describe('任務層：守門', () => {
 });
 
 describe('任務層：列表', () => {
-  it('混合狀態：預設隱藏已完成；四態 chip 篩選；「無法判定」併入被擋住且標錯誤色', async () => {
+  it('預設「未完成」；狀態 chip 單選（含「全部」）；「無法判定」併入被擋住且標錯誤色；篩選寫回網址', async () => {
     const { api } = makeApi({ '/v1/blob_get': () => json({ items: [{ vault: VAULT, ...blob(MIXED) }] }) });
     renderWithApp(<Tasks />, api);
     await screen.findByTestId('tasks');
+    expect(screen.getByRole('button', { name: '未完成' }).getAttribute('aria-pressed')).toBe('true');
     expect(names()).toEqual(['ready-one', 'auth-one', 'blocked-one', 'unknown-one', 'needs-done']);
+    expect(screen.queryByRole('checkbox')).toBeNull();
 
-    fireEvent.click(screen.getByRole('button', { name: '可開工 1' }));
+    fireEvent.click(screen.getByRole('button', { name: '可開工' }));
     expect(names()).toEqual(['ready-one']);
+    await waitFor(() => expect(window.location.search).toBe('?status=ready'));
 
-    fireEvent.click(screen.getByRole('button', { name: '被擋住 3' }));
+    fireEvent.click(screen.getByRole('button', { name: '被擋住' }));
     expect(names()).toEqual(['blocked-one', 'unknown-one', 'needs-done']);
     const unknownRow = screen.getByRole('link', { name: 'unknown-one' }).closest('li')!;
     const status = within(unknownRow).getByTestId('task-status');
@@ -94,53 +101,75 @@ describe('任務層：列表', () => {
     expect(badgeOf(status).classList.contains('lv-badge--error')).toBe(true);
     expect(within(unknownRow).getByText('D999 無法判定')).toBeTruthy();
 
-    fireEvent.click(screen.getByRole('button', { name: '待授權 1' }));
+    fireEvent.click(screen.getByRole('button', { name: '待授權' }));
     expect(names()).toEqual(['auth-one']);
     const authRow = screen.getByRole('link', { name: 'auth-one' }).closest('li')!;
     expect(badgeOf(within(authRow).getByText('需授權')).classList.contains('lv-badge--auth')).toBe(true);
 
-    fireEvent.click(screen.getByRole('button', { name: '已完成 1' }));
+    fireEvent.click(screen.getByRole('button', { name: '已完成' }));
     expect(names()).toEqual(['done-one']);
     expect(badgeOf(screen.getByTestId('task-status')).classList.contains('lv-badge--plain')).toBe(true);
 
-    // 回到全部並勾「含已完成」
-    fireEvent.click(screen.getByRole('button', { name: '全部 5' }));
-    fireEvent.click(screen.getByRole('checkbox', { name: '含已完成' }));
+    fireEvent.click(screen.getByRole('button', { name: '全部' }));
     expect(names()).toHaveLength(6);
-    expect(screen.getByRole('button', { name: '全部 6' })).toBeTruthy();
+
+    // 清除篩選回到預設，網址不帶查詢字串
+    fireEvent.click(screen.getByTestId('filter-clear'));
+    expect(names()).toHaveLength(5);
+    await waitFor(() => expect(window.location.search).toBe(''));
   });
 
-  it('列上顯示 tasks 完成度、來源卡、blocked_by 裁決狀態；全部 vault 時顯示 vault', async () => {
+  it('網址的 status 決定初始篩選（重新整理、從詳情返回都保留）', async () => {
+    window.history.replaceState(null, '', '/ui/tasks?status=done');
     const { api } = makeApi({ '/v1/blob_get': () => json({ items: [{ vault: VAULT, ...blob(MIXED) }] }) });
     renderWithApp(<Tasks />, api);
-    const row = (await screen.findByRole('link', { name: 'blocked-one' })).closest('li')!;
+    await screen.findByTestId('tasks');
+    expect(names()).toEqual(['done-one']);
+    expect(screen.getByTestId('filter-panel').textContent).toContain('已完成');
+  });
+
+  it('全部 vault：依 vault 分組，標頭有 vault 名與同步時間；列上不重複 vault 與同步時間', async () => {
+    const other = 'folder/other';
+    const { api } = makeApi({
+      '/v1/blob_get': () => json({ items: [{ vault: VAULT, ...blob(MIXED) }, { vault: other, ...blob([change({ name: 'x' })]) }] }),
+    });
+    renderWithApp(<Tasks />, api);
+    await screen.findByTestId('tasks');
+    const groups = screen.getAllByTestId('task-group');
+    expect(groups.map((g) => g.getAttribute('data-vault'))).toEqual([VAULT, other]);
+    expect(within(groups[0]!).getByRole('heading', { level: 2 }).textContent).toBe('Lore Vault');
+    expect(within(groups[0]!).getByTestId('task-synced').textContent).toContain('同步於');
+    expect(within(groups[1]!).getAllByRole('link').map((a) => a.textContent)).toEqual(['x']);
+    const row = screen.getByRole('link', { name: 'blocked-one' }).closest('li')!;
     expect(within(row).getByTestId('task-progress').textContent).toBe('2/5');
     expect(within(row).getByText('T-90')).toBeTruthy();
     expect(badgeOf(within(row).getByText('D6 未裁決')).classList.contains('lv-badge--warn')).toBe(true);
-    expect(within(row).getByText('Lore Vault')).toBeTruthy();
+    expect(within(row).queryByText('Lore Vault')).toBeNull();
+    expect(within(row).queryByText(/同步/)).toBeNull();
   });
 
-  it('單一 vault 時帶 vault 參數、隱藏 vault 標籤', async () => {
+  it('單一 vault：帶 vault 參數，不加分組標頭，同步資訊仍顯示', async () => {
     const { api, callsTo } = makeApi({ '/v1/blob_get': () => json(blob(MIXED)) });
     renderWithApp(<Tasks />, api, { vault: VAULT });
-    const row = (await screen.findByRole('link', { name: 'ready-one' })).closest('li')!;
+    await screen.findByRole('link', { name: 'ready-one' });
     expect(callsTo('/v1/blob_get')[0]!.body).toEqual({ space: 'dev', vault: VAULT, key: 'tasks-snapshot' });
-    expect(within(row).queryByText('Lore Vault')).toBeNull();
+    expect(screen.queryByRole('heading', { level: 2 })).toBeNull();
+    expect(screen.getByTestId('task-synced').textContent).toContain('同步於');
   });
 
-  it('同步超過 24 小時標「可能已過時」；新鮮的不標', async () => {
+  it('同步超過 24 小時，該 vault 區塊標「可能已過時」；新鮮的不標', async () => {
     const other = 'folder/other';
     const { api } = makeApi({
       '/v1/blob_get': () => json({ items: [{ vault: VAULT, ...blob(MIXED, OLD) }, { vault: other, ...blob([change({ name: 'x' })], FRESH) }] }),
     });
     renderWithApp(<Tasks />, api);
-    const syncs = await screen.findByTestId('task-syncs');
-    const items = within(syncs).getAllByRole('listitem');
-    expect(items.map((li) => li.getAttribute('data-stale'))).toEqual(['true', 'false']);
-    const stale = within(items[0]!).getByTestId('task-stale');
+    await screen.findByTestId('tasks');
+    const groups = screen.getAllByTestId('task-group');
+    expect(groups.map((g) => g.getAttribute('data-stale'))).toEqual(['true', 'false']);
+    const stale = within(groups[0]!).getByTestId('task-stale');
     expect(stale.textContent).toBe('可能已過時');
     expect(badgeOf(stale).classList.contains('lv-badge--warn')).toBe(true);
-    expect(within(items[1]!).queryByTestId('task-stale')).toBeNull();
+    expect(within(groups[1]!).queryByTestId('task-stale')).toBeNull();
   });
 
   it('全部 vault 回空陣列：顯示「尚未同步」而不是錯誤', async () => {
@@ -167,7 +196,7 @@ describe('任務層：列表', () => {
     expect(callsTo('/v1/blob_get')).toHaveLength(2);
   });
 
-  it('快照格式不正確：該 vault 顯示錯誤橫幅，其他 vault 照常列出', async () => {
+  it('快照格式不正確：錯誤橫幅放在該 vault 區塊內，其他 vault 照常列出', async () => {
     const { api } = makeApi({
       '/v1/blob_get': () =>
         json({
@@ -178,14 +207,16 @@ describe('任務層：列表', () => {
         }),
     });
     renderWithApp(<Tasks />, api);
-    expect((await screen.findByTestId('task-snapshot-invalid')).textContent).toContain('JSON');
+    const banner = await screen.findByTestId('task-snapshot-invalid');
+    expect(banner.textContent).toContain('JSON');
+    expect(banner.closest('[data-testid="task-group"]')!.getAttribute('data-vault')).toBe('folder/bad');
     expect(names()).toEqual(['ready-one']);
   });
 
   it('只有已完成的 change 時，預設篩選給出提示而非空白', async () => {
     const { api } = makeApi({ '/v1/blob_get': () => json({ items: [{ vault: VAULT, ...blob([MIXED[4]!]) }] }) });
     renderWithApp(<Tasks />, api);
-    expect((await screen.findByTestId('tasks-filter-empty')).textContent).toContain('含已完成');
+    expect((await screen.findByTestId('tasks-filter-empty')).textContent).toContain('已完成');
   });
 
   it('點 change 名稱導向詳情（vault 與名稱逐段編碼）', async () => {

@@ -122,7 +122,7 @@ async function pickVault(page: Page, key: string) {
 }
 
 function list(page: Page) {
-  return page.getByRole('list', { name: 'change 列表' });
+  return page.getByTestId('tasks');
 }
 
 test('尚未同步：全部 vault 空清單與單一 vault 404 都顯示空狀態，不是錯誤白屏', async ({ page, request }) => {
@@ -150,24 +150,28 @@ test('混合四態列表：篩選、無法判定標示、格式錯誤快照，�
   await expect(rows).toHaveCount(6);
   await expect(list(page).getByRole('link', { name: 'add-sidecar' })).toHaveCount(0);
   // 剛同步：不標過時
-  const syncs = page.getByTestId('task-syncs');
-  await expect(syncs.getByTestId('task-stale')).toHaveCount(0);
+  await expect(page.getByRole('group', { name: 'change 狀態' }).getByRole('button', { name: '未完成' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByTestId('task-stale')).toHaveCount(0);
   // 壞 JSON 的 vault 以錯誤橫幅呈現，其他 vault 照常列出
-  await expect(page.getByTestId('task-snapshot-invalid')).toContainText('不是有效的 JSON');
+  const bad = page.getByTestId('task-group').filter({ has: page.getByTestId('task-snapshot-invalid') });
+  await expect(bad).toHaveAttribute('data-vault', BAD.key);
+  await expect(bad.getByTestId('task-snapshot-invalid')).toContainText('不是有效的 JSON');
+  await shot(page, 'tasks-list-default');
   await shot(page, 'tasks-list');
 
   const chips = page.getByRole('group', { name: 'change 狀態' });
-  await chips.getByRole('button', { name: '被擋住 3' }).click();
+  await chips.getByRole('button', { name: '被擋住', exact: true }).click();
   await expect(rows).toHaveText(['blocked-change', 'unknown-change', 'needs-sidecar']);
   const unknownStatus = list(page).getByRole('listitem').filter({ hasText: 'unknown-change' }).getByTestId('task-status');
   await expect(unknownStatus).toHaveText('無法判定');
   await expect(unknownStatus.locator('xpath=..')).toHaveClass(/lv-badge--error/);
-  await chips.getByRole('button', { name: '可開工 2' }).click();
+  await chips.getByRole('button', { name: '可開工', exact: true }).click();
   // vault 之間的順序由服務決定，只比對集合
   await expect(rows).toHaveCount(2);
   expect((await rows.allTextContents()).sort()).toEqual(['other-ready', 'ready-change']);
-  await chips.getByRole('button', { name: '已完成 1' }).click();
+  await chips.getByRole('button', { name: '已完成', exact: true }).click();
   await expect(rows).toHaveText(['add-sidecar']);
+  await expect(page).toHaveURL(/[?]status=done$/);
   await shot(page, 'tasks-filter-done');
 
   // 鍵盤：焦點在 change 連結、Enter 進詳情
@@ -194,9 +198,8 @@ test('同步超過 24 小時：列表與詳情都標「可能已過時」', asyn
   await page.clock.setFixedTime(new Date(Date.now() + 30 * 3_600_000));
   await login(page);
   await openTasks(page);
-  const syncs = page.getByTestId('task-syncs');
-  await expect(syncs.locator('[data-stale="true"]')).toHaveCount(3);
-  await expect(syncs.getByTestId('task-stale').first()).toHaveText('可能已過時');
+  await expect(page.locator('[data-testid="task-group"][data-stale="true"]')).toHaveCount(3);
+  await expect(page.getByTestId('task-stale').first()).toHaveText('可能已過時');
   await shot(page, 'tasks-list-stale');
   await list(page).getByRole('link', { name: 'ready-change' }).click();
   await expect(page.getByRole('main').getByTestId('task-stale')).toHaveText('可能已過時');
@@ -217,6 +220,19 @@ test('詳情：無法判定的原因以錯誤橫幅呈現；依賴可導航到�
   await expect(deps.getByRole('link', { name: 'ghost-change' })).toHaveCount(0);
   await deps.getByRole('link', { name: 'add-sidecar' }).click();
   await expect(page.getByRole('heading', { name: 'add-sidecar', level: 1 })).toBeVisible();
+});
+
+test('單一 vault：不加分組標頭，同步時間仍顯示，只列該 vault 的 change', async ({ page, request }) => {
+  await seed(request);
+  await login(page);
+  await openTasks(page);
+  await pickVault(page, REPO.key);
+  await expect(list(page).getByRole('link')).toHaveCount(5);
+  await expect(page.getByTestId('task-group')).toHaveCount(1);
+  await expect(page.getByTestId('task-group').getByRole('heading', { level: 2 })).toHaveCount(0);
+  await expect(page.getByTestId('task-synced')).toContainText('同步於');
+  await expect(list(page).getByRole('link', { name: 'other-ready' })).toHaveCount(0);
+  await shot(page, 'tasks-single-vault');
 });
 
 test('服務錯誤：顯示錯誤與重試（以攔截重現 500）', async ({ page }) => {
@@ -251,9 +267,9 @@ for (const theme of ['dark', 'light'] as const) {
     const found: unknown[] = [];
     const scan = async (ctx: string) => found.push(...(await axeViolations(page, `${theme} · ${ctx}`)));
     await openTasks(page);
-    await page.getByRole('checkbox', { name: '含已完成' }).check();
+    await page.getByRole('group', { name: 'change 狀態' }).getByRole('button', { name: '全部', exact: true }).click();
     await expect(list(page).getByRole('link')).toHaveCount(7);
-    await scan('任務列表（含已完成）');
+    await scan('任務列表（全部）');
     await shot(page, `tasks-list-all-${theme}`);
     await list(page).getByRole('link', { name: 'add-sidecar' }).click();
     await expect(page.getByTestId('task-note-link')).toBeVisible();
