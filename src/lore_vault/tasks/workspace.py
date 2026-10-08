@@ -371,6 +371,11 @@ def requirement_overlap(changes: list[Change]) -> dict[str, list[str]]:
     return {k: v for k, v in owners.items() if len(v) > 1}
 
 
+def _key_cap(key: str) -> str:
+    """`<capability>/<requirement>` 鍵的 capability 部分。"""
+    return key.split("/", 1)[0]
+
+
 def current_base(change: Change, ws: Workspace) -> dict[str, str | None]:
     """主 spec 現值的 base（ADDED 記 None 的語意由「不存在」自然得到）。"""
     result: dict[str, str | None] = {}
@@ -381,12 +386,19 @@ def current_base(change: Change, ws: Workspace) -> dict[str, str | None]:
     return result
 
 
-def base_errors(change: Change, ws: Workspace) -> list[str]:
+def base_errors(
+    change: Change, ws: Workspace, *, skip: Collection[str] = ()
+) -> list[str]:
     """修正 1：主 spec 現值與 `base` 記錄不符即 error（要先 rebase）。
-    delta 有、`base` 沒記的 requirement 也是 error——不自動補，否則守衛形同虛設。"""
+    delta 有、`base` 沒記的 requirement 也是 error——不自動補，否則守衛形同虛設。
+
+    `skip`：已寫回主 spec 的 capability（archive 續跑）；
+    其主 spec 已是合併後內容，不比對。"""
     recorded = change.meta.get("base") or {}
     errors = []
     for key, now in current_base(change, ws).items():
+        if _key_cap(key) in skip:
+            continue
         if key not in recorded:
             errors.append(
                 f"{key}：base 未記錄"
@@ -439,8 +451,17 @@ def trial_merge(
     return merged, errors
 
 
-def validate_change(change: Change, ws: Workspace, active: list[Change]) -> list[str]:
-    """單一 active change 的全部檢查（格式、overlap、base、併回試算）。"""
+def validate_change(
+    change: Change,
+    ws: Workspace,
+    active: list[Change],
+    *,
+    skip: Collection[str] = (),
+) -> list[str]:
+    """單一 active change 的全部檢查（格式、overlap、base、併回試算）。
+
+    `skip`：已寫回主 spec 的 capability（archive 續跑），
+    略過其併回試算、overlap 與 base；其餘 capability 照常檢查。"""
     errors = meta_errors(change)
     if change.meta_error:
         return errors
@@ -454,13 +475,15 @@ def validate_change(change: Change, ws: Workspace, active: list[Change]) -> list
     if not deltas:
         errors.append("沒有 spec delta（無規格的純任務請設 skip_specs: true）")
         return errors
-    _, merge_errors = trial_merge(change, ws)
+    _, merge_errors = trial_merge(change, ws, skip=skip)
     errors.extend(merge_errors)
     for key, owners in requirement_overlap(active).items():
+        if _key_cap(key) in skip:
+            continue
         if change.name in owners:
             others = "、".join(o for o in owners if o != change.name)
             errors.append(
                 f"{key}：同時被 active change {others} 修改（requirement_overlap）"
             )
-    errors.extend(base_errors(change, ws))
+    errors.extend(base_errors(change, ws, skip=skip))
     return errors

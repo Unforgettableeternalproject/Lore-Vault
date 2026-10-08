@@ -209,6 +209,58 @@ def test_spec_merge_failure_midway_resumes_per_capability(
     assert tasks_dir.meta("c1")["spec_applied"] is True
 
 
+def test_resume_rejects_stale_base_of_unapplied_capability(
+    tasks_dir: TasksDir, vault, monkeypatch
+):
+    """alpha 已套用後中斷，期間 beta 主 spec 被外部修改：
+    續跑須以 base 過時拒絕、不寫任何檔。"""
+    from lore_vault.tasks import archive as archive_mod
+
+    tasks_dir.write_main("alpha", SPEC_A.replace("demo", "alpha", 1))
+    tasks_dir.write_main("beta", SPEC_A.replace("demo", "beta", 1))
+    tasks_dir.propose(
+        "c1",
+        deltas={
+            "alpha": delta(removed=["封存"]),
+            "beta": delta(modified=[MOD_ROOT]),
+        },
+    )
+    real_write = archive_mod.atomic_write_text
+    calls = []
+
+    def flaky(path, text):
+        calls.append(path)
+        if len(calls) == 2:
+            raise OSError("模擬寫入 beta 時中斷")
+        real_write(path, text)
+
+    monkeypatch.setattr(archive_mod, "atomic_write_text", flaky)
+    try:
+        _archive(tasks_dir, "c1", vault.client)
+    except OSError:
+        pass
+    monkeypatch.setattr(archive_mod, "atomic_write_text", real_write)
+    assert tasks_dir.meta("c1")["spec_applied_caps"] == ["alpha"]
+    beta_path = tasks_dir.root / "specs" / "beta" / "spec.md"
+    beta_path.write_text(
+        tasks_dir.main_spec("beta").replace("`~/.demo/`。", "`~/.外部/`。", 1),
+        encoding="utf-8",
+    )
+    alpha_before = (tasks_dir.root / "specs" / "alpha" / "spec.md").read_bytes()
+    beta_before = beta_path.read_bytes()
+    meta_before = tasks_dir.meta("c1")
+    count = len(vault.notes)
+    code, out = _archive(tasks_dir, "c1", vault.client)
+    assert code == 1
+    assert "beta/資料根目錄" in out and "base 過時" in out
+    assert "alpha/" not in out
+    assert (tasks_dir.root / "specs" / "alpha" / "spec.md").read_bytes() == alpha_before
+    assert beta_path.read_bytes() == beta_before
+    assert tasks_dir.meta("c1") == meta_before
+    assert len(vault.notes) == count
+    assert tasks_dir.change_dir("c1").is_dir()
+
+
 def test_orphan_notes_from_lost_metadata_are_adopted(tasks_dir: TasksDir, vault):
     """HTTP write 成功但本機回寫前中斷：服務端已有本 change 的 note，重跑不得再寫。"""
     _setup_two_reqs(tasks_dir)

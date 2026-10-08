@@ -251,8 +251,10 @@ def archive_change(
     resumed_merge = bool(meta.get("spec_applied"))
     # 已寫回主 spec 的 capability（併主 spec 中途失敗時記錄）
     applied_caps: list[str] = list(meta.get("spec_applied_caps") or [])
-    if not resumed_merge and not applied_caps:
-        errors = validate_change(change, ws, ws.active())
+    # 續跑時只略過已套用的 capability；未套用的仍要驗 base 與 overlap，
+    # 否則中斷期間被外部改過的主 spec 會被過時 delta 覆蓋
+    if not resumed_merge:
+        errors = validate_change(change, ws, ws.active(), skip=applied_caps)
         if errors:
             raise ArchiveError(f"{name} 未通過 validate", errors)
     status, reasons = derive_status(change, ws)
