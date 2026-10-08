@@ -46,7 +46,7 @@ same container.
 - **Operations**: doctor reconciliation checks, verified `VACUUM INTO` backups, schema
   migrations on startup
 - **Task layer (optional add-on)**: OpenSpec-style changes and spec deltas driven by
-  `python -m lore_vault.tasks`; archiving a change records it as notes. The core never
+  `python -m lore_vault.tasks` or the MCP `tasks` tool; archiving a change records it as notes. The core never
   imports it, so it can be left out entirely — see
   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#任務層選用附加層)
 
