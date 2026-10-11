@@ -1,6 +1,7 @@
 /** @vitest-environment happy-dom */
 // 任務層畫面：dev-only 守門、列表四態篩選（預設隱藏已完成）、尚未同步／服務錯誤／格式錯誤、
-// 過時提示、「無法判定」的錯誤色，以及詳情（封存 note 連結、依賴導航、note 找不到、需授權 change 的核准）。
+// 過時提示、「無法判定」的錯誤色，以及詳情（封存 note 連結、依賴導航、note 找不到、需授權 change 的核准、
+// 任務明細與快照沒帶明細時的降級）。
 import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/preact';
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -278,6 +279,113 @@ describe('任務層：詳情', () => {
     const { api } = makeApi({ '/v1/blob_get': () => json(blob(MIXED, OLD)) });
     renderWithApp(<Tasks params={[VAULT, 'ready-one']} />, api);
     expect((await screen.findByTestId('task-stale')).textContent).toBe('可能已過時');
+  });
+
+  describe('任務明細', () => {
+    const GROUPS = [
+      { title: null, items: [{ text: '前置：確認契約', done: true }] },
+      {
+        title: '1. 後端',
+        items: [
+          { text: '1.1 快照帶出明細', done: true },
+          { text: '1.2 補 doctor 檢查', done: false },
+        ],
+      },
+      { title: '2. 介面', items: [{ text: '2.1 詳情頁列出逐項任務', done: false }] },
+    ];
+
+    async function renderDetail(overrides: Record<string, unknown>) {
+      const { api } = makeApi({ '/v1/blob_get': () => json(blob([{ ...change(), ...overrides } as TaskChange])) });
+      renderWithApp(<Tasks params={[VAULT, 'ready-one']} />, api);
+      await screen.findByTestId('task-synced');
+    }
+
+    it('有 task_groups：列出階段標題、小計與逐項文字；完成狀態以符號與文字標示，唯讀', async () => {
+      await renderDetail({ tasks: { done: 2, total: 4 }, task_groups: GROUPS });
+      const section = screen.getByTestId('task-items');
+      expect(screen.getByTestId('task-progress').textContent).toBe('2/4');
+      expect(within(section).getAllByRole('heading', { level: 3 }).map((h) => h.textContent)).toEqual(['1. 後端', '2. 介面']);
+      const groups = within(section).getAllByTestId('task-item-group');
+      expect(groups).toHaveLength(3);
+      expect(within(groups[1]!).getByTestId('task-item-count').textContent).toBe('本階段完成 1/2');
+      expect(within(groups[2]!).getByTestId('task-item-count').textContent).toBe('本階段完成 0/1');
+
+      const items = within(groups[1]!).getAllByRole('listitem');
+      expect(items.map((li) => li.getAttribute('data-done'))).toEqual(['true', 'false']);
+      expect(items[0]!.textContent).toBe('✓已完成：1.1 快照帶出明細');
+      expect(items[1]!.textContent).toBe('○未完成：1.2 補 doctor 檢查');
+      expect(items[0]!.querySelector('.lv-task-item__mark')!.getAttribute('aria-hidden')).toBe('true');
+      expect(screen.queryByTestId('task-items-missing')).toBeNull();
+      expect(screen.queryByRole('checkbox')).toBeNull();
+    });
+
+    it('title 為 null 的群組：不顯示標題與小計，項目照列', async () => {
+      await renderDetail({ task_groups: GROUPS });
+      const first = screen.getAllByTestId('task-item-group')[0]!;
+      expect(within(first).queryByRole('heading')).toBeNull();
+      expect(within(first).queryByTestId('task-item-count')).toBeNull();
+      expect(within(first).getByRole('list', { name: '未分階段的任務' })).toBeTruthy();
+      expect(within(first).getByText('前置：確認契約')).toBeTruthy();
+    });
+
+    it.each([
+      ['欄位不存在', {}],
+      ['空陣列', { task_groups: [] }],
+      ['不是陣列', { task_groups: 'nope' }],
+      ['群組與項目都畸形', { task_groups: [null, { title: 'x', items: [{ done: true }, 'y'] }, { title: 'z' }] }],
+    ])('%s：只有進度條與一句說明，不報錯', async (_label, overrides) => {
+      await renderDetail(overrides);
+      expect(screen.getByTestId('task-progress').textContent).toBe('2/5');
+      expect(screen.getByTestId('task-items-missing').textContent).toBe('快照未含任務明細。');
+      expect(screen.queryByTestId('task-items')).toBeNull();
+      expect(screen.queryByTestId('task-snapshot-invalid')).toBeNull();
+      expect(screen.queryByRole('alert')).toBeNull();
+    });
+
+    it('部分畸形：略過壞項目，其餘照常顯示', async () => {
+      await renderDetail({ task_groups: [{ title: '1. 後端', items: [{ text: '留下的項目', done: false }, { text: 3, done: true }] }, 'bad'] });
+      expect(within(screen.getByTestId('task-items')).getAllByRole('listitem').map((li) => li.textContent)).toEqual(['○未完成：留下的項目']);
+    });
+
+    it('文字為空的項目：保留並顯示淡色佔位，筆數與小計不變；只有空項目的階段仍顯示', async () => {
+      await renderDetail({
+        tasks: { done: 1, total: 3 },
+        task_groups: [
+          { title: '1. 後端', items: [{ text: '', done: true }, { text: '有字', done: false }] },
+          { title: '2. 只有空項目', items: [{ text: '', done: false }] },
+        ],
+      });
+      const groups = screen.getAllByTestId('task-item-group');
+      expect(groups).toHaveLength(2);
+      expect(screen.getAllByTestId('task-item')).toHaveLength(3);
+      expect(within(groups[0]!).getByTestId('task-item-count').textContent).toBe('本階段完成 1/2');
+      expect(within(groups[0]!).getAllByRole('listitem').map((li) => li.textContent)).toEqual(['✓已完成：（未填寫）', '○未完成：有字']);
+      expect(within(groups[1]!).getByRole('heading', { level: 3 }).textContent).toBe('2. 只有空項目');
+      expect(within(groups[1]!).getByTestId('task-item-count').textContent).toBe('本階段完成 0/1');
+      const placeholders = screen.getAllByTestId('task-item-empty');
+      expect(placeholders).toHaveLength(2);
+      expect(placeholders[0]!.className).toContain('lv-muted');
+      expect(within(groups[0]!).getAllByRole('listitem')[1]!.querySelector('[data-testid="task-item-empty"]')).toBeNull();
+    });
+
+    it('已封存 change 沒有明細：只留進度條，不顯示降級說明', async () => {
+      const { api } = makeApi({
+        '/v1/blob_get': () => json(blob(MIXED)),
+        '/v1/get': () => json({ items: [], missing: ['note-123'], unavailable: [], truncated: false, budget: 0, used_chars: 0 }),
+      });
+      renderWithApp(<Tasks params={[VAULT, 'done-one']} />, api);
+      await screen.findByTestId('task-synced');
+      expect(screen.getByTestId('task-progress')).toBeTruthy();
+      expect(screen.queryByTestId('task-items-missing')).toBeNull();
+      expect(screen.queryByTestId('task-items')).toBeNull();
+    });
+
+    it('沒有 tasks 也沒有明細：維持「沒有 tasks」，不加說明', async () => {
+      await renderDetail({ tasks: { done: 0, total: 0 } });
+      expect(screen.getByText('沒有 tasks')).toBeTruthy();
+      expect(screen.queryByTestId('task-items-missing')).toBeNull();
+      expect(screen.queryByTestId('task-items')).toBeNull();
+    });
   });
 
   it('vault 尚未同步、快照裡沒有這個 change 各有空狀態', async () => {

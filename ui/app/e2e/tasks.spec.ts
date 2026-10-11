@@ -49,7 +49,31 @@ function changes() {
   };
   return [
     { ...base, name: 'ready-change', status: '可開工' },
-    { ...base, name: 'blocked-change', status: '被擋住', reasons: ['D6 未裁決'], blocked_by: [{ id: 'D6', resolved: false }] },
+    {
+      ...base,
+      name: 'blocked-change',
+      status: '被擋住',
+      reasons: ['D6 未裁決'],
+      blocked_by: [{ id: 'D6', resolved: false }],
+      // 任務明細：無階段的前置項目＋兩個階段（合計與 tasks 的 2/5 一致），含一條長文字驗證換行
+      task_groups: [
+        { title: null, items: [{ text: '前置：確認快照契約', done: true }] },
+        {
+          title: '1. 後端',
+          items: [
+            { text: '1.1 快照帶出各階段與逐項任務', done: true },
+            { text: '1.2 補 doctor 檢查，並以測試證明拿掉保護時會紅；超過側載大小上限時省略明細而不是截斷單一項目的文字', done: false },
+          ],
+        },
+        {
+          title: '2. 介面',
+          items: [
+            { text: '2.1 詳情頁在完成度下方列出任務', done: false },
+            { text: '2.2 沒有明細時降級為只顯示進度條', done: false },
+          ],
+        },
+      ],
+    },
     {
       ...base,
       name: 'unknown-change',
@@ -216,6 +240,25 @@ test('詳情：無法判定的原因以錯誤橫幅呈現；依賴可導航到�
   await expect(reasons).toContainText('D999');
   await expect(page.getByTestId('task-note-none')).toBeVisible();
   await shot(page, 'tasks-detail-unknown');
+
+  // 快照沒帶任務明細：只有進度條與一句說明
+  await expect(page.getByTestId('task-progress')).toHaveText('2/5');
+  await expect(page.getByTestId('task-items-missing')).toHaveText('快照未含任務明細。');
+  await expect(page.getByTestId('task-items')).toHaveCount(0);
+
+  // 快照帶任務明細：完成度下方列出各階段與逐項任務（唯讀），完成與否有文字標示；長文字不撐破版面
+  await page.goto(`/ui/tasks/${encodeURIComponent(REPO.key)}/blocked-change`);
+  const items = page.getByTestId('task-items');
+  await expect(items.getByRole('heading', { level: 3 })).toHaveText(['1. 後端', '2. 介面']);
+  await expect(items.getByTestId('task-item-count')).toHaveText(['本階段完成 1/2', '本階段完成 0/2']);
+  await expect(items.getByRole('listitem')).toHaveCount(5);
+  await expect(items.locator('[data-testid="task-item"][data-done="true"]')).toHaveCount(2);
+  await expect(items.getByRole('listitem').first()).toHaveText('✓已完成：前置：確認快照契約');
+  await expect(items.getByRole('listitem').nth(3)).toContainText('未完成：2.1 詳情頁在完成度下方列出任務');
+  await expect(items.getByRole('checkbox')).toHaveCount(0);
+  await expect(page.getByTestId('task-items-missing')).toHaveCount(0);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await shot(page, 'tasks-detail-items');
 
   await page.goto(`/ui/tasks/${encodeURIComponent(REPO.key)}/needs-sidecar`);
   const deps = page.getByTestId('task-deps');

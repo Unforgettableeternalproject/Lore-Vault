@@ -1318,6 +1318,17 @@ details.lv-check > .lv-check__head { cursor: pointer; }
 .lv-progress::-webkit-progress-value { background: var(--zone-main, var(--accent)); border-radius: var(--lv-radius-control); }
 .lv-progress::-moz-progress-bar { background: var(--zone-main, var(--accent)); border-radius: var(--lv-radius-control); }
 .lv-task-section { margin-top: 28px; }
+/* 任務明細（唯讀）：階段標題＋小計，逐項以符號＋刪除線區分完成與否（不只靠顏色） */
+.lv-task-items { display: flex; flex-direction: column; gap: 18px; margin-top: 14px; }
+.lv-task-items__group { min-width: 0; }
+.lv-task-items__head { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; justify-content: space-between; padding-bottom: 6px; margin-bottom: 8px; border-bottom: 1px solid var(--line); }
+.lv-task-items__title { margin: 0; font-family: var(--font-sans); font-size: var(--lv-fs-body); font-weight: 600; color: var(--ink-title); overflow-wrap: anywhere; min-width: 0; }
+.lv-task-items__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.lv-task-item { display: grid; grid-template-columns: 1.2em minmax(0, 1fr); gap: 8px; align-items: baseline; font-size: var(--lv-fs-body); color: var(--ink); }
+.lv-task-item__mark { font-family: var(--font-mono); text-align: center; color: var(--ink-soft); }
+.lv-task-item__text { overflow-wrap: anywhere; min-width: 0; }
+.lv-task-item[data-done="true"] { color: var(--ink-soft); }
+.lv-task-item[data-done="true"] .lv-task-item__text { text-decoration: line-through; }
 /* 核准區塊：徽章列、紀錄、說明、按鈕以 lv-stack 間距分隔；按鈕維持原寬，橫幅不另加上邊距 */
 .lv-task-approval { align-items: flex-start; }
 .lv-task-approval > p { margin: 0; }

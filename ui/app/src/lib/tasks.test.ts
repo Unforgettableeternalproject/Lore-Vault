@@ -77,6 +77,51 @@ describe('parseSnapshot', () => {
     expect(parsed.changes[0]!.approved).toEqual(approved);
   });
 
+  function groupsOf(taskGroups: unknown) {
+    const parsed = parseSnapshot({
+      mime: 'application/json',
+      content_base64: b64({ schema: 1, changes: [{ name: 'x', status: '可開工', tasks: { done: 1, total: 2 }, task_groups: taskGroups }] }),
+    });
+    if (typeof parsed === 'string') throw new Error(parsed);
+    return parsed.changes[0]!.task_groups;
+  }
+
+  it('task_groups：合法內容原樣保留（含 title 為 null 的群組）', () => {
+    const groups = [
+      { title: null, items: [{ text: '前置', done: true }] },
+      { title: '1. 後端', items: [{ text: '1.1 快照', done: true }, { text: '1.2 doctor', done: false }] },
+    ];
+    expect(groupsOf(groups)).toEqual(groups);
+  });
+
+  it.each([
+    ['欄位不存在', undefined],
+    ['空陣列', []],
+    ['不是陣列', 'nope'],
+    ['物件', { title: 'a', items: [] }],
+    ['群組沒有可用項目', [{ title: 'a', items: [] }, { title: 'b' }, null, 3]],
+  ])('task_groups %s → 視為沒有明細，快照仍可解讀', (_label, value) => {
+    expect(groupsOf(value)).toBeUndefined();
+  });
+
+  it('task_groups：文字為空字串的項目保留（後端照樣計入 total）；只有空項目的階段也保留', () => {
+    const groups = [
+      { title: '1. 後端', items: [{ text: '', done: true }, { text: '有字', done: false }] },
+      { title: '2. 只有空項目', items: [{ text: '', done: false }] },
+    ];
+    expect(groupsOf(groups)).toEqual(groups);
+  });
+
+  it('task_groups：畸形的群組與項目略過，其餘保留；多餘欄位不帶出', () => {
+    expect(
+      groupsOf([
+        'bad',
+        { title: 7, items: [{ text: '留下', done: false, extra: 1 }, { done: true }, { text: 42, done: true }, { text: '缺 done' }, null] },
+        { title: '2. 介面', items: 'x' },
+      ]),
+    ).toEqual([{ title: null, items: [{ text: '留下', done: false }] }]);
+  });
+
   it.each([
     ['不是 JSON', b64('{oops'), '不是有效的 JSON'],
     ['不是 base64', '%%%', 'base64'],

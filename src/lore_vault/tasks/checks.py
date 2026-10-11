@@ -418,7 +418,8 @@ def _remote_snapshot_sync(
 
 
 def snapshot_shape(ctx: DoctorContext) -> CheckResult:
-    """服務端側載內容能解析成快照 schema v1（壞掉時 UI 無法顯示）。"""
+    """服務端側載內容能解析成快照 schema v1（壞掉時 UI 無法顯示），且每筆
+    `task_groups` 的加總與同一筆 `tasks` 一致（見 `snapshot.shape_errors`）。"""
     ws = _workspace(ctx)
     try:
         vault, remote = _remote_snapshot(ctx, ws)
@@ -997,7 +998,7 @@ def default_registry() -> Registry:
         (
             "tasks.snapshot_shape",
             snapshot_shape,
-            "服務端的任務快照能解析成快照 schema v1",
+            "服務端的任務快照能解析成快照 schema v1，task_groups 加總與 tasks 計數一致",
         ),
         (
             "tasks.pending_apply_stale",

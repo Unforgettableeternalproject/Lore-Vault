@@ -133,6 +133,36 @@ def write_yaml(path: Path, data: Mapping[str, Any]) -> None:
     )
 
 
+_TASK_ITEM = re.compile(r"^\s*[-*]\s+\[([ xX])\](.*)$")
+_TASK_HEADING = re.compile(r"^#{2,3}\s+(.*)$")
+# ATX 標題尾端的閉合 `#`（前面要有空白，或整段都是 `#`）：`## A ##` → `A`，`## C#` 不動
+_TASK_HEADING_CLOSE = re.compile(r"(?:^|\s+)#+$")
+
+
+def parse_task_groups(text: str) -> list[dict[str, Any]]:
+    """tasks.md → `[{"title": str | None, "items": [{"text", "done"}]}]`。
+
+    - 階段：`##`／`###` 標題（去掉 `#`、尾端閉合的 `#` 與前後空白，保留編號）；`#`
+      （H1）與更深的標題不算階段。第一個階段之前的項目歸 `title=None`；標題沒有
+      文字時 `title` 也是 `None`（另起一個無標題群組）；沒有項目的階段略過
+    - 項目：checkbox 行（`-`／`*`，`[ ]`／`[x]`／`[X]`），縮排的巢狀項目攤平進
+      所在階段；`text` 為去掉前綴後的單行文字
+    """
+    groups: list[dict[str, Any]] = [{"title": None, "items": []}]
+    for line in text.splitlines():
+        item = _TASK_ITEM.match(line)
+        if item:
+            groups[-1]["items"].append(
+                {"text": item.group(2).strip(), "done": item.group(1) != " "}
+            )
+            continue
+        heading = _TASK_HEADING.match(line)
+        if heading:
+            title = _TASK_HEADING_CLOSE.sub("", heading.group(1).strip())
+            groups.append({"title": title or None, "items": []})
+    return [group for group in groups if group["items"]]
+
+
 @dataclass
 class Change:
     name: str
@@ -169,14 +199,14 @@ class Change:
         path = self.path / filename
         return path.read_text(encoding="utf-8-sig") if path.is_file() else ""
 
+    def task_groups(self) -> list[dict[str, Any]]:
+        """tasks.md 的階段與逐條任務（見 `parse_task_groups`）。"""
+        return parse_task_groups(self.read_file("tasks.md"))
+
     def tasks_progress(self) -> tuple[int, int]:
-        done = total = 0
-        for line in self.read_file("tasks.md").splitlines():
-            m = re.match(r"^\s*[-*]\s+\[([ xX])\]", line)
-            if m:
-                total += 1
-                done += m.group(1) != " "
-        return done, total
+        """(完成數, 總數)：由 `task_groups` 攤平計數，兩者永遠同源。"""
+        items = [item for group in self.task_groups() for item in group["items"]]
+        return sum(item["done"] for item in items), len(items)
 
     def archived_at(self) -> str:
         return str(self.meta.get("archived_at") or self.path.name[:10])

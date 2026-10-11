@@ -24,7 +24,9 @@ server。
   DECISIONS 鏡像（`task-decisions`）只由 stdio 的 init／validate 推送
 - `sync_specs`（archive 段二落地）只限 stdio；HTTP 在任何服務呼叫之前拒絕
 - propose／edit／validate（有記 base）／archive／sync_specs 成功後以服務端內容重算
-  UI 快照並推送（`snapshot.push_remote`），失敗只記在回應的 `snapshot`
+  UI 快照並推送（`snapshot.push_remote`），失敗只記在回應的 `snapshot`。`list`
+  （單一 vault、已啟用）只在現存快照是 `task_groups` 之前的舊格式時補推一次
+  （`snapshot.backfill_task_groups`），其餘情況維持純讀
 - 與 Shell 無關的動作本體在 `remote_ops`（CLI 共用）
 """
 
@@ -403,10 +405,15 @@ class TaskOps:
     ) -> dict[str, Any]:
         return await remote_ops.push_mirrors(target.store, ws, changes)
 
-    async def _push_snapshot(self, target: Target) -> dict[str, Any]:
-        """寫入類動作成功後，以服務端內容重算並推送 UI 快照；失敗不影響動作本身。"""
+    async def _push_snapshot(
+        self, target: Target, push: Any = None
+    ) -> dict[str, Any] | None:
+        """寫入類動作成功後，以服務端內容重算並推送 UI 快照；失敗不影響動作本身。
+        `push`：預設 `snapshot.push_remote`；回 None（`backfill_task_groups` 判定
+        不需要補推）時這裡也回 None。"""
+        push = push or snapshot.push_remote
         try:
-            pushed = await snapshot.push_remote(target.store, self._local_ws(target))
+            pushed = await push(target.store, self._local_ws(target))
         except rs.StoreError as exc:
             return {"pushed": False, "reason": exc.message}
         except rs.RemoteError as exc:
@@ -415,6 +422,8 @@ class TaskOps:
             return {"pushed": False, "reason": exc.detail}
         except snapshot.SnapshotTooLarge as exc:
             return {"pushed": False, "reason": str(exc)}
+        if pushed is None:
+            return None
         return {"pushed": True, "changes": pushed.changes}
 
     # ── actions ──
@@ -683,6 +692,11 @@ class TaskOps:
             elif state.enabled and not local:
                 result["next_step"] = LIST_INIT_NEXT_STEP
         result["changes"] = _filter(rows, status_filter)
+        if state.enabled:
+            # 舊格式（沒有 task_groups）的快照在這裡補推一次；不需要時不寫入、不加欄位
+            pushed = await self._push_snapshot(target, snapshot.backfill_task_groups)
+            if pushed is not None:
+                result["snapshot"] = pushed
         return result
 
     async def disable(self, vault: str | None, author: str | None) -> dict[str, Any]:

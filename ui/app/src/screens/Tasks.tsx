@@ -339,6 +339,59 @@ function Progress({ tasks }: { tasks: TaskChange['tasks'] }) {
   );
 }
 
+/**
+ * 詳情頁的任務明細（唯讀）：各階段標題＋小計，底下逐項列出。快照沒帶明細時只留一句說明；
+ * 已封存的 change 本來就不帶明細，不加說明（只留進度條）。
+ */
+function TaskItems({ change }: { change: TaskChange }) {
+  const groups = change.task_groups ?? [];
+  if (groups.length === 0) {
+    if (change.tasks.total <= 0 || statusGroup(change.status) === 'done') return null;
+    return (
+      <p class="lv-muted lv-small" data-testid="task-items-missing">
+        快照未含任務明細。
+      </p>
+    );
+  }
+  return (
+    <div class="lv-task-items" data-testid="task-items">
+      {groups.map((group, gi) => {
+        const done = group.items.filter((item) => item.done).length;
+        return (
+          <div key={gi} class="lv-task-items__group" data-testid="task-item-group">
+            {group.title !== null && (
+              <div class="lv-task-items__head">
+                <h3 class="lv-task-items__title">{group.title}</h3>
+                <span class="lv-mono lv-small lv-muted" data-testid="task-item-count">
+                  <span class="lv-visually-hidden">本階段完成 </span>
+                  {done}/{group.items.length}
+                </span>
+              </div>
+            )}
+            <ul class="lv-task-items__list" aria-label={group.title ?? '未分階段的任務'}>
+              {group.items.map((item, ii) => (
+                <li key={ii} class="lv-task-item" data-done={item.done ? 'true' : 'false'} data-testid="task-item">
+                  <span class="lv-task-item__mark" aria-hidden="true">
+                    {item.done ? '✓' : '○'}
+                  </span>
+                  <span class="lv-visually-hidden">{item.done ? '已完成：' : '未完成：'}</span>
+                  {item.text === '' ? (
+                    <span class="lv-task-item__text lv-muted" data-testid="task-item-empty">
+                      （未填寫）
+                    </span>
+                  ) : (
+                    <span class="lv-task-item__text">{item.text}</span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function BlockerBadges({ change }: { change: TaskChange }) {
   return (
     <>
@@ -535,6 +588,7 @@ function ChangeBody({
           TASKS 完成度
         </h2>
         <Progress tasks={change.tasks} />
+        <TaskItems change={change} />
       </section>
 
       <section class="lv-task-section" aria-labelledby="task-specs">

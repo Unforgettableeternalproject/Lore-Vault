@@ -11,15 +11,26 @@
               "requires_authorization": bool,
               "tasks": {"done", "total"}, "source": str|null, "why": str|null,
               "specs": [{"capability", "requirement", "op"}],
-              "note_id": str|null, "archived_at": str|null}]}
+              "note_id": str|null, "archived_at": str|null,
+              "task_groups": [{"title": str|null,
+                               "items": [{"text": str, "done": bool}]}]}]}
 ```
 
-- 語料邊界：只含推導結果與標題。spec delta 全文、tasks.md 逐項文字、design.md
-  一律不含；`why` 是 proposal 的「Why」段（本來就會進 archive note），
-  截至 `MAX_WHY_CHARS`
+- `task_groups`（可省略）：tasks.md 的階段（`##`／`###` 標題；第一個標題之前的項目
+  與標題沒有文字的階段 `title` 為 null；沒有項目的階段略過）與逐條 checkbox
+  （巢狀項目攤平；`text` 可為空字串），解析見
+  `workspace.parse_task_groups`。只有進行中的 change 帶；已封存（含待落地）與因
+  大小上限被降級的 change **省略這個欄位**（不送 null），UI 降級為只有進度條。
+  不變量：各組 items 數與 done 數的加總等於同一筆的 `tasks.total`／`tasks.done`
+  （兩者由同一份解析結果算出；`shape_errors`／doctor `tasks.snapshot_shape` 對帳）
+- 語料邊界（2026-10-11 放寬，TASK_LAYER_UI §1.2）：推導結果、標題，加上進行中
+  change 的 tasks.md 階段標題與逐項文字。spec delta 全文與 design.md 一律不含；
+  `why` 是 proposal 的「Why」段（本來就會進 archive note），截至 `MAX_WHY_CHARS`
 - 內容是確定性的（不含產生時間、鍵排序固定）：同一份本機狀態永遠得到同一組位元組，
   doctor `tasks.snapshot_sync` 以雜湊比對；同步時間由服務端側載的 `updated` 提供
-- 超過服務端上限（64KB）時先拿掉已封存 change 的 `why`，仍超過就拒絕推送（不截斷）
+- 超過服務端上限（64KB）時的降級順序（`_fit`）：先拿掉已封存 change 的 `why` →
+  仍超過就由大到小逐一拿掉進行中 change 的 `task_groups`（省略欄位，`tasks` 計數
+  保留）→ 全拿掉仍超過就拒絕推送（不截斷）
 - 依 vault 分份：每個 vault 只收 metadata `vault` 解析後等於它的 change，加上沒記
   vault 的 change（歸到預設 vault：明確指定或專案目錄 binding）。一次推送對所有涉及的
   vault 各推一份——change 封存到別的 vault 後，原 vault 的快照同時更新、把它移除
@@ -30,7 +41,8 @@
   （`remote_snapshot_bytes`：`task-index` 列舉＋各 `task-change:<name>`），
   不看本機目錄——MCP 與 CLI 推的是同一份計算結果，不會互相覆蓋。
   CLI 各指令結尾與 `sync`、MCP 的 propose／edit／validate record_base／archive／
-  sync_specs 成功後都走這條（`push_remote`）
+  sync_specs 成功後都走這條（`push_remote`）。MCP `list` 是純讀，唯一例外是現存快照
+  為 `task_groups` 之前的舊格式時補推一次（`backfill_task_groups`）
 - vault 沒有 `task-index`（還沒用過服務端任務層的舊專案）：照舊由本機目錄計算
   （`push`）；服務不可達時 CLI 只警告
 - 服務端計算的每筆 change 多一個 `state`（`active`／`pending_apply`／`archived`；
@@ -93,10 +105,12 @@ CHANGE_FIELDS = frozenset(
         "archived_at",
     }
 )
+# 可省略的欄位：沒有這個 key ＝ 無明細（已封存、被大小上限降級、或舊版推的快照）
+TASK_GROUPS = "task_groups"
 
 
 class SnapshotTooLarge(Exception):
-    """快照超過服務端側載上限，拿掉已封存 change 的 why 後仍超過。"""
+    """快照超過服務端側載上限，拿掉已封存 change 的 why 與所有 task_groups 後仍超過。"""
 
 
 def _str_or_none(value: Any) -> str | None:
@@ -131,7 +145,7 @@ def _change_entry(
     meta = change.meta
     blocked = [d for d in meta.get("blocked_by") or [] if isinstance(d, str)]
     depends = [d for d in meta.get("depends_on") or [] if isinstance(d, str)]
-    return {
+    entry = {
         "name": change.name,
         "status": status,
         "reasons": list(reasons),
@@ -153,6 +167,9 @@ def _change_entry(
         "note_id": _str_or_none(meta.get("note_id")),
         "archived_at": change.archived_at() if change.archived else None,
     }
+    if not change.archived:
+        entry[TASK_GROUPS] = change.task_groups()
+    return entry
 
 
 def build_snapshot(
@@ -172,7 +189,7 @@ def build_snapshot(
     }
 
 
-def encode(snapshot: dict[str, Any]) -> bytes:
+def encode(snapshot: Any) -> bytes:
     return json.dumps(
         snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
@@ -188,7 +205,8 @@ def snapshot_bytes(
 
 
 def _fit(snapshot: dict[str, Any], max_bytes: int) -> bytes:
-    """超過上限時先拿掉已封存 change 的 why，仍超過就拒絕（不截斷）。"""
+    """超過上限時的降級順序：先拿掉已封存 change 的 why → 仍超過就由大到小
+    （同大小依名稱）逐一拿掉 `task_groups`，夠小就停 → 全拿掉仍超過就拒絕（不截斷）。"""
     data = encode(snapshot)
     if len(data) <= max_bytes:
         return data
@@ -196,6 +214,15 @@ def _fit(snapshot: dict[str, Any], max_bytes: int) -> bytes:
         if entry["archived_at"] is not None:
             entry["why"] = None
     data = encode(snapshot)
+    detailed = sorted(
+        (e for e in snapshot["changes"] if TASK_GROUPS in e),
+        key=lambda e: (-len(encode(e[TASK_GROUPS])), e["name"]),
+    )
+    for entry in detailed:
+        if len(data) <= max_bytes:
+            break
+        del entry[TASK_GROUPS]
+        data = encode(snapshot)
     if len(data) > max_bytes:
         raise SnapshotTooLarge(
             f"任務快照 {len(data)} 位元組，超過服務端上限 {max_bytes} 位元組"
@@ -280,6 +307,8 @@ def _remote_entry(
     )
     entry["approved"] = remote_ops.approved_info(auth)
     if change.state != rs.STATE_ACTIVE:
+        # 已封存待落地也算已封存：不帶逐條明細
+        entry.pop(TASK_GROUPS, None)
         apply = change.doc.get("apply") or {}
         stamp = change.meta.get("archived_at") or apply.get("archived_at")
         entry["archived_at"] = _str_or_none(stamp)
@@ -365,12 +394,70 @@ async def push_remote(
 ) -> PushResult:
     """以服務端內容計算並整份覆寫該 vault 的 `tasks-snapshot`。失敗拋
     `remote_store` 的例外或 `SnapshotTooLarge`，由呼叫端決定要不要只警告。"""
-    data = await remote_snapshot_bytes(store, local)
+    return await _put_remote(store, await remote_snapshot_bytes(store, local))
+
+
+async def _put_remote(store: rs.RemoteStore, data: bytes) -> PushResult:
     response = await store.put_derived(SNAPSHOT_KEY, data)
     changes = len(json.loads(data)["changes"])
     return PushResult(
         store.vault, str(response.get("updated") or ""), len(data), changes
     )
+
+
+async def backfill_task_groups(
+    store: rs.RemoteStore, local: Workspace | None = None
+) -> PushResult | None:
+    """讀取路徑（MCP `list`）的舊格式補推：服務端現存快照是 `task_groups` 之前的版本
+    推的（有進行中的 change、卻沒有任何一筆帶 `task_groups`）時重算並覆寫，否則不寫入
+    （回 None）。推送只發生在寫入類動作，沒人再編輯的 vault 靠這條換成新格式；
+    補過一次後現存快照已帶 `task_groups`，之後的 `list` 不再寫入。
+
+    重算結果也沒有 `task_groups`（全被大小上限降級）時不推——那不是舊格式。
+    呼叫端須先確認任務層已啟用（停用中服務端拒收快照）。"""
+    blob = await store.get_blob(SNAPSHOT_KEY)
+    if blob is None:
+        return None
+    try:
+        stored = json.loads(blob.content.decode("utf-8"))["changes"]
+        stale = any(e.get("state") == rs.STATE_ACTIVE for e in stored) and not any(
+            TASK_GROUPS in e for e in stored
+        )
+    except (UnicodeDecodeError, ValueError, KeyError, TypeError, AttributeError):
+        return None  # 壞掉的快照由 doctor `tasks.snapshot_shape` 處理
+    if not stale:
+        return None
+    data = await remote_snapshot_bytes(store, local)
+    if not any(TASK_GROUPS in e for e in json.loads(data)["changes"]):
+        return None
+    return await _put_remote(store, data)
+
+
+def _task_groups_errors(groups: Any, tasks: dict[str, int], i: int) -> list[str]:
+    """`task_groups` 的形狀，以及加總與同一筆 `tasks` 的對帳。"""
+    where = f"changes[{i}].{TASK_GROUPS}"
+    shaped = isinstance(groups, list) and all(
+        isinstance(g, dict)
+        and (g.get("title") is None or isinstance(g["title"], str))
+        and isinstance(g.get("items"), list)
+        and all(
+            isinstance(item, dict)
+            and isinstance(item.get("text"), str)
+            and isinstance(item.get("done"), bool)
+            for item in g["items"]
+        )
+        for g in groups
+    )
+    if not shaped:
+        return [f"{where} 必須是 [{{title, items: [{{text, done}}]}}]（省略＝無明細）"]
+    items = [item for g in groups for item in g["items"]]
+    done = sum(item["done"] for item in items)
+    if (done, len(items)) != (tasks["done"], tasks["total"]):
+        return [
+            f"{where} 加總 {done}/{len(items)} 與 tasks "
+            f"{tasks['done']}/{tasks['total']} 不一致"
+        ]
+    return []
 
 
 def shape_errors(data: bytes) -> list[str]:
@@ -406,6 +493,8 @@ def shape_errors(data: bytes) -> list[str]:
             and isinstance(tasks.get("total"), int)
         ):
             errors.append(f"changes[{i}].tasks 必須是 {{done, total}} 整數")
+        elif TASK_GROUPS in entry:
+            errors.extend(_task_groups_errors(entry[TASK_GROUPS], tasks, i))
         for key in ("reasons", "blocked_by", "depends_on", "specs"):
             if not isinstance(entry[key], list):
                 errors.append(f"changes[{i}].{key} 必須是陣列")

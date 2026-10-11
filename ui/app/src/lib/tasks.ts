@@ -4,7 +4,7 @@
 import { ApiError, type ApiClient } from './api';
 import { ALL } from './context';
 import type { BadgeTone } from '../components/ui';
-import type { BlobListResult, BlobRecord, TaskChange, TaskSnapshot, TaskStatus } from './types';
+import type { BlobListResult, BlobRecord, TaskChange, TaskItem, TaskItemGroup, TaskSnapshot, TaskStatus } from './types';
 
 /** 任務層固定使用的側載 key */
 export const TASKS_SNAPSHOT_KEY = 'tasks-snapshot';
@@ -87,6 +87,27 @@ function optString(v: unknown): v is string | null | undefined {
   return v === undefined || v === null || typeof v === 'string';
 }
 
+/**
+ * 任務明細（`task_groups`）是選填的輔助資訊：格式不對的部分直接略過，不讓整份快照變成錯誤
+ * （完成度仍由 `tasks` 提供）。沒有任何可用項目時回 undefined，畫面降級為只顯示進度條。
+ * 文字為空字串的項目要保留：後端照樣計入 `tasks.total`，丟掉會讓清單筆數對不上。
+ */
+function parseTaskGroups(raw: unknown): TaskItemGroup[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const groups: TaskItemGroup[] = [];
+  for (const group of raw) {
+    if (!isRecord(group) || !Array.isArray(group.items)) continue;
+    const items: TaskItem[] = [];
+    for (const item of group.items) {
+      if (!isRecord(item) || typeof item.text !== 'string' || typeof item.done !== 'boolean') continue;
+      items.push({ text: item.text, done: item.done });
+    }
+    if (items.length === 0) continue;
+    groups.push({ title: typeof group.title === 'string' && group.title ? group.title : null, items });
+  }
+  return groups.length > 0 ? groups : undefined;
+}
+
 /** 檢查單一 change 的形狀；錯誤回說明字串，正確回正規化後的物件（缺的選填欄位補預設）。 */
 function parseChange(raw: unknown, index: number): TaskChange | string {
   const at = `changes[${index}]`;
@@ -137,6 +158,8 @@ function parseChange(raw: unknown, index: number): TaskChange | string {
     depends_on: deps as TaskChange['depends_on'],
     requires_authorization: raw.requires_authorization === true,
     tasks: { done: tasks.done, total: tasks.total },
+    // 一定要覆寫：上面的展開會把原始（可能畸形的）值帶進來
+    task_groups: parseTaskGroups(raw.task_groups),
     source: (raw.source as string | null | undefined) ?? null,
     why: (raw.why as string | null | undefined) ?? null,
     specs: specs as TaskChange['specs'],

@@ -512,6 +512,57 @@ async def test_list_statuses_stdio_reads_decisions_http_cannot(app, project, tmp
         assert_no_paths(http.raw, tmp_path)
 
 
+def _put_snapshot(db_path: Path, data: dict[str, Any]) -> int:
+    conn = connect(db_path)
+    try:
+        content = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        return storage_sidecar.put(
+            conn, VAULT, "tasks-snapshot", content, space="dev"
+        ).version
+    finally:
+        conn.close()
+
+
+async def test_list_backfills_snapshot_pushed_before_task_groups(app, db_path, project):
+    """舊版（`task_groups` 之前）推的快照、之後沒人再寫入：`list` 補推一次換成新格式；
+    已是新格式就不寫入（版本不動、回應不多欄位）；停用中不補推。"""
+    async with client_for(make_shell(app, project, MODE_HTTP)) as hc:
+        http = Tasks(hc)
+        await http.ok(action="init", vault=VAULT)
+        await http.ok(action="propose", vault=VAULT, name="c1")
+        current = blob(db_path, "tasks-snapshot")
+        version = current.pop("_version")
+        assert current["changes"][0]["task_groups"]
+        # 已是新格式：list 是純讀
+        assert "snapshot" not in await http.ok(action="list", vault=VAULT)
+        assert blob(db_path, "tasks-snapshot")["_version"] == version
+
+        old = {
+            "schema": 1,
+            "changes": [
+                {k: v for k, v in entry.items() if k != "task_groups"}
+                for entry in current["changes"]
+            ],
+        }
+        version = _put_snapshot(db_path, old)
+        # `*`（跨 vault 列舉）不補推
+        await http.ok(action="list", vault="*")
+        assert blob(db_path, "tasks-snapshot")["_version"] == version
+        listed = await http.ok(action="list", vault=VAULT)
+        assert listed["snapshot"] == {"pushed": True, "changes": 1}
+        after = blob(db_path, "tasks-snapshot")
+        assert after.pop("_version") == version + 1 and after == current
+        assert "snapshot" not in await http.ok(action="list", vault=VAULT)
+        assert blob(db_path, "tasks-snapshot")["_version"] == version + 1
+
+        # 停用中：服務端拒收快照，list 照常回應、不嘗試補推
+        version = _put_snapshot(db_path, old)
+        await http.ok(action="disable", vault=VAULT)
+        listed = await http.ok(action="list", vault=VAULT)
+        assert "snapshot" not in listed and len(listed["changes"]) == 1
+        assert blob(db_path, "tasks-snapshot")["_version"] == version
+
+
 # ── validate（主 spec 讀鏡像）───────────────────────────────────────
 
 

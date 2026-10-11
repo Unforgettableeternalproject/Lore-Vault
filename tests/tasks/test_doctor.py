@@ -371,3 +371,29 @@ def test_snapshot_shape(tasks_dir: TasksDir, vault):
         assert _sync_status(tasks_dir, vault, "tasks.snapshot_shape") == "fail"
         # 內容不同於本機：sync 檢查同時 warn
         assert _sync_status(tasks_dir, vault) == "warn"
+
+
+def test_snapshot_shape_reconciles_task_groups(tasks_dir: TasksDir, vault):
+    """服務端快照的 `task_groups` 加總必須等於同一筆的 `tasks`；省略欄位合法。"""
+    tasks_dir.propose("c1", "--skip-specs")
+    assert tasks_dir.run("sync", "--vault", VAULT, client=vault.client)[0] == 0
+    pushed = json.loads(
+        base64.b64decode(vault.blobs[(VAULT, "tasks-snapshot")]["content_base64"])
+    )
+    entry = pushed["changes"][0]
+    assert entry["tasks"] == {"done": 2, "total": 2}
+    assert sum(len(g["items"]) for g in entry["task_groups"]) == 2
+    assert _sync_status(tasks_dir, vault, "tasks.snapshot_shape") == "pass"
+    # 明細少一項（計數沒跟著變）：對帳紅
+    entry["task_groups"][0]["items"].pop()
+    _put_raw(vault, json.dumps(pushed).encode("utf-8"))
+    report = _report(tasks_dir, vault.client, "--vault", VAULT)["tasks.snapshot_shape"]
+    assert report["status"] == "fail"
+    assert any("加總 1/1 與 tasks 2/2 不一致" in d for d in report["details"])
+    # 舊版推的快照沒有這個欄位：格式仍合法（只是 snapshot_sync 會 warn 要重推）
+    del entry["task_groups"]
+    _put_raw(vault, json.dumps(pushed).encode("utf-8"))
+    assert _sync_status(tasks_dir, vault, "tasks.snapshot_shape") == "pass"
+    assert _sync_status(tasks_dir, vault) == "warn"
+    assert tasks_dir.run("sync", "--vault", VAULT, client=vault.client)[0] == 0
+    assert _sync_status(tasks_dir, vault) == "pass"

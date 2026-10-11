@@ -1,4 +1,5 @@
-"""任務快照（UI-T2）：內容與語料邊界、確定性、大小上限，以及 `sync` 與四個子指令的推送。
+"""任務快照（UI-T2）：內容與語料邊界、`task_groups`（階段＋逐條任務）與其對帳、
+確定性、大小上限與降級順序，以及 `sync` 與四個子指令的推送。
 
 推送失敗只在 stderr 警告、exit code 不變；stdout（含 `list --json`）不受影響。
 """
@@ -7,12 +8,14 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 
 import pytest
 
 from lore_vault.binding import resolve_binding
+from lore_vault.tasks import remote_store as rs
 from lore_vault.tasks import snapshot
-from lore_vault.tasks.workspace import load_workspace
+from lore_vault.tasks.workspace import Change, load_workspace, parse_task_groups
 
 from .conftest import (
     SPEC_A,
@@ -23,11 +26,13 @@ from .conftest import (
     unreachable_client,
 )
 
-# 只出現在 delta 內文／scenario、tasks.md 逐項與 design.md 的字串（不可進快照）
+# 只出現在 delta 內文／scenario、design.md 的字串（不可進快照）；tasks.md 的階段標題與
+# 逐項文字自 2026-10-11 起可進快照，但只限進行中的 change
 DELTA_SECRET = "機密規格內文zq1"
 SCENARIO_SECRET = "機密情境zq2"
 TASK_SECRET = "機密子任務zq3"
 DESIGN_SECRET = "機密設計zq4"
+ARCHIVED_TASK = "已封存子任務zq5"
 
 
 def _ws(tasks_dir: TasksDir):
@@ -74,7 +79,9 @@ def test_snapshot_fields_and_statuses(tasks_dir: TasksDir):
     assert snap["schema"] == 1 and set(snap) == {"schema", "changes"}
     changes = {c["name"]: c for c in snap["changes"]}
     for entry in changes.values():
-        assert set(entry) == snapshot.CHANGE_FIELDS
+        assert set(entry) - {snapshot.TASK_GROUPS} == snapshot.CHANGE_FIELDS
+        # 只有進行中的 change 帶逐條明細；已封存的省略欄位（不是 null）
+        assert (snapshot.TASK_GROUPS in entry) == (entry["archived_at"] is None)
     ready = changes["ready"]
     assert ready["status"] == "可開工" and ready["reasons"] == []
     assert ready["source"] == "T-90"
@@ -121,7 +128,8 @@ def test_unknown_status_when_decisions_missing(tasks_dir: TasksDir):
 
 
 def test_snapshot_excludes_corpus_text(tasks_dir: TasksDir):
-    """語料邊界：spec delta 全文、scenario、tasks.md 逐項、design.md 都不進快照。"""
+    """語料邊界：spec delta 全文、scenario、design.md 不進快照；tasks.md 的階段標題與
+    逐項文字只有進行中的 change 會進（已封存的不帶）。"""
     tasks_dir.write_main("demo", "# demo\n\n## Requirements\n")
     tasks_dir.propose(
         "c1",
@@ -141,14 +149,281 @@ def test_snapshot_excludes_corpus_text(tasks_dir: TasksDir):
     (tasks_dir.change_dir("c1") / "design.md").write_text(
         f"# Design\n\n{DESIGN_SECRET}\n", encoding="utf-8"
     )
+    old = tasks_dir.root / "changes" / "archive" / "2026-10-01-old"
+    old.mkdir(parents=True)
+    (old / ".openspec.yaml").write_text("schema: spec-driven\n", encoding="utf-8")
+    (old / "tasks.md").write_text(f"- [x] {ARCHIVED_TASK}\n", encoding="utf-8")
     data = snapshot.snapshot_bytes(_ws(tasks_dir)).decode("utf-8")
-    for secret in (DELTA_SECRET, SCENARIO_SECRET, TASK_SECRET, DESIGN_SECRET):
+    for secret in (DELTA_SECRET, SCENARIO_SECRET, DESIGN_SECRET, ARCHIVED_TASK):
         assert secret not in data
-    entry = json.loads(data)["changes"][0]
+    entry, archived = json.loads(data)["changes"]
     assert entry["specs"] == [
         {"capability": "demo", "requirement": "公開標題", "op": "ADDED"}
     ]
     assert entry["tasks"] == {"done": 1, "total": 2}
+    # `# Tasks`（H1）不算階段：兩項都歸 title=None
+    assert entry["task_groups"] == [
+        {
+            "title": None,
+            "items": [
+                {"text": TASK_SECRET, "done": True},
+                {"text": "2", "done": False},
+            ],
+        }
+    ]
+    assert archived["tasks"] == {"done": 1, "total": 1}
+    assert snapshot.TASK_GROUPS not in archived
+
+
+# ── task_groups：解析 ──
+
+TASKS_MD = """# Tasks
+
+- [ ] 開場項目
+
+## 1. 後端
+- [x] 解析
+  - [X] 巢狀子項
+* [ ] 星號項目
+
+## 空階段
+
+### 2.1 前端 
+-   [ ]   多餘空白  
+- 不是 checkbox
+- [x]
+#### 更深的標題不算階段
+- [ ] 仍屬 2.1
+"""
+
+
+def test_parse_task_groups():
+    assert parse_task_groups(TASKS_MD) == [
+        {"title": None, "items": [{"text": "開場項目", "done": False}]},
+        {
+            "title": "1. 後端",
+            "items": [
+                {"text": "解析", "done": True},
+                {"text": "巢狀子項", "done": True},
+                {"text": "星號項目", "done": False},
+            ],
+        },
+        {
+            "title": "2.1 前端",
+            "items": [
+                {"text": "多餘空白", "done": False},
+                {"text": "", "done": True},
+                {"text": "仍屬 2.1", "done": False},
+            ],
+        },
+    ]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("", []),
+        ("# Tasks\n\n## 只有標題\n\n### 也沒有項目\n", []),
+        # 沒有任何標題
+        ("- [ ] a\n- [x] b\n", [(None, [("a", False), ("b", True)])]),
+        # 只有 H1
+        ("# Tasks\n- [x] a\n", [(None, [("a", True)])]),
+        # CRLF 行尾
+        ("## 階段\r\n- [x] a\r\n", [("階段", [("a", True)])]),
+        # 同名階段各自成組，順序照檔案
+        (
+            "## A\n- [ ] 1\n## A\n- [ ] 2\n",
+            [("A", [("1", False)]), ("A", [("2", False)])],
+        ),
+        # ATX 閉合的 `#` 去掉；沒有前置空白的 `#` 是標題文字的一部分
+        (
+            "## A ##\n- [ ] 1\n### B #  \n- [x] 2\n## C#\n- [ ] 3\n## D # E\n- [ ] 4\n",
+            [
+                ("A", [("1", False)]),
+                ("B", [("2", True)]),
+                ("C#", [("3", False)]),
+                ("D # E", [("4", False)]),
+            ],
+        ),
+        # 標題沒有文字（含只剩閉合 `#`）：另起無標題群組，項目不併入前一階段
+        (
+            "## A\n- [ ] 1\n## \n- [x] 2\n## ##\n- [ ] 3\n",
+            [("A", [("1", False)]), (None, [("2", True)]), (None, [("3", False)])],
+        ),
+    ],
+)
+def test_parse_task_groups_edges(text, expected):
+    want = [
+        {"title": title, "items": [{"text": t, "done": d} for t, d in items]}
+        for title, items in expected
+    ]
+    assert parse_task_groups(text) == want
+
+
+def test_tasks_progress_counts_the_same_items(tmp_path):
+    """`tasks_progress` 由 `task_groups` 攤平：被略過的空階段、H1 不影響計數。"""
+    (tmp_path / "tasks.md").write_text(TASKS_MD, encoding="utf-8")
+    change = Change("c", tmp_path, False, {})
+    groups = change.task_groups()
+    assert change.tasks_progress() == (3, 7)
+    assert sum(len(g["items"]) for g in groups) == 7
+    assert Change("none", tmp_path / "missing", False, {}).tasks_progress() == (0, 0)
+
+
+def _legacy_tasks_progress(text: str) -> tuple[int, int]:
+    """改為由 `task_groups` 推導之前的 `tasks_progress`（照抄作為 oracle）。"""
+    done = total = 0
+    for line in text.splitlines():
+        m = re.match(r"^\s*[-*]\s+\[([ xX])\]", line)
+        if m:
+            total += 1
+            done += m.group(1) != " "
+    return done, total
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param("", (0, 0), id="empty"),
+        pytest.param("- [ ] a\n- [x] b\n", (1, 2), id="no-heading"),
+        pytest.param("# Tasks\n- [x] a\n- [ ] b\n", (1, 2), id="h1-only"),
+        # code fence 內的 checkbox 照舊計入（舊行為，不在這次改動範圍）
+        pytest.param(
+            "## A\n```md\n- [x] 範例\n- [ ] 範例\n```\n- [ ] 真的\n",
+            (1, 3),
+            id="code-fence",
+        ),
+        pytest.param("## 階段\r\n- [x] a\r\n- [ ] b\r\n", (1, 2), id="crlf"),
+        pytest.param(
+            "## A\n- [x] 1\n#### 更深\n- [ ] 2\n##### 再深\n- [x] 3\n",
+            (2, 3),
+            id="h4-items",
+        ),
+        pytest.param("## A\n- [x]\n- [ ]\n- [ ] \n", (1, 3), id="empty-checkbox"),
+        pytest.param(
+            "- [x] 父\n  - [ ] 子\n    - [X] 孫\n\t- [ ] tab 縮排\n",
+            (2, 4),
+            id="nested",
+        ),
+        pytest.param("* [x] a\n* [ ] b\n  * [x] c\n", (2, 3), id="star"),
+        pytest.param("- [X] a\n- [x] b\n- [ ] c\n", (2, 3), id="upper-x"),
+        pytest.param(
+            "## A ##\n- [x] 1\n## \n- [ ] 2\n## ##\n- [x] 3\n",
+            (2, 3),
+            id="closing-hashes-and-empty-title",
+        ),
+        # 不算 checkbox 的行：少空白、黏住符號、`+`、編號清單、其他字元；
+        # `[x]` 後緊接文字仍算
+        pytest.param(
+            "- [] 少空白\n-[x] 黏住\n+ [x] 加號\n1. [x] 編號\n"
+            "- [y] 其他字\n- [x]緊接文字\n",
+            (1, 1),
+            id="non-checkbox-lines",
+        ),
+        pytest.param(TASKS_MD, (3, 7), id="mixed"),
+    ],
+)
+def test_tasks_progress_matches_legacy_counting(tmp_path, text, expected):
+    """差分：新的 `tasks_progress`（由 `task_groups` 攤平）與改動前逐行 regex 計數一致。
+
+    `expected` 另外釘住數字，避免 oracle 與實作一起漂移。
+    """
+    (tmp_path / "tasks.md").write_bytes(text.encode("utf-8"))
+    change = Change("c", tmp_path, False, {})
+    progress = change.tasks_progress()
+    assert progress == _legacy_tasks_progress(change.read_file("tasks.md"))
+    assert progress == expected
+    assert sum(len(g["items"]) for g in change.task_groups()) == expected[1]
+
+
+# ── task_groups：快照與對帳 ──
+
+
+def _write_tasks(tasks_dir: TasksDir, name: str, text: str) -> None:
+    (tasks_dir.change_dir(name) / "tasks.md").write_text(text, encoding="utf-8")
+
+
+def test_snapshot_task_groups_reconcile_with_tasks(tasks_dir: TasksDir):
+    tasks_dir.propose("c1", "--skip-specs", complete=False)
+    _write_tasks(tasks_dir, "c1", TASKS_MD)
+    tasks_dir.propose("empty", "--skip-specs", complete=False)
+    _write_tasks(tasks_dir, "empty", "# Tasks\n")
+    ws = _ws(tasks_dir)
+    entries = _by_name(tasks_dir)
+    assert entries["c1"]["task_groups"] == parse_task_groups(TASKS_MD)
+    assert entries["c1"]["tasks"] == {"done": 3, "total": 7}
+    # 進行中但沒有任何 checkbox：空陣列（不是省略——省略留給已封存與降級）
+    assert entries["empty"]["task_groups"] == []
+    assert snapshot.shape_errors(snapshot.snapshot_bytes(ws)) == []
+
+
+def test_shape_errors_catch_task_groups_drift(tasks_dir: TasksDir, monkeypatch):
+    """對帳會紅：計數與明細不再同源（拿掉 `tasks_progress` 由 `task_groups` 推導的
+    保護）時，`shape_errors`（doctor `tasks.snapshot_shape`）報加總不一致。"""
+    tasks_dir.propose("c1", "--skip-specs", complete=False)
+    _write_tasks(tasks_dir, "c1", TASKS_MD)
+    ws = _ws(tasks_dir)
+    assert snapshot.shape_errors(snapshot.snapshot_bytes(ws)) == []
+    # monkeypatch 在測試結束時還原，不污染其他測試
+    monkeypatch.setattr(Change, "tasks_progress", lambda self: (3, 8))
+    errors = snapshot.shape_errors(snapshot.snapshot_bytes(ws))
+    assert errors == ["changes[0].task_groups 加總 3/7 與 tasks 3/8 不一致"]
+
+
+@pytest.mark.parametrize(
+    "groups",
+    [
+        None,
+        {},
+        [{"items": [{"text": "a", "done": False}]}, "x"],
+        [{"title": 1, "items": []}],
+        [{"title": None, "items": [{"text": "a"}]}],
+        [{"title": None, "items": [{"text": "a", "done": 1}]}],
+        [{"title": None, "items": [{"text": None, "done": True}]}],
+        # 形狀對、加總不符（done 與 total 各一種）
+        [{"title": None, "items": [{"text": "a", "done": True}]}],
+        [{"title": None, "items": []}],
+    ],
+)
+def test_shape_errors_reject_bad_task_groups(tasks_dir: TasksDir, groups):
+    tasks_dir.propose("c1", "--skip-specs", complete=False)
+    _write_tasks(tasks_dir, "c1", "- [ ] a\n")
+    snap = snapshot.build_snapshot(_ws(tasks_dir))
+    assert snapshot.shape_errors(snapshot.encode(snap)) == []
+    snap["changes"][0]["task_groups"] = groups
+    errors = snapshot.shape_errors(snapshot.encode(snap))
+    assert len(errors) == 1 and "task_groups" in errors[0]
+    # 省略欄位＝無明細，合法（舊版快照、降級）
+    del snap["changes"][0]["task_groups"]
+    assert snapshot.shape_errors(snapshot.encode(snap)) == []
+
+
+def _remote_change(name: str, state: str, tasks_md: str) -> rs.RemoteChange:
+    doc = rs.new_doc(name, {"vault": VAULT}, "# P\n", tasks_md)
+    doc["state"] = state
+    if state != rs.STATE_ACTIVE:
+        doc["meta"]["archived_at"] = "2026-10-01T00:00:00Z"
+    return rs.RemoteChange.from_doc(doc, 1, VAULT)
+
+
+def test_remote_snapshot_task_groups_only_for_active():
+    """服務端路徑：active 帶明細；已封存（待落地）與已落地都省略，計數照舊。"""
+    changes = [
+        _remote_change("live", rs.STATE_ACTIVE, TASKS_MD),
+        _remote_change("pending", rs.STATE_PENDING_APPLY, "- [x] 待落地項目\n"),
+        _remote_change("done", rs.STATE_ARCHIVED, "- [x] 已落地項目\n"),
+    ]
+    snap = snapshot.build_remote_snapshot(changes, {"done", "legacy"}, None)
+    entries = {e["name"]: e for e in snap["changes"]}
+    assert entries["live"]["task_groups"] == parse_task_groups(TASKS_MD)
+    assert entries["live"]["tasks"] == {"done": 3, "total": 7}
+    for name in ("pending", "done", "legacy"):
+        assert snapshot.TASK_GROUPS not in entries[name]
+    assert entries["pending"]["tasks"] == {"done": 1, "total": 1}
+    data = snapshot.encode(snap)
+    assert "待落地項目" not in data.decode("utf-8")
+    assert "已落地項目" not in data.decode("utf-8")
+    assert snapshot.shape_errors(data) == []
 
 
 def test_snapshot_bytes_are_deterministic(tasks_dir: TasksDir):
@@ -174,6 +449,57 @@ def test_size_limit_drops_archived_why_then_refuses(tasks_dir: TasksDir):
     assert entries["old"]["why"] is None and entries["live"]["why"]
     with pytest.raises(snapshot.SnapshotTooLarge):
         snapshot.snapshot_bytes(ws, max_bytes=200)
+
+
+def test_size_limit_degrade_order(tasks_dir: TasksDir):
+    """降級順序：已封存的 why → task_groups 由大到小逐一拿掉（夠小就停）→ 拒絕。
+    被拿掉明細的 change 仍保留 tasks 計數與 why。"""
+    for name, count in (("small", 2), ("big", 30), ("mid", 10)):
+        tasks_dir.propose(name, "--skip-specs", complete=False)
+        _write_why(tasks_dir, name, f"{name} 的理由")
+        text = "## 階段\n" + "".join(f"- [x] {name} 項目 {i}\n" for i in range(count))
+        _write_tasks(tasks_dir, name, text)
+    old = tasks_dir.root / "changes" / "archive" / "2026-10-01-old"
+    old.mkdir(parents=True)
+    (old / ".openspec.yaml").write_text("schema: spec-driven\n", encoding="utf-8")
+    (old / "proposal.md").write_text("## Why\n\n" + "舊" * 900, encoding="utf-8")
+    ws = _ws(tasks_dir)
+
+    def fit(drop: set[str], *, why: bool) -> bytes:
+        """照指定的降級結果手工組出的位元組（期望值）。"""
+        snap = snapshot.build_snapshot(ws)
+        for entry in snap["changes"]:
+            if entry["name"] in drop:
+                del entry[snapshot.TASK_GROUPS]
+            if entry["name"] == "old" and not why:
+                entry["why"] = None
+        return snapshot.encode(snap)
+
+    def run(max_bytes: int) -> bytes:
+        return snapshot.snapshot_bytes(ws, max_bytes=max_bytes)
+
+    full = fit(set(), why=True)
+    stages = [
+        fit(set(), why=False),
+        fit({"big"}, why=False),
+        fit({"big", "mid"}, why=False),
+        fit({"big", "mid", "small"}, why=False),
+    ]
+    sizes = [len(full), *(len(s) for s in stages)]
+    assert sizes == sorted(sizes, reverse=True) and len(set(sizes)) == len(sizes)
+    assert run(len(full)) == full
+    # 每一階：上限剛好等於該階大小 → 停在該階；比前一階小 1 也是同一階
+    previous = full
+    for stage in stages:
+        assert run(len(previous) - 1) == stage
+        assert run(len(stage)) == stage
+        previous = stage
+    last = {c["name"]: c for c in json.loads(stages[-1])["changes"]}
+    assert last["big"]["tasks"] == {"done": 30, "total": 30}
+    assert last["big"]["why"] == "big 的理由"
+    assert snapshot.shape_errors(stages[-1]) == []
+    with pytest.raises(snapshot.SnapshotTooLarge):
+        run(len(stages[-1]) - 1)
 
 
 # ── CLI ──

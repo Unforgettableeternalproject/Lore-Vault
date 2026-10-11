@@ -538,7 +538,7 @@ export interface BlobListResult {
 
 // ── 任務層快照（側載 key `tasks-snapshot` 的 JSON 內容）──
 // 這是 UI 端對任務層 CLI（UI-T2）推送內容的契約；CLI 序列化時以此為準。
-// 只含推導結果，不含 spec delta 全文、tasks.md 逐項文字（語料邊界，TASK_LAYER_UI §1.2）。
+// 含推導結果、階段標題與 tasks.md 逐項文字（2026-10-11 放寬）；不含 spec delta 全文與 design.md（語料邊界，TASK_LAYER_UI §1.2）。
 
 /** 推導狀態：沿用任務層 `workspace.py` 的五個常數字串 */
 export type TaskStatus = '可開工' | '被擋住' | '待授權' | '已完成' | '無法判定';
@@ -562,6 +562,18 @@ export interface TaskSpecDelta {
   op: 'ADDED' | 'MODIFIED' | 'REMOVED' | string;
 }
 
+export interface TaskItem {
+  /** tasks.md 的單項文字（純文字，不解讀 Markdown） */
+  text: string;
+  done: boolean;
+}
+
+export interface TaskItemGroup {
+  /** 階段標題（如「1. 後端」）；null＝第一個標題之前、不屬於任何階段的項目 */
+  title: string | null;
+  items: TaskItem[];
+}
+
 export interface TaskChange {
   name: string;
   status: TaskStatus | string;
@@ -571,6 +583,8 @@ export interface TaskChange {
   depends_on: TaskDependency[];
   requires_authorization: boolean;
   tasks: { done: number; total: number };
+  /** 各階段與逐項任務；舊快照、已封存的 change 或因大小上限被省略時沒有這個欄位（只顯示完成度） */
+  task_groups?: TaskItemGroup[];
   /** 對應 TASKS.md 卡號，無則 null */
   source: string | null;
   /** proposal.md 的「Why」摘要段（簡單 Markdown） */
