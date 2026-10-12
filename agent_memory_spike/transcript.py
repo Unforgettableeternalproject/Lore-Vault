@@ -26,7 +26,7 @@ import sys
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 from paths import INJECTION_LOG, TOUCH_LOG
 
@@ -328,6 +328,80 @@ def repo_root_name(cwd: str) -> str | None:
     return canonical_repo(root.name) if root is not None else None
 
 
+def _is_within(path: str, base: str) -> bool:
+    """``path`` 等於 ``base`` 或在它底下。純字串比對，不碰檔案系統。"""
+    child = os.path.normcase(os.path.normpath(path))
+    parent = os.path.normcase(os.path.normpath(base))
+    return child == parent or child.startswith(parent.rstrip(os.sep) + os.sep)
+
+
+def session_dir_from_records(records: Iterable[dict[str, Any]]) -> str | None:
+    """session 的專案目錄：transcript 裡第一筆帶 ``cwd`` 的記錄。
+
+    session 是在專案目錄啟動的，shell 之後 ``cd`` 到哪都不影響第一筆。
+    實測 180 份 transcript，第一個 cwd 編碼後（非英數字元換成 ``-``）
+    全部等於 transcript 所在的 ``~/.claude/projects/<目錄>`` 名稱。
+    """
+    for record in records:
+        value = record.get("cwd") if isinstance(record, dict) else None
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def session_dir_of(path: Path) -> str | None:
+    """``session_dir_from_records`` 的串流版：讀到第一個 cwd 就停，不載入整份 transcript。"""
+    def _records() -> Iterator[dict[str, Any]]:
+        with path.open(encoding="utf-8") as f:
+            for line in f:
+                if '"cwd"' not in line:
+                    continue
+                try:
+                    yield json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+    try:
+        return session_dir_from_records(_records())
+    except OSError:
+        return None
+
+
+def rootless_repo(cwds: list[str], session_dir: str | None) -> str | None:
+    """解析不出 repo 根（非 git 目錄）時的 ``repo`` 名。
+
+    不能直接取 ``cwds[0]`` 的目錄名：shell 在前一輪 ``cd`` 進子目錄後，下一輪的 cwd
+    從頭到尾都是那個子目錄。2026-10-09 實際發生——專案目錄 ``E:/ProgramFiles/ComfyUI``
+    （非 git）的三個 session 共 40 輪被標成 ``site-packages``／``character_specs``／``sheets``，
+    而 vault key 在沒有 repo 根時就是 ``folder/<repo>``（``spool.derive_vault``），
+    於是同一個 session 的輪次被拆到 ``folder/comfyui`` 與雜項 vault 兩邊。
+
+    輪內的 cwd 救不了這件事（那 40 輪有 39 輪只有子目錄一個 cwd），要用 session 層級的基準：
+    這輪只要有 cwd 落在 session 的專案目錄之內，就歸專案目錄。
+    cwd 全在專案目錄之外（``cd`` 去了別的非 git 位置）才照舊取第一個 cwd 的目錄名。
+    """
+    if not cwds:
+        return None
+    if session_dir and any(_is_within(cwd, session_dir) for cwd in cwds):
+        return Path(session_dir).name or Path(cwds[0]).name
+    return Path(cwds[0]).name
+
+
+def drifted_repo(rec: dict[str, Any], session_dir: str | None) -> str | None:
+    """既有輪次的 ``repo`` 是不是「專案目錄底下的子目錄名」。是就回應有的名字，否則 None。
+
+    doctor 與 ``--repair-repo-drift`` 共用這一個判定。刻意只認證據確鑿的情況：
+    沒有 repo 根、存檔的 ``repo`` 正是第一個 cwd 的目錄名（＝當時走了退回路徑）、
+    且現行規則會把它歸到專案目錄。其餘一律不碰——``repo`` 是寫入當下的歷史事實。
+    """
+    if rec.get("repo_root") or not session_dir:
+        return None
+    cwds = [c for c in rec.get("cwd") or [] if isinstance(c, str) and c]
+    if not cwds or rec.get("repo") != Path(cwds[0]).name:
+        return None
+    expected = rootless_repo(cwds, session_dir)
+    return expected if expected != rec.get("repo") else None
+
+
 # repo 改名對照（舊名 → 現名）。**只影響比對，不改寫任何既有語料**：
 # episode 的 `repo` 與 concept 的 `scope` 都維持寫入當下的名字，
 # 由這張表在讀取端把兩個世代接起來。
@@ -562,7 +636,9 @@ def _time_span(timestamps: list[str]) -> tuple[str | None, str | None]:
 
 def build_episode(prompt_id: str, records: list[dict[str, Any]], turn_index: int = 0,
                   injections: dict[tuple[str, str], list[str]] | None = None,
-                  pinned_root: str | None = None) -> dict[str, Any]:
+                  pinned_root: str | None = None,
+                  session_dir: str | None = None,
+                  pinned_repo: str | None = None) -> dict[str, Any]:
     """把一輪的記錄組裝成 episode。
 
     刻意記錄的東西與理由：
@@ -676,14 +752,23 @@ def build_episode(prompt_id: str, records: list[dict[str, Any]], turn_index: int
     # 而 health 是硬閘門，夜間管線連停三天。存檔記過 root 就沿用，只有第一次寫入才現算。
     #
     # 逐一嘗試，取第一個解析得出 repo 根的 cwd——
-    # 同一輪的 cwd 若都在同一個 repo 內，結果一致；解析不出來才退回目錄名
+    # 同一輪的 cwd 若都在同一個 repo 內，結果一致。
+    #
+    # 解析不出來（非 git 目錄）時 repo 是目錄名，而且同樣不重算：存檔記過名字
+    # （``pinned_repo``）就沿用，只有第一次寫入才依 session 的專案目錄決定（``rootless_repo``）。
+    # 既有語料裡被標成子目錄名的輪次因此不會在重建時自己變掉——
+    # 那要走 ``hook_stop.py --repair-repo-drift``，連同服務端的歸屬一起處理
     root: Path | None = Path(pinned_root) if pinned_root else None
     if root is None:
         for candidate in cwds:
             root = repo_root(candidate)
             if root is not None:
                 break
-    repo: str | None = root.name if root is not None else (Path(cwds[0]).name if cwds else None)
+    repo: str | None
+    if root is not None:
+        repo = root.name
+    else:
+        repo = pinned_repo or rootless_repo(cwds, session_dir)
 
     def _dedup(paths: list[str]) -> list[str]:
         # 順序有意義（同一輪內的編輯順序），所以不能直接用 set
@@ -775,7 +860,8 @@ def build_episode(prompt_id: str, records: list[dict[str, Any]], turn_index: int
 
 def episodes_from_transcript(path: Path,
                              injections: dict[tuple[str, str], list[str]] | None = None,
-                             pinned_roots: dict[tuple[str, int], str] | None = None
+                             pinned_roots: dict[tuple[str, int], str] | None = None,
+                             pinned_repos: dict[tuple[str, int], str] | None = None
                              ) -> list[dict[str, Any]]:
     """讀整份 transcript，回傳所有 episode。
 
@@ -785,14 +871,21 @@ def episodes_from_transcript(path: Path,
     ``pinned_roots`` 是 ``{(prompt_id, turn_index): repo 根絕對路徑}``，
     由存檔提供。重建既有輪次時一定要傳——否則 repo 與檔案路徑會用當下的
     檔案系統重算，repo 改名後就跟存檔對不上（見 ``build_episode``）。
+
+    ``pinned_repos`` 同形，值是存檔的 ``repo`` 名，給沒有 repo 根的輪次用
+    （``hook_stop.pinned_repos``）：非 git 目錄的歸屬規則改過，不帶的話舊輪次會被新規則改名。
     """
     if injections is None:
         injections = load_injections()
     pinned = pinned_roots or {}
+    repos = pinned_repos or {}
     records = load_records(path)
+    session_dir = session_dir_from_records(records)
     return [
         build_episode(pid, group, turn_index=i, injections=injections,
-                      pinned_root=pinned.get((str(pid), i)))
+                      pinned_root=pinned.get((str(pid), i)),
+                      session_dir=session_dir,
+                      pinned_repo=repos.get((str(pid), i)))
         for i, (pid, group) in enumerate(iter_prompt_groups(records))
     ]
 
@@ -806,5 +899,5 @@ def episode_for_prompt(path: Path, prompt_id: str) -> dict[str, Any] | None:
     records = load_records(path)
     for pid, group in iter_prompt_groups(records):
         if pid == prompt_id:
-            return build_episode(pid, group)
+            return build_episode(pid, group, session_dir=session_dir_from_records(records))
     return None

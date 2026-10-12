@@ -38,6 +38,18 @@ key 與別名改成新前綴，引用 vault key 的欄位全部在同一交易�
 `vaults`），日後新增的表只要沿用任一慣例就不會漏改；已知清單
 `KNOWN_VAULT_REFERENCES` 中存在的表若沒被偵測到，視為偵測失效、拒絕執行。
 側載（`sidecar_blobs`）另存冗餘的 `space` 欄，同一交易內一併改寫並核對。
+
+episode 改歸屬（`reassign_episodes`，`cli.admin reassign-episodes`）：收料端把歸屬算錯
+時的人工更正。episode 的 vault 在收料當下凍結、只插入不改，重送同鍵不同 vault 是
+conflict，所以沒有其他路可改。只動指定 session 的指定輪次：`vault` 改成目標（必須
+已存在、不是雜項），`origin_key` 清成 NULL（doctor `vaults.misc_routing`：
+有 origin_key ⇔ 在雜項 vault）；另給 `repo` 時連同 `repo` 欄與 `data.repo` 一起改。
+`seq` 不變，所以以 seq 為水位的客戶端快取不會重拉，要刪掉 episode 快取目錄重置。
+injection 與 concept 不搬，只在規劃裡列出。
+
+concept 改歸屬（`reassign_concepts`，`cli.admin reassign-concepts`）：concept 的歸屬
+在建立時依來源 episode 決定並凍結，episode 歸屬被更正後不會自己跟上。只改 `vault`，
+`ord`／`scope`／`data` 不動（內容由客戶端下一次推送更新）；目標必須是既有的一般 vault。
 """
 
 from __future__ import annotations
@@ -57,7 +69,13 @@ from .db import transaction
 from .errors import NotFound, StorageError, UnknownVault, VaultConflict
 from .notes import insert_note, note_from_row
 from .timeutil import format_utc, parse_utc, utc_now
-from .vaults import check_key_prefix, resolve_write, validate_space
+from .vaults import (
+    FOLDER_KEY_PREFIX,
+    KIND_MISC,
+    check_key_prefix,
+    resolve_write,
+    validate_space,
+)
 
 DEFAULT_NOTE_REASON = "admin delete-note"
 DEFAULT_VAULT_REASON = "admin delete-vault"
@@ -1223,3 +1241,398 @@ def purge_tombstones(
                 f"實際清除筆數與規劃不符：規劃 {plan.counts()}、實際 {done}"
             )
     return plan, done
+
+
+# ── episode 改歸屬 ──
+
+
+class ReassignRefused(StorageError):
+    """改歸屬的範圍或目標不合法（輪次不存在、同序號多筆、目標是雜項 vault）。"""
+
+
+@dataclass(frozen=True)
+class EpisodeReassignPlan:
+    """episode 改歸屬的規劃：只有鍵、vault、repo 名與筆數，不含語料內容。"""
+
+    session_id: str
+    target: str
+    repo: str | None
+    # 會被改寫的輪次：seq、turn_index、prompt_id、vault、origin_key、repo（改寫前）
+    moves: tuple[dict[str, Any], ...]
+    # 已經是目標狀態的輪次序號（重跑時出現）
+    unchanged: tuple[int, ...]
+    # 僅供人工判斷，不會被搬：該 session 的 injection 分佈、
+    # 來源輪次落在搬移範圍的 concept
+    injections: tuple[dict[str, Any], ...] = ()
+    concepts: tuple[dict[str, Any], ...] = ()
+    # 不擋執行、但該先看過的情況（來源不是雜項、`repo` 對應的客戶端 key 不指向目標）
+    warnings: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "session_id": self.session_id,
+            "target": self.target,
+            "repo": self.repo,
+            "counts": {"moves": len(self.moves), "unchanged": len(self.unchanged)},
+            "warnings": list(self.warnings),
+            "moves": [dict(m) for m in self.moves],
+            "unchanged": list(self.unchanged),
+            "not_moved": {
+                "injections": [dict(i) for i in self.injections],
+                "concepts": [dict(c) for c in self.concepts],
+            },
+        }
+
+
+def _concepts_sourced_from(
+    conn: sqlite3.Connection, turns: set[tuple[str, int]]
+) -> tuple[dict[str, Any], ...]:
+    """source_turns 落在 `turns`（(prompt_id, turn_index)）的 concept：
+    id、vault、scope、來源輪次數與其中落在範圍內的數量。"""
+    if not turns:
+        return ()
+    found: list[dict[str, Any]] = []
+    for row in conn.execute("SELECT id, vault, scope, data FROM concepts ORDER BY id"):
+        try:
+            sources = json.loads(row["data"]).get("source_turns") or []
+        except (ValueError, AttributeError):
+            continue
+        keys = {
+            (t[0], t[1])
+            for t in sources
+            if isinstance(t, list) and len(t) == 2 and isinstance(t[0], str)
+        }
+        inside = len(keys & turns)
+        if inside:
+            found.append(
+                {
+                    "id": row["id"],
+                    "vault": row["vault"],
+                    "scope": row["scope"],
+                    "source_turns": len(keys),
+                    "in_range": inside,
+                }
+            )
+    return tuple(found)
+
+
+def plan_episode_reassign(
+    conn: sqlite3.Connection,
+    session_id: str,
+    turn_indexes: Sequence[int],
+    target: str,
+    *,
+    repo: str | None = None,
+) -> EpisodeReassignPlan:
+    """規劃把 `session_id` 的指定輪次改歸 `target`（只讀）。
+
+    - `target`：dev 內既有 vault 的 key 或別名；不存在拋 `UnknownVault`（不自動建）。
+      雜項 vault 拒絕——那是收料路由的結果，不是可以指定的目的地
+    - 每個輪次序號必須恰好對到一筆 episode；缺任何一筆或同序號多筆就整批拒絕
+    - `repo`：給了就連 `repo` 欄與 `data.repo` 一起改；沒給只改 vault 與 origin_key
+    """
+    wanted = sorted(set(turn_indexes))
+    if not wanted:
+        raise ReassignRefused("沒有指定任何輪次")
+    key = resolve_write(conn, canonical_key(target), space=SPACE_DEV)
+    kind = conn.execute("SELECT kind FROM vaults WHERE key = ?", (key,)).fetchone()[0]
+    if kind == KIND_MISC:
+        raise ReassignRefused(
+            f"目標 {key!r} 是雜項 vault：只由收料路由決定，不可指定為改歸屬的目的地"
+        )
+    rows = conn.execute(
+        f"""
+        SELECT seq, turn_index, prompt_id, vault, origin_key, repo FROM episodes
+        WHERE session_id = ? AND turn_index IN ({",".join("?" * len(wanted))})
+        ORDER BY turn_index, seq
+        """,
+        (session_id, *wanted),
+    ).fetchall()
+    by_turn: dict[int, list[sqlite3.Row]] = {}
+    for row in rows:
+        by_turn.setdefault(int(row["turn_index"]), []).append(row)
+    missing = [i for i in wanted if i not in by_turn]
+    if missing:
+        raise ReassignRefused(
+            f"session {session_id!r} 沒有這些輪次：{missing}；整批不動"
+        )
+    ambiguous = [i for i, found in by_turn.items() if len(found) > 1]
+    if ambiguous:
+        raise ReassignRefused(
+            f"session {session_id!r} 的輪次序號對到多筆 episode：{sorted(ambiguous)}；"
+            "整批不動"
+        )
+    moves: list[dict[str, Any]] = []
+    unchanged: list[int] = []
+    for index in wanted:
+        row = by_turn[index][0]
+        settled = row["vault"] == key and row["origin_key"] is None
+        if settled and (repo is None or row["repo"] == repo):
+            unchanged.append(index)
+            continue
+        moves.append({name: row[name] for name in row.keys()})
+    injections = tuple(
+        {"vault": r["vault"], "origin_key": r["origin_key"], "count": int(r["n"])}
+        for r in conn.execute(
+            """
+            SELECT vault, origin_key, count(*) AS n FROM injections
+            WHERE session_id = ? GROUP BY vault, origin_key ORDER BY vault, origin_key
+            """,
+            (session_id,),
+        )
+    )
+    warnings: list[str] = []
+    outside = sorted(
+        {m["vault"] for m in moves}
+        - {
+            r[0]
+            for r in conn.execute("SELECT key FROM vaults WHERE kind = ?", (KIND_MISC,))
+        }
+    )
+    if outside:
+        turns = [m["turn_index"] for m in moves if m["vault"] in outside]
+        warnings.append(
+            f"輪次 {turns} 目前不在雜項 vault 而在 {outside}："
+            "這不是收料時未註冊位置的更正，確認真的要搬離一般 vault"
+        )
+    if repo is not None:
+        # 沒有 repo 根的位置，客戶端送的 vault key 就是 folder/<repo>
+        client_key = canonical_key(f"{FOLDER_KEY_PREFIX}{repo}")
+        try:
+            resolved = resolve_write(conn, client_key, space=SPACE_DEV)
+        except UnknownVault:
+            resolved = None
+        if resolved != key:
+            where = "未註冊（會進雜項）" if resolved is None else f"指向 {resolved!r}"
+            warnings.append(
+                f"--repo {repo!r} 對應的客戶端 key {client_key!r} {where}，"
+                f"不是目標 {key!r}：客戶端以修正後的內容重送這些輪次會是 conflict"
+            )
+    return EpisodeReassignPlan(
+        session_id=session_id,
+        target=key,
+        repo=repo,
+        moves=tuple(moves),
+        unchanged=tuple(unchanged),
+        warnings=tuple(warnings),
+        injections=injections,
+        concepts=_concepts_sourced_from(
+            conn, {(m["prompt_id"], int(m["turn_index"])) for m in moves}
+        ),
+    )
+
+
+def reassign_episodes(
+    conn: sqlite3.Connection,
+    session_id: str,
+    turn_indexes: Sequence[int],
+    target: str,
+    *,
+    repo: str | None = None,
+) -> EpisodeReassignPlan:
+    """執行改歸屬（單一交易）：交易內重新規劃再改寫，改完以資料實況核對。
+
+    `data` 以與收料相同的序列化重寫（`sort_keys`），之後客戶端以修正後的內容重送同一輪
+    會得到 duplicate 而不是 conflict。任何不符整段 rollback（`PlanChanged`）。
+    """
+    with transaction(conn):
+        plan = plan_episode_reassign(conn, session_id, turn_indexes, target, repo=repo)
+        for move in plan.moves:
+            if repo is None:
+                done = conn.execute(
+                    "UPDATE episodes SET vault = ?, origin_key = NULL WHERE seq = ?",
+                    (plan.target, move["seq"]),
+                ).rowcount
+            else:
+                data = json.loads(
+                    conn.execute(
+                        "SELECT data FROM episodes WHERE seq = ?", (move["seq"],)
+                    ).fetchone()[0]
+                )
+                data["repo"] = repo
+                done = conn.execute(
+                    """
+                    UPDATE episodes SET vault = ?, origin_key = NULL, repo = ?, data = ?
+                    WHERE seq = ?
+                    """,
+                    (
+                        plan.target,
+                        repo,
+                        json.dumps(data, ensure_ascii=False, sort_keys=True),
+                        move["seq"],
+                    ),
+                ).rowcount
+            if done != 1:
+                raise PlanChanged(f"episode seq={move['seq']} 改寫 {done} 筆（應為 1）")
+        seqs = [m["seq"] for m in plan.moves]
+        clause = "" if repo is None else " AND repo = ?"
+        params: list[Any] = [plan.target] if repo is None else [plan.target, repo]
+        settled = (
+            _count(
+                conn,
+                f"""
+                SELECT count(*) FROM episodes
+                WHERE vault = ? AND origin_key IS NULL{clause}
+                  AND seq IN ({",".join("?" * len(seqs))})
+                """,
+                (*params, *seqs),
+            )
+            if seqs
+            else 0
+        )
+        if settled != len(seqs):
+            raise PlanChanged(
+                f"改歸屬後核對不符：規劃 {len(seqs)} 筆、實際到位 {settled} 筆"
+            )
+        return plan
+
+
+# ── concept 改歸屬 ──
+
+
+@dataclass(frozen=True)
+class ConceptReassignPlan:
+    """concept 改歸屬的規劃：只有 id、vault、scope 與來源輪次的 vault，不含內容。"""
+
+    target: str
+    # 會被搬的 concept：id、vault、scope_state、scope、ord、source_vaults
+    moves: tuple[dict[str, Any], ...]
+    unchanged: tuple[str, ...]
+    warnings: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "target": self.target,
+            "counts": {"moves": len(self.moves), "unchanged": len(self.unchanged)},
+            "moves": [dict(m) for m in self.moves],
+            "unchanged": list(self.unchanged),
+            "warnings": list(self.warnings),
+        }
+
+
+def _source_turn_vaults(conn: sqlite3.Connection, data: str) -> list[str]:
+    """concept 的 source_turns 對得到的 episode 所在 vault（去重排序；A17 (A) 段）。"""
+    try:
+        sources = json.loads(data).get("source_turns") or []
+    except (ValueError, AttributeError):
+        return []
+    vaults: set[str] = set()
+    for turn in sources:
+        if not (isinstance(turn, list) and len(turn) == 2 and isinstance(turn[0], str)):
+            continue
+        vaults.update(
+            r[0]
+            for r in conn.execute(
+                "SELECT vault FROM episodes WHERE prompt_id = ? AND turn_index = ?",
+                (turn[0], turn[1]),
+            )
+        )
+    return sorted(vaults)
+
+
+def plan_concept_reassign(
+    conn: sqlite3.Connection, concept_ids: Sequence[str], target: str
+) -> ConceptReassignPlan:
+    """規劃把指定 concept 改歸 `target`（只讀）。
+
+    concept 的歸屬在建立時凍結：`records.upsert_concept` 拒絕把既有 id 寫進別的 vault，
+    推送端對既有 id 也沿用原歸屬——所以來源 episode 歸屬被更正後，concept 不會自己跟上。
+
+    - `target`：dev 內既有、kind=repo 的 vault（key 或別名）；不存在拋 `UnknownVault`。
+      雜項（收料路由的結果）與 `global`（只收 scope=None 的通用 concept）都拒絕
+    - 任一 id 不存在就整批拒絕；scope=None 的通用 concept（只屬於 `global`）也拒絕
+    - 只改 `vault`：`ord`（匯出順序）、`scope`、`data` 都不動。匯出把雜項的 concept
+      排最後（`records.export_concepts`），搬出雜項後回到依 `ord` 的一般位置
+    - `warnings`：來源輪次的 episode 還有不在目標 vault 的（多半是 episode 還沒搬）
+    """
+    wanted = list(dict.fromkeys(concept_ids))
+    if not wanted:
+        raise ReassignRefused("沒有指定任何 concept")
+    key = resolve_write(conn, canonical_key(target), space=SPACE_DEV)
+    kind = conn.execute("SELECT kind FROM vaults WHERE key = ?", (key,)).fetchone()[0]
+    if kind != "repo":
+        raise ReassignRefused(
+            f"目標 {key!r} 的 kind 是 {kind!r}：concept 只能改歸一般（repo）vault"
+        )
+    rows = {
+        r["id"]: r
+        for r in conn.execute(
+            f"""
+            SELECT id, vault, scope_state, scope, ord, data FROM concepts
+            WHERE id IN ({",".join("?" * len(wanted))})
+            """,
+            wanted,
+        )
+    }
+    missing = [i for i in wanted if i not in rows]
+    if missing:
+        raise ReassignRefused(f"concept 不存在：{missing}；整批不動")
+    universal = [i for i in wanted if rows[i]["scope_state"] == "global"]
+    if universal:
+        raise ReassignRefused(
+            f"scope=None 的通用 concept 只屬於 global vault，不可改歸：{universal}；"
+            "整批不動"
+        )
+    moves: list[dict[str, Any]] = []
+    unchanged: list[str] = []
+    warnings: list[str] = []
+    for concept_id in wanted:
+        row = rows[concept_id]
+        if row["vault"] == key:
+            unchanged.append(concept_id)
+            continue
+        sources = _source_turn_vaults(conn, row["data"])
+        elsewhere = [v for v in sources if v != key]
+        if elsewhere:
+            warnings.append(
+                f"{concept_id} 的來源輪次還有 episode 在 {elsewhere}"
+                "（先以 reassign-episodes 更正 episode 的歸屬）"
+            )
+        moves.append(
+            {
+                "id": concept_id,
+                "vault": row["vault"],
+                "scope_state": row["scope_state"],
+                "scope": row["scope"],
+                "ord": row["ord"],
+                "source_vaults": sources,
+            }
+        )
+    return ConceptReassignPlan(
+        target=key,
+        moves=tuple(moves),
+        unchanged=tuple(unchanged),
+        warnings=tuple(warnings),
+    )
+
+
+def reassign_concepts(
+    conn: sqlite3.Connection, concept_ids: Sequence[str], target: str
+) -> ConceptReassignPlan:
+    """執行 concept 改歸屬（單一交易）：交易內重新規劃、改寫、以資料實況核對。"""
+    with transaction(conn):
+        plan = plan_concept_reassign(conn, concept_ids, target)
+        ids = [m["id"] for m in plan.moves]
+        for concept_id in ids:
+            done = conn.execute(
+                "UPDATE concepts SET vault = ? WHERE id = ?", (plan.target, concept_id)
+            ).rowcount
+            if done != 1:
+                raise PlanChanged(f"concept {concept_id!r} 改寫 {done} 筆（應為 1）")
+        settled = (
+            _count(
+                conn,
+                f"""
+                SELECT count(*) FROM concepts
+                WHERE vault = ? AND id IN ({",".join("?" * len(ids))})
+                """,
+                (plan.target, *ids),
+            )
+            if ids
+            else 0
+        )
+        if settled != len(ids):
+            raise PlanChanged(
+                f"改歸屬後核對不符：規劃 {len(ids)} 筆、實際到位 {settled} 筆"
+            )
+        return plan

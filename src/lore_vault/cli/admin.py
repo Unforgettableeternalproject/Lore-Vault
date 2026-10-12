@@ -16,6 +16,22 @@
   別名一律換前綴（換不了就拒絕），舊 key 不留別名；新 key／新別名已存在則拒絕。
   所有引用該 key 的表在單一交易內改寫，執行後核對各表筆數與規劃一致，否則 rollback。
   換完後 MCP 殼的降級快照要等下次快照更新才反映
+- `reassign-episodes --session SID --turns 44-53[,60] --to KEY [--repo NAME]`：把指定
+  session 的指定輪次改歸另一個 vault——收料端把歸屬算錯時的人工更正（episode 只插入
+  不改、重送同鍵不同 vault 是 conflict，沒有其他入口）。目標必須是 dev 內既有的 vault
+  （不自動建），不可是雜項；`origin_key` 一併清成 NULL。`--repo` 另把 `repo` 欄與
+  `data.repo` 改成該名字（不給就只改歸屬）。任一輪次不存在就整批拒絕。dry-run 列出
+  每一輪的鍵與現行歸屬，以及**不會被搬**的相關資料（該 session 的 injection 分佈、
+  來源輪次在範圍內的 concept）。`seq` 不變：改完後客戶端要刪掉
+  `~/.lore-vault/episode_cache/` 讓管線全量重拉
+  輸出的 `warnings`：要搬的輪次不在雜項 vault；`--repo` 對應的客戶端 key
+  （`folder/<repo>`）不指向目標（客戶端重送會 conflict）
+- `reassign-concepts --ids c-1,c-2 --to KEY`：把指定 concept 改歸另一個 vault——concept
+  歸屬在建立時依來源 episode 決定並凍結，episode 歸屬被更正後不會自己跟上。目標必須是
+  dev 內既有的一般（kind=repo）vault；任一 id 不存在整批拒絕。只改 `vault`，匯出順序
+  （`ord`）、`scope`、內容都不動（內容由客戶端下一次 `--push-concepts` 更新）。dry-run
+  列出每筆現行 vault、scope 與來源輪次所在的 vault；來源輪次還在別的 vault 時列入
+  `warnings`（先跑 `reassign-episodes`）
 - `gc-blobs [--blob-dir DIR] [--min-age-hours N] [--yes]`：清理沒有任何 documents 列
   引用的孤兒 blob（判定與 doctor `documents.orphan_blobs` 共用）與中斷遺留的暫存檔。
   只刪 mtime 超過 N 小時（預設 1）的孤兒；刪前持 DB 寫鎖再確認無引用、檔案未變動；
@@ -89,6 +105,31 @@ def _purge_kinds(value: str) -> list[str]:
             f"kinds 必須是 {','.join(admin.PURGE_KINDS)} 的非空子集，得到 {value!r}"
         )
     return kinds
+
+
+def _turn_ranges(value: str) -> list[int]:
+    """`44-53,60` → 輪次序號清單。"""
+    turns: list[int] = []
+    for part in value.split(","):
+        first, sep, last = part.strip().partition("-")
+        try:
+            start = int(first)
+            end = int(last) if sep else start
+        except ValueError:
+            raise argparse.ArgumentTypeError(
+                f"輪次要寫成 44-53 或 44,45 的形式，得到 {value!r}"
+            ) from None
+        if start < 0 or end < start:
+            raise argparse.ArgumentTypeError(f"輪次範圍不合法：{part!r}")
+        turns.extend(range(start, end + 1))
+    return turns
+
+
+def _id_list(value: str) -> list[str]:
+    ids = [part.strip() for part in value.split(",") if part.strip()]
+    if not ids:
+        raise argparse.ArgumentTypeError("至少要給一個 id")
+    return ids
 
 
 PURGE_WARNING = (
@@ -230,6 +271,38 @@ def _parser() -> argparse.ArgumentParser:
     )
     p_space.add_argument("--yes", action="store_true", help="真的變更（預設 dry-run）")
 
+    p_move = sub.add_parser(
+        "reassign-episodes", help="把指定 session 的輪次改歸另一個 vault"
+    )
+    p_move.add_argument("--session", required=True, help="session id（完整）")
+    p_move.add_argument(
+        "--turns", required=True, type=_turn_ranges, help="輪次序號，如 44-53,60"
+    )
+    p_move.add_argument(
+        "--to",
+        required=True,
+        dest="target",
+        help="目標 vault（dev 內既有的 key 或別名）",
+    )
+    p_move.add_argument(
+        "--repo", help="同時把 repo 欄與 data.repo 改成這個名字（缺省不動）"
+    )
+    p_move.add_argument("--yes", action="store_true", help="真的變更（預設 dry-run）")
+
+    p_cmove = sub.add_parser(
+        "reassign-concepts", help="把指定 concept 改歸另一個 vault"
+    )
+    p_cmove.add_argument(
+        "--ids", required=True, type=_id_list, help="concept id，逗號分隔（c-1,c-2）"
+    )
+    p_cmove.add_argument(
+        "--to",
+        required=True,
+        dest="target",
+        help="目標 vault（dev 內既有的一般 vault，key 或別名）",
+    )
+    p_cmove.add_argument("--yes", action="store_true", help="真的變更（預設 dry-run）")
+
     p_gc = sub.add_parser("gc-blobs", help="清理孤兒 blob 與遺留暫存檔")
     p_gc.add_argument("--blob-dir", help="blob 目錄（覆寫 documents.blob_dir）")
     p_gc.add_argument(
@@ -347,6 +420,42 @@ def _set_space(conn: sqlite3.Connection, args: argparse.Namespace) -> dict[str, 
     }
 
 
+def _reassign_episodes(
+    conn: sqlite3.Connection, args: argparse.Namespace
+) -> dict[str, object]:
+    if args.yes:
+        plan = admin.reassign_episodes(
+            conn, args.session, args.turns, args.target, repo=args.repo
+        )
+        return {
+            "mode": "reassigned",
+            **plan.to_dict(),
+            "hint": "seq 不變：客戶端刪掉 ~/.lore-vault/episode_cache/ 讓管線全量重拉",
+        }
+    plan = admin.plan_episode_reassign(
+        conn, args.session, args.turns, args.target, repo=args.repo
+    )
+    return {
+        "mode": "dry_run",
+        **plan.to_dict(),
+        "hint": "確認無誤後加 --yes 執行；not_moved 列的 injection／concept 不會跟著搬",
+    }
+
+
+def _reassign_concepts(
+    conn: sqlite3.Connection, args: argparse.Namespace
+) -> dict[str, object]:
+    if args.yes:
+        plan = admin.reassign_concepts(conn, args.ids, args.target)
+        return {"mode": "reassigned", **plan.to_dict()}
+    plan = admin.plan_concept_reassign(conn, args.ids, args.target)
+    return {
+        "mode": "dry_run",
+        **plan.to_dict(),
+        "hint": "確認無誤後加 --yes 執行；只改歸屬，scope 與內容由客戶端下次推送更新",
+    }
+
+
 def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> int:
     from lore_vault.config import ConfigError
 
@@ -392,6 +501,14 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> 
         if args.command == "set-space":
             changed = _set_space(conn, args)
             out.write(json.dumps(changed, ensure_ascii=False, indent=2) + "\n")
+            return 0
+        if args.command == "reassign-concepts":
+            cmoved = _reassign_concepts(conn, args)
+            out.write(json.dumps(cmoved, ensure_ascii=False, indent=2) + "\n")
+            return 0
+        if args.command == "reassign-episodes":
+            moved = _reassign_episodes(conn, args)
+            out.write(json.dumps(moved, ensure_ascii=False, indent=2) + "\n")
             return 0
         if args.command == "delete-document":
             if args.yes:

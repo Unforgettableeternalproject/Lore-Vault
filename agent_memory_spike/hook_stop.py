@@ -33,12 +33,16 @@ Stop hook 觸發時，該輪的記錄**不保證已經完整寫進 transcript**�
     python hook_stop.py --push --dry-run              # 只看 spool 與推送設定狀態
     python hook_stop.py --backfill-spool [--dry-run]  # spool 上線前的舊輪次補進 spool（不推送）
     python hook_stop.py --repair-schema [--dry-run]   # 修正服務端 schema 不合法的舊輪次（先備份）
+    python hook_stop.py --repair-repo-drift [--dry-run]  # repo 被標成專案子目錄名的舊輪次改回專案名（先備份）
+    python hook_stop.py --repair-concept-scope [--dry-run]  # 跟著漂移的 concept scope 改回專案名（先備份）
 
 ## 推送到服務（階段 8，T-38／T-39）
 
 新寫入的 episode 另外寫一份到 episode 目錄同層的 ``spool/``（每筆一檔、原子寫入），
 附上寫入當下凍結的 ``machine``（``platform.node()``）與 ``vault``
-（``lore_vault.binding`` 依 ``repo_root`` 算）。原本的 ``episodes/`` jsonl 照寫（過渡期雙寫）。
+（``lore_vault.binding`` 依 ``repo_root`` 算；沒有 ``repo_root`` 的非 git 位置是 ``folder/<repo>``，
+所以 ``repo`` 標錯 vault 就跟著錯——見 ``transcript.rootless_repo``）。
+原本的 ``episodes/`` jsonl 照寫（過渡期雙寫）。
 
 Stop hook 在寫完後推一批（短逾時、硬性時限、失敗只寫 stderr）；服務不可達後退避一段時間
 不再嘗試，避免每輪都付逾時。推送設定在 ``client.env``（見 ``paths.CLIENT_ENV_PATH``），
@@ -81,11 +85,13 @@ from paths import CLIENT_ENV_PATH  # noqa: E402
 from paths import EPISODE_DIR as DEFAULT_EPISODE_DIR  # noqa: E402  路徑定義見 paths.py
 from transcript import (  # noqa: E402
     ORIGIN_HUMAN,
+    drifted_repo,
     episodes_from_transcript,
     file_keys,
     configure_streams,
     load_injections,
     load_touches,
+    session_dir_of,
 )
 
 
@@ -144,6 +150,20 @@ def pinned_roots(records: list[dict[str, Any]]) -> dict[tuple[str, int], str]:
         root = rec.get("repo_root")
         if root:
             out[_key(rec)] = str(root)
+    return out
+
+
+def pinned_repos(records: list[dict[str, Any]]) -> dict[tuple[str, int], str]:
+    """從存檔取出沒有 repo 根的輪次的 ``repo`` 名，給重建時沿用（``pinned_roots`` 的另一半）。
+
+    非 git 目錄的 ``repo`` 是目錄名，取哪個目錄的規則改過（``transcript.rootless_repo``）。
+    重建時不帶這個，舊輪次會被新規則改名、doctor 逐輪報 repo 不一致，而 health 是管線硬閘門。
+    要改既有輪次的歸屬只走 ``--repair-repo-drift``。
+    """
+    out: dict[tuple[str, int], str] = {}
+    for rec in records:
+        if not rec.get("repo_root") and rec.get("repo"):
+            out[_key(rec)] = str(rec["repo"])
     return out
 
 
@@ -233,14 +253,15 @@ def backfill_repo_root(episode_dir: Path, *, dry_run: bool = False) -> int:
 
 def completed_episodes(transcript: Path,
                        injections: dict[tuple[str, str], list[str]] | None = None,
-                       pinned: dict[tuple[str, int], str] | None = None
+                       pinned: dict[tuple[str, int], str] | None = None,
+                       pinned_repo_names: dict[tuple[str, int], str] | None = None
                        ) -> list[dict[str, Any]]:
     """只回傳可以確定已經結束的輪次。
 
     最新的一輪被排除：Stop hook 觸發時它可能只寫了一半，
     此時寫入會留下永久殘缺的紀錄。有後續輪次存在就代表前一輪確實結束了。
     """
-    episodes = episodes_from_transcript(transcript, injections, pinned)
+    episodes = episodes_from_transcript(transcript, injections, pinned, pinned_repo_names)
     return episodes[:-1] if episodes else []
 
 
@@ -465,6 +486,19 @@ def _fix_schema(rec: dict[str, Any]) -> list[str]:
     return applied
 
 
+def _jsonl_lines(text: str) -> list[str]:
+    """只以 ``\\n`` 切行。
+
+    不能用 ``str.splitlines()``：它還會在 U+2028／U+2029／U+0085 等字元切，而
+    ``json.dumps(ensure_ascii=False)`` 會把這些字元原樣寫進字串裡——
+    內文含這類字元的一列會被切成兩段、兩段都解析不了，原樣寫回後就永久斷成兩行。
+    """
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
 def _rewrite_lines(path: Path, lines: list[str]) -> None:
     """逐行原樣寫回（tmp + fsync + replace）。沒改的行保留原字串，不重新序列化。"""
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -626,6 +660,233 @@ def backfill_spool(episode_dir: Path, *, dry_run: bool = False,
     return stats
 
 
+def session_dir_for(session_id: str) -> str | None:
+    """session 的專案目錄，給既有語料的 repo 漂移判定用。
+
+    取 transcript 第一筆 cwd（與寫入端 ``episodes_from_transcript`` 同一個基準）。
+    transcript 已被清掉就不判定：拿存檔第 0 輪的 cwd 代替的話，實測會把
+    repo 改名前的巢狀 git repo（``AI-Website/AI-Website-API``，當時有 root 但回填不出來）
+    誤判成漂移——沒有來源就分不出「目錄名退回」與「當時真的是 repo 根」。
+    """
+    transcript = find_transcript(session_id)
+    return session_dir_of(transcript) if transcript is not None else None
+
+
+def repair_repo_drift(episode_dir: Path, *, dry_run: bool = False,
+                      backup_dir: Path | None = None) -> dict[str, Any]:
+    """``--repair-repo-drift``：把 ``repo`` 被標成專案子目錄名的輪次改回專案目錄名。
+
+    成因見 ``transcript.rootless_repo``；判定是 ``transcript.drifted_repo``（與 doctor 共用）。
+    只改 ``repo`` 一個欄位、只動判定為漂移的行，其餘行原字串寫回（同 ``--repair-schema``）。
+    不走 ``--repair``：重建沿用存檔的 repo 名（``pinned_repos``），本來就不會改歸屬。
+
+    **只修本機語料。** 這些輪次若已推上服務，服務端凍結的 vault 仍是舊的
+    （多半是雜項 vault），而且重送會是 conflict（同鍵、內容與 vault 都不同）——
+    服務端要另外用 ``python -m lore_vault.cli.admin reassign-episodes`` 改歸屬。
+    輸出只有 session、輪次序號與 repo 名，不含語料內容。
+
+    寫入前把整個原檔複製到 ``backup_dir``（預設 ``episode_backups/repo-drift-<時間>/``）。
+    """
+    import shutil
+
+    files = sorted(episode_dir.glob("*.jsonl")) if episode_dir.exists() else []
+    if backup_dir is None:
+        backup_dir = (episode_dir.parent / "episode_backups"
+                      / time.strftime("repo-drift-%Y%m%d-%H%M%S"))
+    stats: dict[str, Any] = {
+        "lines": 0, "drifted": 0, "files_changed": 0, "sessions": {}, "backup_dir": None,
+    }
+    for fp in files:
+        try:
+            lines = _jsonl_lines(fp.read_text(encoding="utf-8"))
+        except OSError as exc:
+            print(f"[repair-repo-drift] {fp.stem[:8]} 讀取失敗 {exc}", file=sys.stderr)
+            continue
+        parsed: list[dict[str, Any] | None] = []
+        for line in lines:
+            try:
+                rec = json.loads(line) if line.strip() else None
+            except json.JSONDecodeError:
+                rec = None
+            parsed.append(rec if isinstance(rec, dict) else None)
+        stored = [rec for rec in parsed if rec is not None]
+        stats["lines"] += len(stored)
+        session_dir = session_dir_for(fp.stem)
+        out: list[str] = []
+        turns: list[dict[str, Any]] = []
+        for line, rec in zip(lines, parsed):
+            expected = drifted_repo(rec, session_dir) if rec is not None else None
+            if expected is None:
+                out.append(line)
+                continue
+            turns.append({"turn_index": rec.get("turn_index"), "prompt_id": rec.get("prompt_id"),
+                          "from": rec.get("repo"), "to": expected})
+            out.append(json.dumps({**rec, "repo": expected}, ensure_ascii=False))
+        if not turns:
+            continue
+        stats["drifted"] += len(turns)
+        stats["files_changed"] += 1
+        stats["sessions"][fp.stem] = {"session_dir": session_dir, "turns": turns}
+        if dry_run:
+            continue
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(fp, backup_dir / fp.name)
+        stats["backup_dir"] = str(backup_dir)
+        _rewrite_lines(fp, out)
+
+    print(f"[repair-repo-drift] {len(files)} 個檔、{stats['lines']} 輪：repo 漂移 {stats['drifted']} 輪"
+          f"（{stats['files_changed']} 個檔要改）"
+          + ("（dry-run，未寫入）" if dry_run else
+             (f"，備份在 {stats['backup_dir']}" if stats["backup_dir"] else "")),
+          file=sys.stderr)
+    for session_id, info in stats["sessions"].items():
+        renames: dict[tuple[str, str], list[int]] = {}
+        for turn in info["turns"]:
+            renames.setdefault((str(turn["from"]), str(turn["to"])), []).append(
+                int(turn["turn_index"] or 0))
+        for (old, new), indexes in sorted(renames.items()):
+            print(f"  {session_id}  {old} → {new}  {len(indexes)} 輪 "
+                  f"turn_index={_ranges(indexes)}", file=sys.stderr)
+    if stats["drifted"]:
+        print("  服務端已收下的輪次不會跟著改：見 lore_vault.cli.admin reassign-episodes",
+              file=sys.stderr)
+    return stats
+
+
+def concept_path_for(episode_dir: Path) -> Path:
+    """concept 池在 episode 目錄同層（預設即 ``paths.CONCEPT_PATH``），測試跟著換。"""
+    return episode_dir.parent / "concepts.json"
+
+
+def turn_scope_facts(episode_dir: Path) -> dict[tuple[str, int], list[tuple[str | None, str | None]]]:
+    """``{(prompt_id, turn_index): [(應有的 repo, 退回路徑用的目錄名或 None), ...]}``。
+
+    「應有的 repo」是 ``drifted_repo`` 判定後的名字（沒漂移就是存檔的 ``repo``），所以
+    episode 修正前後算出來一樣。目錄名只在沒有 repo 根的輪次有值——那是 ``repo`` 當時
+    可能取到的子目錄名。同一輪在 resume 複本裡會出現多次，全部收進清單。
+    """
+    facts: dict[tuple[str, int], list[tuple[str | None, str | None]]] = {}
+    for fp in sorted(episode_dir.glob("*.jsonl")) if episode_dir.exists() else []:
+        try:
+            lines = _jsonl_lines(fp.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        session_dir = session_dir_for(fp.stem)
+        for line in lines:
+            try:
+                rec = json.loads(line) if line.strip() else None
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            cwds = rec.get("cwd") or []
+            dirname = Path(str(cwds[0])).name if cwds and not rec.get("repo_root") else None
+            facts.setdefault(_key(rec), []).append(
+                (drifted_repo(rec, session_dir) or rec.get("repo"), dirname))
+    return facts
+
+
+def drifted_scope(concept: dict[str, Any],
+                  facts: dict[tuple[str, int], list[tuple[str | None, str | None]]]) -> str | None:
+    """concept 的 ``scope`` 是不是跟著 repo 漂移標成了子目錄名。是就回應有的名字，否則 None。
+
+    scope 在蒸餾收回時定下來（LLM 填的，或退回候選組當時的 ``repo``），之後管線各階段
+    整份讀寫 ``concepts.json`` 都原樣帶著、不會重算——episode 的 ``repo`` 修好了它也不會跟著對。
+
+    只認證據確鑿的：來源輪次全部找得到、應有的 repo 只有一個、scope 不是它，
+    而且 scope 正是某個來源輪次退回路徑會取到的目錄名。LLM 自己選的其他 scope 不碰。
+    """
+    scope = concept.get("scope")
+    if not isinstance(scope, str) or not scope:
+        return None
+    repos: set[str | None] = set()
+    dirnames: set[str | None] = set()
+    for turn in concept.get("source_turns") or []:
+        if not (isinstance(turn, list) and len(turn) == 2):
+            return None
+        found = facts.get((str(turn[0]), int(turn[1] or 0)))
+        if not found:
+            return None
+        repos.update(repo for repo, _ in found)
+        dirnames.update(dirname for _, dirname in found)
+    if len(repos) != 1 or scope not in dirnames:
+        return None
+    (expected,) = repos
+    return expected if expected and expected != scope else None
+
+
+def repair_concept_scope(episode_dir: Path, *, dry_run: bool = False,
+                         concept_path: Path | None = None,
+                         backup_dir: Path | None = None) -> dict[str, Any]:
+    """``--repair-concept-scope``：scope 跟著 repo 漂移的 concept 改回專案目錄名。
+
+    判定是 ``drifted_scope``（與 doctor 共用），episode 修正前後都能跑、結果相同。
+    只改 ``scope`` 一個欄位；寫入前把原檔複製到 ``backup_dir``
+    （預設 ``episode_backups/concept-scope-<時間>/``），再以 tmp + replace 寫回，
+    排版與管線相同（``indent=2``）。輸出只有 id 與 scope，不含 concept 內容。
+
+    **只修本機的 concept 池。** 已推上服務的 concept 內容由下一次 ``pipeline.py --push-concepts``
+    更新（既有 id 沿用原歸屬）；歸屬的 vault 要另外用
+    ``python -m lore_vault.cli.admin reassign-concepts`` 改。
+    """
+    import shutil
+
+    concept_path = concept_path if concept_path is not None else concept_path_for(episode_dir)
+    stats: dict[str, Any] = {"concepts": 0, "drifted": [], "backup_dir": None}
+    if not concept_path.exists():
+        print(f"[repair-concept-scope] {concept_path} 不存在", file=sys.stderr)
+        return stats
+    concepts = json.loads(concept_path.read_text(encoding="utf-8"))
+    if not isinstance(concepts, list):
+        raise ValueError(f"{concept_path} 不是陣列")
+    stats["concepts"] = len(concepts)
+    facts = turn_scope_facts(episode_dir)
+    for concept in concepts:
+        expected = drifted_scope(concept, facts) if isinstance(concept, dict) else None
+        if expected is None:
+            continue
+        stats["drifted"].append({"id": concept.get("id"), "from": concept.get("scope"),
+                                 "to": expected})
+        concept["scope"] = expected
+    if stats["drifted"] and not dry_run:
+        if backup_dir is None:
+            backup_dir = (episode_dir.parent / "episode_backups"
+                          / time.strftime("concept-scope-%Y%m%d-%H%M%S"))
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(concept_path, backup_dir / concept_path.name)
+        stats["backup_dir"] = str(backup_dir)
+        tmp = concept_path.with_suffix(concept_path.suffix + ".tmp")
+        tmp.write_text(json.dumps(concepts, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, concept_path)
+
+    print(f"[repair-concept-scope] {stats['concepts']} 條 concept：scope 漂移 {len(stats['drifted'])} 條"
+          + ("（dry-run，未寫入）" if dry_run else
+             (f"，備份在 {stats['backup_dir']}" if stats["backup_dir"] else "")),
+          file=sys.stderr)
+    for item in stats["drifted"]:
+        print(f"  {item['id']}  {item['from']} → {item['to']}", file=sys.stderr)
+    if stats["drifted"]:
+        print("  服務端：內容由 pipeline.py --push-concepts 更新；"
+              "歸屬見 lore_vault.cli.admin reassign-concepts", file=sys.stderr)
+    return stats
+
+
+def _ranges(indexes: list[int]) -> str:
+    """``[44, 45, 46, 53]`` → ``44-46,53``。"""
+    parts: list[str] = []
+    start = prev = None
+    for i in sorted(set(indexes)):
+        if prev is not None and i == prev + 1:
+            prev = i
+            continue
+        if start is not None:
+            parts.append(str(start) if start == prev else f"{start}-{prev}")
+        start = prev = i
+    if start is not None:
+        parts.append(str(start) if start == prev else f"{start}-{prev}")
+    return ",".join(parts)
+
+
 def repair(transcript: Path, episode_dir: Path, session_id: str,
            injections: dict[tuple[str, str], list[str]] | None = None) -> tuple[int, int]:
     """從 transcript 全量重建，修掉殘缺的紀錄。回傳 (重建後筆數, 修正筆數)。
@@ -652,8 +913,9 @@ def repair(transcript: Path, episode_dir: Path, session_id: str,
 
     # 存檔要先讀完才能重建：repo 根基準沿用存檔的，不重算。
     # 順序反過來的話 --repair 會把 repo 改名前的語料「修」成新 repo 名，
-    # 那是把歷史事實改掉，不是修復
-    episodes = completed_episodes(transcript, injections, pinned_roots(list(existing.values())))
+    # 那是把歷史事實改掉，不是修復。沒有 repo 根的輪次同理，沿用存檔的 repo 名
+    stored = list(existing.values())
+    episodes = completed_episodes(transcript, injections, pinned_roots(stored), pinned_repos(stored))
 
     fixed = 0
     for ep in episodes:
@@ -847,6 +1109,10 @@ def doctor(episode_dir: Path) -> int:
     legacy_schema = 0
     legacy_unfixable = 0
     schema_invalid: dict[str, int] = {}
+    # repo 被標成專案子目錄名的輪次（非 git 目錄 + shell cd 進子目錄）。重建沿用存檔的 repo 名
+    # （pinned_repos），所以下面「存檔 vs transcript」的比對看不到它，要另外對帳——
+    # 否則寫入端的規則哪天退回去，同一個 session 又會被拆到兩個 vault 而毫無徵兆
+    repo_drift: dict[str, int] = {}
 
     for fp in files:
         session_id = fp.stem
@@ -858,7 +1124,10 @@ def doctor(episode_dir: Path) -> int:
 
         total += len(stored)
         legacy_here = 0
+        session_dir = session_dir_for(session_id)
         for rec in stored:
+            if drifted_repo(rec, session_dir) is not None:
+                repo_drift[session_id] = repo_drift.get(session_id, 0) + 1
             stored_pairs.add((str(rec.get("session_id") or session_id), str(rec.get("prompt_id"))))
             if "injected" not in rec:
                 legacy_here += 1
@@ -890,7 +1159,8 @@ def doctor(episode_dir: Path) -> int:
 
         # 解析一次就好。原本 completed_episodes 在這個迴圈裡被呼叫三次，
         # 每次都重讀並重建整份 transcript。
-        all_episodes = episodes_from_transcript(transcript, injections, pinned_roots(stored))
+        all_episodes = episodes_from_transcript(transcript, injections, pinned_roots(stored),
+                                                pinned_repos(stored))
         completed = all_episodes[:-1] if all_episodes else []
         live = {_key(e): e for e in completed}
         # 空 assistant_text 的比對要用**含最新輪**的版本：那 2 筆殘留正是
@@ -986,6 +1256,29 @@ def doctor(episode_dir: Path) -> int:
             f"{sum(schema_invalid.values())} 輪不符服務端 Episode schema，推不上服務"
             f"——跑 --repair-schema（先 --dry-run）：" + "；".join(
                 f"{n} {reason}" for reason, n in sorted(schema_invalid.items(), key=lambda kv: -kv[1]))
+        )
+    concept_path = concept_path_for(episode_dir)
+    if concept_path.exists():
+        # concept 的 scope 是蒸餾當下抄下來的 repo 名，episode 修好了它也不會跟著對
+        try:
+            pool = json.loads(concept_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            pool = []
+        facts = turn_scope_facts(episode_dir)
+        scope_drift = [str(c.get("id")) for c in pool if isinstance(c, dict)
+                       and drifted_scope(c, facts) is not None] if isinstance(pool, list) else []
+        if scope_drift:
+            warnings.append(
+                f"{len(scope_drift)} 條 concept 的 scope 是來源輪次的子目錄名"
+                f"——跑 --repair-concept-scope（先 --dry-run）：" + ", ".join(scope_drift[:10])
+            )
+    if repo_drift:
+        # 警示而非問題：既有的漂移要連同服務端歸屬一起修（人工審過才跑），
+        # 當問題會在那之前把夜間管線整個擋住
+        warnings.append(
+            f"{sum(repo_drift.values())} 輪的 repo 是專案目錄底下的子目錄名"
+            f"（同一個 session 被拆到不同 vault）——跑 --repair-repo-drift（先 --dry-run）："
+            + "；".join(f"{sid[:8]} {n} 輪" for sid, n in sorted(repo_drift.items()))
         )
     if legacy_schema:
         problems.append(
@@ -1138,6 +1431,12 @@ def main() -> int:
                         help="一次性回填 repo_root 欄位（從 repo + cwd 推導，不碰檔案系統）")
     parser.add_argument("--repair-schema", action="store_true",
                         help="修正服務端 schema 不合法的舊輪次（先備份、原子寫回；搭配 --dry-run 只計數）")
+    parser.add_argument("--repair-repo-drift", action="store_true",
+                        help="repo 被標成專案子目錄名的舊輪次改回專案目錄名"
+                             "（先備份、只改 repo 欄位；搭配 --dry-run 只列出）")
+    parser.add_argument("--repair-concept-scope", action="store_true",
+                        help="scope 跟著 repo 漂移成子目錄名的 concept 改回專案目錄名"
+                             "（先備份、只改 scope 欄位；搭配 --dry-run 只列出）")
     parser.add_argument("--sync", type=Path, help="手動同步指定的 transcript")
     parser.add_argument("--repair", type=Path, help="全量重建，修復殘缺紀錄")
     parser.add_argument("--episode-dir", type=Path, default=DEFAULT_EPISODE_DIR)
@@ -1170,6 +1469,14 @@ def main() -> int:
     if args.repair_schema:
         stats = repair_schema(args.episode_dir, dry_run=args.dry_run)
         return 1 if stats["unfixable"] else 0
+
+    if args.repair_repo_drift:
+        repair_repo_drift(args.episode_dir, dry_run=args.dry_run)
+        return 0
+
+    if args.repair_concept_scope:
+        repair_concept_scope(args.episode_dir, dry_run=args.dry_run)
+        return 0
 
     if args.sync_all:
         return sync_all(args.episode_dir)

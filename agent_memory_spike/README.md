@@ -107,6 +107,12 @@ Stop hook 的 payload 有 `last_assistant_message`，看起來可以直接用。
 
 - `cwd` / `git_branch` 用 **list**：實測同一 session 內兩者都會變（切分支、bash 進子目錄），
   存單一值會失真
+- `repo` / `repo_root`：寫入當下的歷史事實，重建時沿用存檔的值、不重算。有 git 根取根目錄名；
+  **非 git 目錄**取 session 專案目錄（transcript 第一筆 cwd）的名字——只要這輪有 cwd 落在
+  專案目錄之內。不能取 `cwd[0]` 的目錄名：shell `cd` 進子目錄後整輪的 cwd 都是子目錄，
+  而沒有 `repo_root` 時 vault key 就是 `folder/<repo>`，同一個 session 會被拆到專案 vault
+  與雜項 vault 兩邊（實測 3 個 session、40 輪被標成 `site-packages`／`character_specs`／`sheets`）。
+  既有語料的漂移由 `--doctor` 警示、`--repair-repo-drift` 修正
 - `tool_sequence`：這輪實際做了什麼的骨架
 - `files_edited` / `files_read`：取自 `tool_use` 的路徑參數，並補上
   `file-history-delta.trackingPath`。**兩個來源缺一不可**——delta 只涵蓋一部分編輯
@@ -154,8 +160,17 @@ python hook_stop.py --sync <transcript_path>
 # 健檢：比對所有存檔與來源 transcript，並報告覆蓋度（唯讀，不修改）
 python hook_stop.py --doctor
 
-# 全量重建，修復殘缺紀錄
+# 全量重建，修復殘缺紀錄（repo 歸屬沿用存檔，不會被重建改掉）
 python hook_stop.py --repair <transcript_path>
+
+# repo 被標成專案子目錄名的舊輪次改回專案目錄名（先備份、只改 repo 欄位）
+# 只修本機語料；已推上服務的輪次另用 lore_vault.cli.admin reassign-episodes 改歸屬
+python hook_stop.py --repair-repo-drift --dry-run
+
+# 跟著漂移的 concept scope 改回專案目錄名（先備份、只改 concepts.json 的 scope 欄位）
+# scope 是蒸餾收回時定下來的，之後各階段整份讀寫都原樣帶著，episode 修好了它也不會跟著對
+# 服務端：內容由下一次 --push-concepts 更新，歸屬另用 lore_vault.cli.admin reassign-concepts
+python hook_stop.py --repair-concept-scope --dry-run
 
 # 掃過所有 transcript 補齊遺漏（session 中斷時尾端會漏，這支收尾）
 python hook_stop.py --sync-all

@@ -89,7 +89,7 @@ v12 遷移回填：principal 全為 `xavier`（v13 再改寫為 `UEPBernie`，�
 `cwd`（清單，一輪可能跨多個目錄）、`repo`、`repo_root`（凍結）、`machine`（凍結）、`files_edited`、`files_read`、`symbols_edited`、
 `tool_sequence`、`user_text`、`assistant_text`、`injected`。完整欄位以 `lore_vault.schema.Episode` 為準。
 
-服務端另存 `origin_key`（schema v16，不在 Episode schema／`data` 內）：被改路由到雜項 vault 的 episode 記收料時客戶端送來的原 binding key（`folder/<name>`），其餘為 NULL；日後該位置正式註冊時據此追溯，但不自動搬移（A7）。doctor `vaults.misc_routing` 對帳：雜項 vault 唯一、key 為 `misc`、無別名；`origin_key IS NOT NULL` ⇔ 在雜項 vault 且以 `folder/` 開頭（fail）；仍有 episode 收料自動建立的 `folder/*` vault 為 warn；已正式註冊的來源位置數只列資訊。
+服務端另存 `origin_key`（schema v16，不在 Episode schema／`data` 內）：被改路由到雜項 vault 的 episode 記收料時客戶端送來的原 binding key（`folder/<name>`），其餘為 NULL；日後該位置正式註冊時據此追溯，但不自動搬移（A7）；歸屬算錯時的人工更正走管理指令 `reassign-episodes`。doctor `vaults.misc_routing` 對帳：雜項 vault 唯一、key 為 `misc`、無別名；`origin_key IS NOT NULL` ⇔ 在雜項 vault 且以 `folder/` 開頭（fail）；仍有 episode 收料自動建立的 `folder/*` vault 為 warn；已正式註冊的來源位置數只列資訊。
 
 injection side-car 同樣有服務端欄位 `injections.origin_key`（v16），規則與 episode 相同（見 `POST /v1/injections`），doctor 同一項一併對帳。
 
