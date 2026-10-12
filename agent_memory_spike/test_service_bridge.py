@@ -524,16 +524,237 @@ def test_push_concepts_dry_run_records_nothing(tmp_path, monkeypatch, _isolated_
     assert not _isolated_state.exists()
 
 
+# --- 歧義跳過（2026-10-12 裁決：少量 vault_ambiguous 不擋整批）-------------------
+
+CANDIDATES = ["folder/comfyui", "misc"]
+
+
+def _a17_handler(ambiguous=(), unresolved=()):
+    """模擬服務端整批原子契約：批內有無法歸屬的 id 就整批 400，否則 200。
+
+    逐筆 `index` 是批內位置（與服務端相同），錯誤訊息故意夾帶 statement。"""
+    def handler(method, path, headers, body):
+        results, bad = [], 0
+        for index, concept in enumerate(body["concepts"]):
+            entry = {"index": index, "id": concept["id"], "status": "created"}
+            if concept["id"] in ambiguous:
+                entry = {"index": index, "id": concept["id"], "status": "invalid",
+                         "code": "vault_ambiguous", "candidates": CANDIDATES,
+                         "error": f"歧義：{concept.get('statement')}"}
+            elif concept["id"] in unresolved:
+                entry = {"index": index, "id": concept["id"], "status": "invalid",
+                         "code": "vault_unresolved", "error": "找不到 vault"}
+            bad += entry["status"] == "invalid"
+            results.append(entry)
+        if bad:
+            return 400, {"error": {"code": "batch_rejected", "message": f"{bad} 筆 invalid",
+                                   "results": results, "delete_results": []}}, {}
+        return 200, {"applied": True, "results": results}, {}
+    return handler
+
+
+def _push(tmp_path, monkeypatch, ids, handler, **kwargs):
+    path = _concepts_file(tmp_path, ids)
+    with FakeService(handler) as svc:
+        monkeypatch.setattr(pipeline, "service_settings", lambda: _svc_settings(svc.url))
+        code = pipeline.push_concepts_command(dry_run=False, concept_path=path, **kwargs)
+    return code, svc.requests
+
+
+def test_single_ambiguous_concept_is_skipped_and_the_rest_pushed(
+        tmp_path, monkeypatch, capsys, _isolated_state):
+    """10/12 實況：1961 筆裡 1 筆歧義讓整批每晚都不寫。跳過它、其餘照推、回 0。"""
+    _isolated_state.write_text(json.dumps({"service_pushed_concept_ids": ["c1", "gone"]}),
+                               encoding="utf-8")
+    code, requests = _push(tmp_path, monkeypatch, ["c1", "c-2288", "c3"],
+                           _a17_handler(ambiguous={"c-2288"}))
+    assert code == 0
+    # 第一次整批被拒，第二次剔掉歧義那筆重送；delete 原樣保留、歧義 id 不會被當成要刪
+    assert [[c["id"] for c in r["body"]["concepts"]] for r in requests] == [
+        ["c1", "c-2288", "c3"], ["c1", "c3"]]
+    assert [r["body"]["delete"] for r in requests] == [["gone"], ["gone"]]
+
+    state = json.loads(_isolated_state.read_text(encoding="utf-8"))
+    # 被跳過的不進已推送 id：下次推送才會再試、doctor 才看得到缺口
+    assert state[pipeline.PUSHED_IDS_KEY] == ["c1", "c3"]
+    record = state[pipeline.CONCEPT_PUSH_KEY]
+    assert record["ok"] is True  # 警示，不是推送失敗
+    assert record[pipeline.CONCEPT_PUSH_SKIPPED_KEY] == ["c-2288"]
+    assert record["upserted"] == 2 and record["deleted"] == 1
+    assert "跳過 1 筆" in record["summary"]
+    # 不靜默：stderr 有 id／code／candidates，沒有 statement 原文
+    err = capsys.readouterr().err
+    assert "跳過 1 筆" in err and "id='c-2288'" in err
+    assert "code=vault_ambiguous" in err and "candidates=folder/comfyui,misc" in err
+    assert "s c-2288" not in err and "<statement>" in err
+    assert "s c-2288" not in _isolated_state.read_text(encoding="utf-8")
+
+
+def test_skipped_concept_is_retried_next_push_and_never_deleted(
+        tmp_path, monkeypatch, _isolated_state):
+    """跳過後再推一次：歧義那筆照樣送出去重試，而且不出現在 delete 裡。"""
+    handler = _a17_handler(ambiguous={"c2"})
+    assert _push(tmp_path, monkeypatch, ["c1", "c2"], handler)[0] == 0
+    code, requests = _push(tmp_path, monkeypatch, ["c1", "c2"], handler)
+    assert code == 0
+    assert [c["id"] for c in requests[0]["body"]["concepts"]] == ["c1", "c2"]
+    assert all(r["body"]["delete"] == [] for r in requests)
+    # 歧義解掉之後（服務端收下）就進已推送 id、紀錄不再有 skipped
+    assert _push(tmp_path, monkeypatch, ["c1", "c2"], _a17_handler())[0] == 0
+    state = json.loads(_isolated_state.read_text(encoding="utf-8"))
+    assert state[pipeline.PUSHED_IDS_KEY] == ["c1", "c2"]
+    assert state[pipeline.CONCEPT_PUSH_KEY][pipeline.CONCEPT_PUSH_SKIPPED_KEY] == []
+
+
+def test_skip_matches_by_id_across_batches_not_by_index():
+    """拆批時逐筆 index 是批內位置：歧義在第二批的 index 0，不能剔到第一批的那筆。"""
+    concepts = [{"id": f"c{i}"} for i in range(5)]
+    skipped: list = []
+    with FakeService(_a17_handler(ambiguous={"c2", "c4"})) as svc:
+        responses = pipeline.push_concept_changes(
+            _svc_settings(svc.url), concepts, ["gone"], batch_size=2, skipped=skipped)
+    assert len(responses) == 3
+    sent = [([c["id"] for c in r["body"]["concepts"]], r["body"]["delete"])
+            for r in svc.requests]
+    assert sent == [(["c0", "c1"], []), (["c2", "c3"], []), (["c3"], []),
+                    (["c4"], ["gone"]), ([], ["gone"])]
+    assert [(r["id"], r["index"]) for r in skipped] == [("c2", 0), ("c4", 0)]
+
+
+def test_batch_left_empty_by_skipping_is_not_sent():
+    skipped: list = []
+    with FakeService(_a17_handler(ambiguous={"c0"})) as svc:
+        responses = pipeline.push_concept_changes(
+            _svc_settings(svc.url), [{"id": "c0"}], [], skipped=skipped)
+    assert responses == [] and len(svc.requests) == 1
+    assert [r["id"] for r in skipped] == ["c0"]
+
+
+def test_ambiguous_over_the_limit_aborts(tmp_path, monkeypatch, capsys, _isolated_state):
+    """超過門檻＝大量歧義：不跳過任何一筆，照舊整批中止回 1。"""
+    assert pipeline.AMBIGUOUS_SKIP_LIMIT == 5
+    _isolated_state.write_text(json.dumps({"service_pushed_concept_ids": ["old"]}),
+                               encoding="utf-8")
+    ids = [f"c{i}" for i in range(8)]
+    code, requests = _push(tmp_path, monkeypatch, ["old", *ids],
+                           _a17_handler(ambiguous=set(ids[:6])))
+    assert code == 1
+    assert len(requests) == 1  # 沒有重送
+    state = json.loads(_isolated_state.read_text(encoding="utf-8"))
+    assert state[pipeline.PUSHED_IDS_KEY] == ["old"]
+    record = state[pipeline.CONCEPT_PUSH_KEY]
+    assert record["ok"] is False and record[pipeline.CONCEPT_PUSH_SKIPPED_KEY] == []
+    assert "超過跳過門檻 5 筆" in record["summary"] and "batch_rejected" in record["summary"]
+    err = capsys.readouterr().err
+    assert "累計 6 筆" in err and "超過跳過門檻 5 筆" in err and "id='c5'" in err
+
+
+def test_ambiguous_exactly_at_the_limit_is_skipped(tmp_path, monkeypatch, _isolated_state):
+    ids = [f"c{i}" for i in range(7)]
+    code, _ = _push(tmp_path, monkeypatch, ids, _a17_handler(ambiguous=set(ids[:5])))
+    assert code == 0
+    state = json.loads(_isolated_state.read_text(encoding="utf-8"))
+    assert state[pipeline.PUSHED_IDS_KEY] == ["c5", "c6"]
+    assert state[pipeline.CONCEPT_PUSH_KEY][pipeline.CONCEPT_PUSH_SKIPPED_KEY] == ids[:5]
+
+
+def test_ambiguous_limit_is_cumulative_across_batches(monkeypatch):
+    """門檻算整次推送的累計，不是每批各自歸零。"""
+    from lore_vault.hooks.service import ServiceRejected
+
+    monkeypatch.setattr(pipeline, "AMBIGUOUS_SKIP_LIMIT", 2)
+    concepts = [{"id": f"c{i}"} for i in range(6)]
+    skipped: list = []
+    with FakeService(_a17_handler(ambiguous={"c0", "c2", "c4"})) as svc:
+        with pytest.raises(ServiceRejected):
+            pipeline.push_concept_changes(_svc_settings(svc.url), concepts, [],
+                                          batch_size=2, skipped=skipped)
+    assert [r["id"] for r in skipped] == ["c0", "c2"]  # 第三筆超過門檻，中止
+
+
+def test_ambiguous_mixed_with_unresolved_still_aborts(tmp_path, monkeypatch, _isolated_state):
+    """混有 vault_unresolved 就不是「跳過就好」：一筆都不跳、整批中止。"""
+    code, requests = _push(tmp_path, monkeypatch, ["c1", "c2", "c3"],
+                           _a17_handler(ambiguous={"c2"}, unresolved={"c3"}))
+    assert code == 1 and len(requests) == 1
+    state = json.loads(_isolated_state.read_text(encoding="utf-8"))
+    assert pipeline.PUSHED_IDS_KEY not in state
+    record = state[pipeline.CONCEPT_PUSH_KEY]
+    assert record["ok"] is False and "門檻" not in record["summary"]
+
+
+def test_ambiguous_only_failures_rejects_anything_else():
+    amb = {"index": 0, "id": "c1", "status": "invalid", "code": "vault_ambiguous"}
+    ok = {"index": 1, "id": "c2", "status": "created"}
+
+    def body(results, delete_results=()):
+        return {"error": {"code": "batch_rejected", "results": list(results),
+                          "delete_results": list(delete_results)}}
+
+    assert pipeline.ambiguous_only_failures(body([amb, ok])) == [amb]
+    assert pipeline.ambiguous_only_failures(body([ok])) is None
+    assert pipeline.ambiguous_only_failures(body([amb, {**amb, "code": "vault_unresolved"}])) is None
+    assert pipeline.ambiguous_only_failures(body([amb, {"index": 2, "status": "invalid"}])) is None
+    assert pipeline.ambiguous_only_failures(body([{**amb, "status": "conflict"}])) is None
+    assert pipeline.ambiguous_only_failures(body([{**amb, "id": None}])) is None
+    assert pipeline.ambiguous_only_failures(
+        body([amb], [{"id": "d", "status": "invalid", "error": "同一批同時 upsert 與刪除"}])) is None
+    for shape in (None, "HTTP 400", {}, {"error": "x"}, {"error": {"results": "x"}}):
+        assert pipeline.ambiguous_only_failures(shape) is None
+
+
+def test_skip_is_off_unless_a_collector_is_given():
+    """直接呼叫 push_concept_changes 而沒給 skipped：維持整批拒收（不默默少送）。"""
+    from lore_vault.hooks.service import ServiceRejected
+
+    with FakeService(_a17_handler(ambiguous={"c1"})) as svc:
+        with pytest.raises(ServiceRejected):
+            pipeline.push_concept_changes(_svc_settings(svc.url),
+                                          [{"id": "c0"}, {"id": "c1"}], [])
+    assert len(svc.requests) == 1
+
+
+def test_skipped_push_reaches_health_alert_and_doctor(tmp_path, monkeypatch, _isolated_state):
+    """對帳：跳過後的真實 state 檔，健康告警講「警示」、doctor warn 並列出 id。
+
+    拿掉保護會紅——把跳過的 id 寫進已推送清單（或不寫 skipped）的話，
+    doctor 會回 PASS、告警會安靜，那筆 concept 就無聲地永遠不在服務端。"""
+    import hook_health_alert
+
+    from lore_vault.doctor import DoctorContext, Status, default_registry
+
+    path = _concepts_file(tmp_path, ["c1", "c-2288"])
+    assert _isolated_state.parent == path.parent  # doctor 的 spike_home 就是這個目錄
+    with FakeService(_a17_handler(ambiguous={"c-2288"})) as svc:
+        monkeypatch.setattr(pipeline, "service_settings", lambda: _svc_settings(svc.url))
+        assert pipeline.push_concepts_command(dry_run=False, concept_path=path) == 0
+
+    state = json.loads(_isolated_state.read_text(encoding="utf-8"))
+    alert = hook_health_alert.concept_push_alert(state)
+    assert alert and "c-2288" in alert and "警示" in alert and "失敗" not in alert
+
+    report = default_registry().run(DoctorContext(settings={"spike_home": str(tmp_path)}),
+                                    categories=["concept_push"])
+    (outcome,) = [o for o in report.outcomes if o.name == "concept_push.lag"]
+    assert outcome.result.status is Status.WARN, outcome.result.summary
+    assert "c-2288" in outcome.result.summary
+    assert outcome.result.counts["skipped"] == 1 and outcome.result.counts["unpushed"] == 0
+
+
 def test_push_record_keys_agree_with_doctor_and_health_alert():
     """pipeline 寫、doctor 與健康告警讀同一組鍵與檔名；改名要三處一起改。"""
     import hook_health_alert
     import paths
 
+    from lore_vault.api import spike as api_spike
     from lore_vault.doctor import concept_push_check as check
 
     assert check.PUSHED_IDS_KEY == pipeline.PUSHED_IDS_KEY
     assert check.CONCEPT_PUSH_KEY == pipeline.CONCEPT_PUSH_KEY
     assert hook_health_alert.CONCEPT_PUSH_KEY == pipeline.CONCEPT_PUSH_KEY
+    assert check.CONCEPT_PUSH_SKIPPED_KEY == pipeline.CONCEPT_PUSH_SKIPPED_KEY
+    assert hook_health_alert.CONCEPT_PUSH_SKIPPED_KEY == pipeline.CONCEPT_PUSH_SKIPPED_KEY
+    assert pipeline.VAULT_AMBIGUOUS_CODE == api_spike.CODE_VAULT_AMBIGUOUS
     assert check.CONCEPTS_NAME == paths.CONCEPT_PATH.name
     assert check.PIPELINE_STATE_NAME == paths.PIPELINE_STATE_PATH.name
 

@@ -2,7 +2,8 @@
 
 排程在 `pipeline.py --run` 成功後跑 `--push-concepts`，成功時把推過的 id 寫進
 `pipeline_state.json` 的 `service_pushed_concept_ids`；每次實推（成敗）
-寫 `concept_push`。
+寫 `concept_push`。歸屬有歧義而被管線跳過的 concept（少量時不擋整批）不進
+已推送 id，另記在 `concept_push.skipped`。
 PreToolUse 改讀 MCP 從服務拉的快照後，推送停掉＝注入內容凍結，而快照年齡
 （以 `checked_at` 計）照樣是綠的；這項用既有的已推送 id 紀錄比對，不連服務。
 
@@ -16,7 +17,8 @@ PreToolUse 改讀 MCP 從服務拉的快照後，推送停掉＝注入內容凍�
 - `concepts.json` 不存在 → skipped；讀不出來或不是陣列 → fail
 - 上次實推失敗 → fail
 - 從未推送（沒有已推送 id）→ warn
-- 本地有未推送 id，或已推送 id 本地已不存在（待刪除）→ fail
+- 本地有未推送 id（不含上次推送明列為跳過的），或已推送 id 本地已不存在（待刪除）→ fail
+- 未推送的只剩上次推送因歸屬歧義跳過的 id → warn 並列出 id（修正歸屬前每晚都會再跳過）
 - id 一致但 `concepts.json` 在上次成功推送後又被改過（內容可能未推）→ warn
 """
 
@@ -35,6 +37,7 @@ CONCEPTS_NAME = "concepts.json"
 PIPELINE_STATE_NAME = "pipeline_state.json"
 PUSHED_IDS_KEY = "service_pushed_concept_ids"
 CONCEPT_PUSH_KEY = "concept_push"
+CONCEPT_PUSH_SKIPPED_KEY = "skipped"
 DEFAULT_GRACE_SECONDS = 60.0
 SAMPLE_LIMIT = 5
 
@@ -107,11 +110,21 @@ def concept_push_lag(ctx: DoctorContext) -> CheckResult:
         )
 
     pushed = {str(i) for i in pushed_raw}
-    unpushed = local - pushed
+    # 上次推送明列為「歸屬歧義、跳過」的 id：確實沒推上去，但那是已知且有紀錄的缺口，
+    # 與「推送沒跑到」分開呈現。只認本地還在、且真的不在已推送清單裡的
+    skipped_raw = record.get(CONCEPT_PUSH_SKIPPED_KEY) if record else None
+    skipped_raw = skipped_raw if isinstance(skipped_raw, list) else []
+    skipped = ({str(i) for i in skipped_raw} & local) - pushed
+    unpushed = local - pushed - skipped
     pending_delete = pushed - local
     counts.update(
-        pushed=len(pushed), unpushed=len(unpushed), pending_delete=len(pending_delete)
+        pushed=len(pushed),
+        unpushed=len(unpushed),
+        pending_delete=len(pending_delete),
+        skipped=len(skipped),
     )
+    if skipped:
+        details.append(f"歸屬歧義被跳過（未推送）：{', '.join(sorted(skipped))}")
     if unpushed or pending_delete:
         if unpushed:
             details.append(f"未推送：{_sample(unpushed)}")
@@ -120,6 +133,15 @@ def concept_push_lag(ctx: DoctorContext) -> CheckResult:
         return CheckResult.fail(
             f"服務端 concept 落後本地：{len(unpushed)} 筆未推送、"
             f"{len(pending_delete)} 筆待刪除（跑 pipeline.py --push-concepts）",
+            details=details,
+            counts=counts,
+        )
+
+    if skipped:
+        return CheckResult.warn(
+            f"{len(skipped)} 筆 concept 因歸屬有歧義被跳過、尚未推送到服務："
+            f"{_sample(skipped)}（其餘已推送；修正 scope／vault 歸屬後重跑 "
+            "pipeline.py --push-concepts）",
             details=details,
             counts=counts,
         )

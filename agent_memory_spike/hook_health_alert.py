@@ -54,6 +54,9 @@ SILENT_INJECT_DAYS = 7     # 注入本來就稀疏（約 18%/編輯輪），要�
 
 # 與 pipeline.CONCEPT_PUSH_KEY 相同；不 import pipeline（它會拖進 transcript）
 CONCEPT_PUSH_KEY = "concept_push"
+# 與 pipeline.CONCEPT_PUSH_SKIPPED_KEY 相同：推送成功但因歸屬歧義被跳過的 concept id
+CONCEPT_PUSH_SKIPPED_KEY = "skipped"
+SKIPPED_ID_SAMPLE = 5      # 告警裡最多列幾個被跳過的 id
 # 與 episode_source.EPISODE_PULL_KEY／MODE_* 相同（同理不 import；test_episode_source 驗證一致）
 EPISODE_PULL_KEY = "episode_pull"
 EPISODE_PULL_FALLBACK = "local_fallback"
@@ -131,6 +134,27 @@ def _failure_streak(stage: str) -> int:
     return streak
 
 
+def concept_push_alert(state: Any) -> str | None:
+    """`concept_push` 紀錄要不要告警：推送失敗，或成功但有 concept 被跳過。"""
+    push = state.get(CONCEPT_PUSH_KEY) if isinstance(state, dict) else None
+    if not isinstance(push, dict):
+        return None
+    if push.get("ok") is False:
+        summary = str(push.get("summary") or "").strip()
+        return (f"concept 推送到服務失敗（{push.get('at')}）：{summary[:120]}"
+                "（服務端記憶停在上次成功推送）")
+    # 推送成功但有 concept 因歸屬歧義被跳過（2026-10-12 裁決）：不是推送失敗，
+    # 但那幾筆每晚都會再被跳過，要有人去修歸屬——所以是警示、不能靜默
+    skipped = push.get(CONCEPT_PUSH_SKIPPED_KEY)
+    if isinstance(skipped, list) and skipped:
+        ids = ", ".join(str(i) for i in skipped[:SKIPPED_ID_SAMPLE])
+        more = f" …等 {len(skipped)} 筆" if len(skipped) > SKIPPED_ID_SAMPLE else ""
+        return (f"concept 推送警示（{push.get('at')}）：{len(skipped)} 筆 concept 歸屬有歧義"
+                f"被跳過、尚未推送：{ids}{more}"
+                "（其餘已推送；修正歸屬前每晚都會再跳過，見 doctor concept_push.lag）")
+    return None
+
+
 def collect_alerts() -> list[str]:
     """回傳要告警的句子。沒問題就是空 list。"""
     alerts: list[str] = []
@@ -155,12 +179,9 @@ def collect_alerts() -> list[str]:
 
     # 1b. concept 推送（排程在 --run 成功後跑 --push-concepts）。失敗時服務端 concept
     #     停在上次成功推送，PreToolUse 讀的服務端快照照樣「新鮮」——只有這裡看得到
-    push = state.get(CONCEPT_PUSH_KEY) if isinstance(state, dict) else None
-    if isinstance(push, dict) and push.get("ok") is False:
-        summary = str(push.get("summary") or "").strip()
-        alerts.append(
-            f"concept 推送到服務失敗（{push.get('at')}）：{summary[:120]}"
-            "（服務端記憶停在上次成功推送）")
+    push_alert = concept_push_alert(state)
+    if push_alert:
+        alerts.append(push_alert)
 
     # 1c. episode 來源（D13）。拉取失敗時管線退回本機 jsonl 照跑、階段報 OK，
     #     遠端機器的 episode 靜默地沒進蒸餾——只有這筆紀錄看得到

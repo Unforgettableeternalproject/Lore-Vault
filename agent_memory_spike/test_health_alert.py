@@ -151,6 +151,28 @@ def test_concept_push_success_is_silent(work):
     _with_push_record(work, {"ok": True, "at": "2026-09-27T03:45:00+00:00",
                              "summary": "upsert 3、刪除 0，套用 1/1 批"})
     assert health.collect_alerts() == []
+    _with_push_record(work, {"ok": True, "at": "2026-09-27T03:45:00+00:00",
+                             "summary": "upsert 3、刪除 0，套用 1/1 批", "skipped": []})
+    assert health.collect_alerts() == []
+
+
+def test_concept_push_skipped_is_a_warning_not_a_failure(work):
+    """少量歧義被跳過（2026-10-12 裁決）：推送本身成功，但那幾筆沒上去，不能安靜。"""
+    _with_push_record(work, {"ok": True, "at": "2026-10-12T19:45:00+00:00",
+                             "summary": "upsert 1960、刪除 0，套用 4/4 批；跳過 1 筆",
+                             "skipped": ["c-2288"]})
+    alerts = health.collect_alerts()
+    assert len(alerts) == 1
+    assert "concept 推送警示" in alerts[0] and "c-2288" in alerts[0]
+    assert "1 筆" in alerts[0] and "失敗" not in alerts[0]
+    assert "c-2288" in health.build_output(alerts)["hookSpecificOutput"]["additionalContext"]
+
+
+def test_concept_push_skipped_list_is_capped(work):
+    ids = [f"c-{i}" for i in range(health.SKIPPED_ID_SAMPLE + 3)]
+    _with_push_record(work, {"ok": True, "at": "x", "summary": "s", "skipped": ids})
+    (alert,) = health.collect_alerts()
+    assert ids[0] in alert and ids[-1] not in alert and f"等 {len(ids)} 筆" in alert
 
 
 def test_stale_schedule_is_reported(work):

@@ -50,6 +50,8 @@ A13：三個階段都要 `claude -p`，整條管線留在主機排程，改經�
 `--push-concepts` 不在 STAGES 內，由排程腳本 `run_pipeline.ps1` 在 `--run` 成功後另跑一次。
 每次實推（非 dry-run）都把結果寫進 `pipeline_state.json` 的 `concept_push`（成功或失敗），
 SessionStart 健康告警讀它；doctor `concept_push.lag` 比對本地 id 與已推送 id。
+歸屬有歧義（`vault_ambiguous`）的 concept 累計不超過 `AMBIGUOUS_SKIP_LIMIT` 筆時跳過、
+其餘照推（2026-10-12 裁決）；跳過的 id 記在 `concept_push.skipped`、不算已推送，每晚重試。
 """
 
 from __future__ import annotations
@@ -822,10 +824,17 @@ SERVICE_TIMEOUT = 60.0
 EPISODE_PAGE_SIZE = 500
 CONCEPT_BATCH_SIZE = 500  # 服務端上限 1000（concepts + delete 合計）
 PUSHED_IDS_KEY = "service_pushed_concept_ids"
-# 最近一次實推的結果：{"ok", "at", "summary", "upserted", "deleted"}。
+# 最近一次實推的結果：{"ok", "at", "summary", "upserted", "deleted", "skipped"}。
 # 健康告警與 doctor（lore_vault.doctor.concept_push_check）讀同一個鍵，改名要一起改
 CONCEPT_PUSH_KEY = "concept_push"
+# concept_push 紀錄裡「因歸屬歧義被跳過、未推送」的 id 清單；同樣三處一起改
+CONCEPT_PUSH_SKIPPED_KEY = "skipped"
 CONCEPT_PUSH_SUMMARY_LIMIT = 300
+# 與 lore_vault.api.spike.CODE_VAULT_AMBIGUOUS 相同（管線不 import api；測試驗證一致）
+VAULT_AMBIGUOUS_CODE = "vault_ambiguous"
+# 一次推送最多跳過幾筆歧義 concept。少量歧義不該擋住整批（2026-10-12 裁決）；
+# 超過即視為「大量」——多半是 vault 註冊或 scope 推導出了系統性問題，照舊整批中止
+AMBIGUOUS_SKIP_LIMIT = 5
 
 
 def service_settings():  # noqa: ANN201 — lore_vault.hooks.client_env.ClientSettings
@@ -867,30 +876,78 @@ def diff_concept_ids(previous: list[str], current: list[dict[str, Any]]) -> list
     return sorted(i for i in previous if i not in now_ids)
 
 
+def ambiguous_only_failures(body: Any) -> list[dict[str, Any]] | None:
+    """batch_rejected 的失敗項**全部**是 `vault_ambiguous` 時回那些逐筆結果，否則回 None。
+
+    混有其他失敗（`vault_unresolved`、schema invalid、conflict、delete 失敗）、
+    body 形狀不符或失敗項沒有 id 都回 None：那些不是「跳過就好」的情況。"""
+    error = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(error, dict) or not isinstance(error.get("results"), list):
+        return None
+    delete_results = error.get("delete_results") or []
+    if not isinstance(delete_results, list):
+        return None
+    failed_status = ("invalid", "conflict")
+    if any(isinstance(r, dict) and r.get("status") in failed_status for r in delete_results):
+        return None
+    failed = [r for r in error["results"]
+              if isinstance(r, dict) and r.get("status") in failed_status]
+    if not failed:
+        return None
+    for r in failed:
+        if (r.get("status") != "invalid" or r.get("code") != VAULT_AMBIGUOUS_CODE
+                or not isinstance(r.get("id"), str) or not r["id"]):
+            return None
+    return failed
+
+
 def push_concept_changes(settings, concepts: list[dict[str, Any]],  # noqa: ANN001
                          delete: list[str], *, vault: str = "*",
                          batch_size: int = CONCEPT_BATCH_SIZE,
-                         timeout: float = SERVICE_TIMEOUT) -> list[dict[str, Any]]:
+                         timeout: float = SERVICE_TIMEOUT,
+                         skipped: list[dict[str, Any]] | None = None,
+                         skip_limit: int | None = None) -> list[dict[str, Any]]:
     """`POST /v1/concepts`（mode=upsert）。每批在服務端是整批成功或整批不寫；
     超過 `batch_size` 會拆批，拆開的批次之間不保證原子。回傳各批回應。
 
     每筆照 concepts.json 原樣送、不帶 vault；新 concept 的歸屬由服務端依 A17 決定。
-    整批被拒時拋 `ServiceRejected`，`body` 帶逐筆結果（見 `format_rejected_results`）。"""
-    from lore_vault.hooks.service import request_json
+    整批被拒時拋 `ServiceRejected`，`body` 帶逐筆結果（見 `format_rejected_results`）。
 
+    有給 `skipped`（收集用的 list）時啟用歧義跳過：某批被拒且失敗項全部是
+    `vault_ambiguous`、累計跳過數不超過 `skip_limit`（預設 `AMBIGUOUS_SKIP_LIMIT`）→
+    把那些 id 從該批剔除後重送，服務端的逐筆結果附加到 `skipped`。服務端的整批原子
+    契約不變，跳過是客戶端少送那幾筆。其餘情況照舊拋出；拋出前已跳過的仍留在 `skipped`。
+    比對用 id 不用 `index`（index 是批內位置）。"""
+    from lore_vault.hooks.service import ServiceRejected, request_json
+
+    if skip_limit is None:
+        skip_limit = AMBIGUOUS_SKIP_LIMIT
     responses: list[dict[str, Any]] = []
     ops: list[tuple[str, Any]] = [("c", c) for c in concepts] + [("d", d) for d in delete]
     for start in range(0, max(len(ops), 1), batch_size):
         chunk = ops[start:start + batch_size]
-        if not chunk:
-            break
-        body = {
-            "vault": vault,
-            "mode": "upsert",
-            "concepts": [x for kind, x in chunk if kind == "c"],
-            "delete": [x for kind, x in chunk if kind == "d"],
-        }
-        responses.append(request_json(settings, "POST", "/v1/concepts", body, timeout=timeout))
+        while chunk:
+            body = {
+                "vault": vault,
+                "mode": "upsert",
+                "concepts": [x for kind, x in chunk if kind == "c"],
+                "delete": [x for kind, x in chunk if kind == "d"],
+            }
+            try:
+                responses.append(
+                    request_json(settings, "POST", "/v1/concepts", body, timeout=timeout))
+                break
+            except ServiceRejected as exc:
+                ambiguous = None if skipped is None else ambiguous_only_failures(exc.body)
+                if ambiguous is None or len(skipped) + len(ambiguous) > skip_limit:
+                    raise
+                drop = {r["id"] for r in ambiguous}
+                sent = {c.get("id") for c in body["concepts"] if isinstance(c, dict)}
+                if not drop <= sent:  # 服務端指了這批沒送的 id：對不上就不猜
+                    raise
+                skipped.extend(ambiguous)
+                chunk = [(kind, x) for kind, x in chunk
+                         if not (kind == "c" and isinstance(x, dict) and x.get("id") in drop)]
     return responses
 
 
@@ -920,13 +977,20 @@ def format_rejected_results(body: Any, concepts: list[dict[str, Any]]) -> list[s
     error = body.get("error") if isinstance(body, dict) else None
     if not isinstance(error, dict) or not isinstance(error.get("results"), list):
         return None
-    statements = [c.get("statement") for c in concepts
-                  if isinstance(c, dict) and isinstance(c.get("statement"), str)
-                  and c.get("statement")]
     lines = [f"服務端拒收整批（{error.get('code')}）：{error.get('message')}"]
     failed = [r for r in [*error["results"], *(error.get("delete_results") or [])]
               if isinstance(r, dict) and r.get("status") in ("invalid", "conflict")]
-    for r in failed:
+    return lines + format_result_lines(failed, concepts)
+
+
+def format_result_lines(results: list[dict[str, Any]],
+                        concepts: list[dict[str, Any]]) -> list[str]:
+    """服務端逐筆結果各一行（被拒與被跳過共用）；遮 statement、截斷的原則同上。"""
+    statements = [c.get("statement") for c in concepts
+                  if isinstance(c, dict) and isinstance(c.get("statement"), str)
+                  and c.get("statement")]
+    lines = []
+    for r in results:
         message = str(r.get("error") or "")
         for statement in statements:
             message = message.replace(statement, "<statement>")
@@ -943,7 +1007,13 @@ def format_rejected_results(body: Any, concepts: list[dict[str, Any]]) -> list[s
 
 def push_concepts_command(*, dry_run: bool, concept_path: Path = CONCEPT_PATH) -> int:
     """送 `vault="*"`、每筆不帶 vault：repo-scope 新 concept 的歸屬由服務端依 A17 決定
-    （source_turns → scope 比對）。無法決定或歧義時整批被拒，逐筆原因印到 stderr、回 1。
+    （source_turns → scope 比對）。無法決定時整批被拒，逐筆原因印到 stderr、回 1。
+
+    歧義（`vault_ambiguous`）例外（2026-10-12 裁決）：某批的失敗項全部是歧義、累計不超過
+    `AMBIGUOUS_SKIP_LIMIT` 筆時跳過那幾筆、其餘照推並回 0；超過門檻視為大量歧義，
+    與其他拒收一樣整批中止回 1。跳過不靜默：逐筆印到 stderr、id 寫進 `concept_push`
+    紀錄的 `skipped`（健康告警與 doctor 以警示呈現），且**不計入已推送 id**——
+    下次推送會再試，也不會被當成待刪除（刪除差集只看「上次推過、這次本地已不存在」）。
 
     實推（非 dry-run）不論成敗都寫 `concept_push` 紀錄：排程失敗只會留在 log 裡，
     沒有這筆紀錄健康告警就看不到（注入內容會靜默停在上次成功推送）。
@@ -952,6 +1022,16 @@ def push_concepts_command(*, dry_run: bool, concept_path: Path = CONCEPT_PATH) -
 
     state = load_state()
     upserted = deleted = 0
+    skipped: list[dict[str, Any]] = []
+
+    def print_skipped() -> None:
+        if not skipped:
+            return
+        print(f"[pipeline] 跳過 {len(skipped)} 筆歸屬有歧義的 concept（未推送，下次推送再試）：",
+              file=sys.stderr)
+        for line in format_result_lines(skipped, concepts):
+            print(f"[pipeline] {line}", file=sys.stderr)
+
     try:
         concepts = json.loads(concept_path.read_text(encoding="utf-8"))
         delete = diff_concept_ids(list(state.get(PUSHED_IDS_KEY) or []), concepts)
@@ -960,17 +1040,25 @@ def push_concepts_command(*, dry_run: bool, concept_path: Path = CONCEPT_PATH) -
         if dry_run:
             return 0
         try:
-            responses = push_concept_changes(service_settings(), concepts, delete)
+            responses = push_concept_changes(service_settings(), concepts, delete,
+                                             skipped=skipped)
         except ServiceRejected as exc:
             lines = format_rejected_results(exc.body, concepts)
             if lines is None:
                 raise
+            print_skipped()
             for line in lines:
                 print(f"[pipeline] {line}", file=sys.stderr)
+            summary = f"{lines[0]}（{len(lines) - 1} 筆被拒）"
+            ambiguous = ambiguous_only_failures(exc.body)
+            if ambiguous is not None and len(skipped) + len(ambiguous) > AMBIGUOUS_SKIP_LIMIT:
+                over = (f"vault_ambiguous 累計 {len(skipped) + len(ambiguous)} 筆，"
+                        f"超過跳過門檻 {AMBIGUOUS_SKIP_LIMIT} 筆")
+                print(f"[pipeline] {over}：視為大量歧義，不跳過、整批中止", file=sys.stderr)
+                summary = f"{over}；{summary}"
             print("[pipeline] 推送中止；拆批時先前批次可能已套用，修正後重跑即可（upsert 冪等）",
                   file=sys.stderr)
-            record_concept_push(state, ok=False,
-                                summary=f"{lines[0]}（{len(lines) - 1} 筆被拒）",
+            record_concept_push(state, ok=False, summary=summary,
                                 upserted=upserted, deleted=deleted)
             return 1
     except Exception as exc:
@@ -978,21 +1066,30 @@ def push_concepts_command(*, dry_run: bool, concept_path: Path = CONCEPT_PATH) -
             record_concept_push(state, ok=False, summary=f"{type(exc).__name__}: {exc}",
                                 upserted=upserted, deleted=deleted)
         raise
-    state[PUSHED_IDS_KEY] = sorted(c["id"] for c in concepts if c.get("id"))
+    # 被跳過的不算已推送：下次再試，doctor 也才看得到它還沒上去
+    skipped_ids = sorted({r["id"] for r in skipped})
+    upserted -= sum(1 for c in concepts if c.get("id") in skipped_ids)
+    state[PUSHED_IDS_KEY] = sorted(c["id"] for c in concepts
+                                   if c.get("id") and c["id"] not in skipped_ids)
     applied = sum(1 for r in responses if isinstance(r, dict) and r.get("applied"))
-    record_concept_push(state, ok=True,
-                        summary=f"upsert {upserted}、刪除 {deleted}，套用 {applied}/{len(responses)} 批",
-                        upserted=upserted, deleted=deleted)
+    summary = f"upsert {upserted}、刪除 {deleted}，套用 {applied}/{len(responses)} 批"
+    if skipped_ids:
+        print_skipped()
+        summary += f"；跳過 {len(skipped_ids)} 筆 {VAULT_AMBIGUOUS_CODE}（未推送）"
+    record_concept_push(state, ok=True, summary=summary,
+                        upserted=upserted, deleted=deleted, skipped=skipped_ids)
     print(f"[pipeline] 服務端套用 {applied}/{len(responses)} 批", file=sys.stderr)
     return 0
 
 
 def record_concept_push(state: dict[str, Any], *, ok: bool, summary: str,
-                        upserted: int, deleted: int) -> None:
+                        upserted: int, deleted: int,
+                        skipped: list[str] | None = None) -> None:
     """把本次推送結果寫進 state 並落地（連同呼叫端已改好的其他鍵）。
 
     summary 只放例外型別／訊息與計數；hooks.service 的例外訊息只有 HTTP 狀態與
-    設定提示，不含回應內文與密鑰。"""
+    設定提示，不含回應內文與密鑰。`skipped` 是因歸屬歧義被跳過、未推送的 id
+    （只有成功的推送會有；`ok` 仍為 True，由健康告警與 doctor 以警示呈現）。"""
     if len(summary) > CONCEPT_PUSH_SUMMARY_LIMIT:
         summary = summary[:CONCEPT_PUSH_SUMMARY_LIMIT] + "…"
     state[CONCEPT_PUSH_KEY] = {
@@ -1001,6 +1098,7 @@ def record_concept_push(state: dict[str, Any], *, ok: bool, summary: str,
         "summary": summary,
         "upserted": upserted,
         "deleted": deleted,
+        CONCEPT_PUSH_SKIPPED_KEY: list(skipped or []),
     }
     save_state(state)
 

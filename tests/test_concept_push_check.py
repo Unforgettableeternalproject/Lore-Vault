@@ -66,7 +66,52 @@ def test_pass_when_every_local_id_was_pushed(tmp_path):
         "pushed": 2,
         "unpushed": 0,
         "pending_delete": 0,
+        "skipped": 0,
     }
+
+
+def test_skipped_ambiguous_id_warns_and_is_listed(tmp_path):
+    """管線跳過歧義 concept（少量不擋整批）：推送成功，但那筆不在服務端——
+    不是「落後」的紅燈，也不能是綠燈。"""
+    home = _home(
+        tmp_path,
+        ["c-1", "c-2", "c-2288"],
+        pushed=["c-1", "c-2"],
+        record=_ok_record(skipped=["c-2288"]),
+    )
+    result = _lag({"spike_home": str(home)})
+    assert result.status is Status.WARN, result.summary
+    assert "c-2288" in result.summary
+    assert any("c-2288" in d for d in result.details)
+    assert result.counts["skipped"] == 1 and result.counts["unpushed"] == 0
+
+
+def test_skipped_list_does_not_hide_other_unpushed_ids(tmp_path):
+    """跳過清單只豁免它列出的 id：另有未推送或待刪除照樣紅。"""
+    home = _home(
+        tmp_path,
+        ["c-1", "c-9", "c-2288"],
+        pushed=["c-1"],
+        record=_ok_record(skipped=["c-2288"]),
+    )
+    result = _lag({"spike_home": str(home)})
+    assert result.status is Status.FAIL
+    assert result.counts["unpushed"] == 1 and result.counts["skipped"] == 1
+    assert any("c-9" in d for d in result.details)
+    assert any("c-2288" in d for d in result.details)
+
+
+def test_stale_skipped_entries_are_ignored(tmp_path):
+    """紀錄列為跳過、但本地已不存在或其實已推送的 id 不算缺口。"""
+    home = _home(
+        tmp_path,
+        ["c-1", "c-2"],
+        pushed=["c-1", "c-2"],
+        record=_ok_record(skipped=["c-2", "c-gone"]),
+    )
+    result = _lag({"spike_home": str(home)})
+    assert result.status is Status.PASS, result.summary
+    assert result.counts["skipped"] == 0
 
 
 def test_unpushed_local_id_is_red(tmp_path):
