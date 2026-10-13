@@ -8,7 +8,7 @@ server。
 新增工具只需在 `build_tools` 回傳的清單加一筆 `TaskTool`：
 - `name` 不可與核心工具（`lore_vault.mcp.server.TOOL_NAMES`）重名，plugin 會拒絕
 - `fn` 是 async 函式，參數以 `Annotated[..., Field(description=...)]` 描述，最後一個
-  參數為 `ctx: Context | None = None`，本體包在 `with shell.request_scope(ctx):`
+  參數為 `ctx: Context | None = None`，本體包在 `async with shell.request_scope(ctx):`
   （HTTP 模式依 session 取目前 space 與轉發認證 header），回傳緊湊 JSON 字串
 - 對服務的請求一律走 `shell` 既有的 async `ServiceClient`
   （經 `shell._send` 注入 space），不要另起同步 client
@@ -53,6 +53,7 @@ from lore_vault.mcp.server import (
     _from_service_error,
     _tool_error,
 )
+from lore_vault.mcp.workdir import is_system_dir
 
 from . import remote_ops, snapshot
 from . import remote_store as rs
@@ -350,6 +351,14 @@ class TaskOps:
             key=vault or None, create=create, display=display, space=SPACE_DEV
         )
         key = str(resolved["key"])
+        if is_system_dir(self._cwd()):
+            # 殼工作目錄是系統目錄或磁碟根：不是專案，不讀寫也不建立本機 openspec/
+            return Target(
+                key,
+                rs.RemoteStore(self.post, key),
+                None,
+                "殼工作目錄不是專案目錄（系統目錄或磁碟根），不讀寫本機檔案",
+            )
         local_root = resolve_root(None, os.environ, self._cwd()) or (
             self._cwd() / DEFAULT_DIR
         )
@@ -909,7 +918,7 @@ class TaskOps:
 
     def _binding_key(self) -> str:
         try:
-            return resolve_binding(str(self._cwd())).key
+            return resolve_binding(self.shell.project_dir()).key
         except (OSError, ValueError) as exc:
             raise _tool_error("invalid_cwd", str(exc)) from None
 
@@ -1267,7 +1276,7 @@ def build_tools(shell: Shell) -> list[TaskTool]:
         ] = False,
         ctx: Context | None = None,
     ) -> str:
-        with shell.request_scope(ctx):
+        async with shell.request_scope(ctx):
             try:
                 if action == "init":
                     result = await ops.init(vault, display)

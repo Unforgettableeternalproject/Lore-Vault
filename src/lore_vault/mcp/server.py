@@ -33,6 +33,13 @@ HTTP 端點（`mcp.http`）在服務行程內經 in-process ASGI 轉發到同一
 `upload_roots`（殼的工作目錄＋設定 `mcp.upload_roots`）底下的一般檔案：路徑含 `..`
 一律拒絕；以 realpath（解開 symlink／junction）比對，逃出白名單回 `path_not_allowed`。
 
+殼的工作目錄（stdio；桌面型客戶端啟動時行程 cwd 常是 Windows 的 system32）依序取：
+客戶端宣告的第一個 root（首次工具呼叫時 `roots/list` 一次並快取，失敗靜默退回）→
+環境變數 `LORE_VAULT_CWD` → 行程 cwd；建構時注入 `cwd` 則以注入為準（測試用）。
+最後落在 %WINDIR% 底下或磁碟根目錄的，視為「不是專案目錄」：`vault_resolve` 省略
+`cwd` 回 `cwd_required`、不納入 `upload_roots`、tasks 不碰本機檔案。工具顯式傳入的
+`cwd` 不套守門。
+
 「目前 space」（A18）由殼持有：每個殼行程一份、不持久化，新行程一律 `dev`。
 `space` 工具查詢／切換（不打服務）；其他工具不帶 space 參數，由殼在每個服務請求
 自動注入（服務端 space 必填、無預設）。降級讀快照時同樣以目前 space 過濾。
@@ -59,9 +66,10 @@ import json
 import logging
 import os
 import sqlite3
+import warnings
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Callable, Iterator, Mapping
-from contextlib import asynccontextmanager, contextmanager
+from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
@@ -115,6 +123,7 @@ from .download import (
 from .settings import ShellSettings
 from .snapshot import pull_concepts, pull_snapshot
 from .upload import UploadPathError, read_upload
+from .workdir import CWD_ENV, is_system_dir, root_from_uri
 
 logger = logging.getLogger("lore_vault.mcp")
 
@@ -135,6 +144,8 @@ TOOL_NAMES = (
 )
 SPACE_ACTIONS = ("get", "set")
 DEGRADED_REASON = "service_unreachable"
+# 向客戶端要 roots 的等待上限（秒）；逾時靜默退回，不拖住工具呼叫
+ROOTS_TIMEOUT = 5.0
 
 SOURCE_REMOTE_URL = "remote_url"
 MODE_STDIO = "stdio"
@@ -237,6 +248,10 @@ _HINTS = {
     "path_not_supported": (
         "HTTP 端點讀不到你的檔案系統：改傳 filename 與 content_base64"
         "（檔案內容 base64）"
+    ),
+    "cwd_required": (
+        "殼的工作目錄不是專案目錄（客戶端沒提供 root、行程 cwd 是系統目錄或磁碟根）："
+        "傳 cwd=<專案目錄>，或請使用者設定環境變數 LORE_VAULT_CWD"
     ),
     "cwd_not_supported": (
         "HTTP 端點看不到你的工作目錄：在專案目錄執行 `git remote get-url origin`，"
@@ -466,7 +481,7 @@ class Shell:
         settings: ShellSettings,
         *,
         transport: httpx2.AsyncBaseTransport | None = None,
-        cwd: Callable[[], str] = os.getcwd,
+        cwd: Callable[[], str] | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         mode: str = MODE_STDIO,
         download_limit: Callable[[], int] | None = None,
@@ -479,7 +494,11 @@ class Shell:
         # None = 用 settings.download_max_bytes
         self._download_limit = download_limit
         self.client = ServiceClient(settings, transport=transport)
-        self._cwd = cwd
+        # 工作目錄來源：注入（測試）為準；否則客戶端 root → LORE_VAULT_CWD → 行程 cwd
+        self._cwd: Callable[[], str] = cwd if cwd is not None else self._default_cwd
+        self._client_root: Path | None = None
+        self._roots_probed = False
+        self._roots_lock = anyio.Lock()
         self._now = now
         self._pull_lock = anyio.Lock()
         self.last_pull_error: str | None = None
@@ -505,10 +524,74 @@ class Shell:
         while len(self._spaces) > MAX_SESSION_SPACES:
             self._spaces.popitem(last=False)
 
-    @contextmanager
-    def request_scope(self, ctx: Context | None) -> Iterator[None]:
-        """一次工具呼叫的範圍：HTTP 模式記下 MCP session 與要轉發的認證 header。"""
+    def _default_cwd(self) -> str:
+        if self._client_root is not None:
+            return str(self._client_root)
+        override = os.environ.get(CWD_ENV, "").strip()
+        return override or os.getcwd()
+
+    def project_dir(self) -> str:
+        """殼的工作目錄；落在系統目錄或磁碟根（不是專案）時回 `cwd_required`。"""
+        path = self._cwd()
+        if is_system_dir(path):
+            raise _tool_error(
+                "cwd_required",
+                f"殼的工作目錄 {path!r} 不是專案目錄",
+                hint=_HINTS["cwd_required"],
+            )
+        return path
+
+    def cwd_info(self) -> dict[str, Any]:
+        """殼工作目錄的來源與是否為專案目錄（`status` 的 shell 區段用，方便排錯）。"""
+        path = self._cwd()
+        if self._cwd != self._default_cwd:
+            source = "injected"
+        elif self._client_root is not None:
+            source = "client_root"
+        elif os.environ.get(CWD_ENV, "").strip():
+            source = "env"
+        else:
+            source = "process"
+        return {
+            "path": path,
+            "source": source,
+            "is_project_dir": not is_system_dir(path),
+        }
+
+    async def _probe_client_root(self, ctx: Context | None) -> None:
+        """stdio：第一次工具呼叫時向客戶端要一次 roots，取第一個存在的 `file://`
+        目錄快取；客戶端沒宣告 roots、失敗、逾時或沒有 root 都靜默退回。"""
+        if self.http or ctx is None or self._roots_probed:
+            return
+        async with self._roots_lock:
+            if self._roots_probed:
+                return
+            try:
+                session = ctx.session
+                caps = session.client_capabilities
+                if caps is not None and caps.roots is not None:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")  # roots 在新版協定標為棄用
+                        pending = session.list_roots()
+                    with anyio.fail_after(ROOTS_TIMEOUT):
+                        result = await pending
+                    for root in result.roots:
+                        path = root_from_uri(str(root.uri))
+                        if path is not None and path.is_dir():
+                            self._client_root = path
+                            break
+            except Exception as exc:  # 任何失敗都退回環境變數／行程 cwd
+                logger.info(
+                    "向客戶端取 roots 失敗，退回環境／行程 cwd：%s", _describe(exc)
+                )
+            self._roots_probed = True
+
+    @asynccontextmanager
+    async def request_scope(self, ctx: Context | None) -> AsyncIterator[None]:
+        """一次工具呼叫的範圍：stdio 首次呼叫時取客戶端 root；HTTP 模式記下
+        MCP session 與要轉發的認證 header。"""
         if not self.http:
+            await self._probe_client_root(ctx)
             yield
             return
         headers = _ctx_headers(ctx)
@@ -755,7 +838,7 @@ class Shell:
                 hint=_HINTS["cwd_not_supported"],
             )
         else:
-            path = cwd or self._cwd()
+            path = cwd or self.project_dir()
             try:
                 binding = resolve_binding(path)
             except NotADirectoryError as exc:
@@ -986,8 +1069,11 @@ class Shell:
             raise self._write_unreachable(exc) from None
 
     def upload_roots(self) -> tuple[Path, ...]:
-        """可上傳的目錄：殼的工作目錄一律在內，另加設定的 `mcp.upload_roots`。"""
-        return (Path(self._cwd()), *self.settings.upload_roots)
+        """可上傳的目錄：殼的工作目錄在內（系統目錄、磁碟根除外），另加設定的
+        `mcp.upload_roots`。"""
+        cwd = self._cwd()
+        base = () if is_system_dir(cwd) else (Path(cwd),)
+        return (*base, *self.settings.upload_roots)
 
     async def upload(
         self,
@@ -1052,7 +1138,7 @@ class Shell:
                     hint=_HINTS["vault_required"],
                 )
             try:
-                binding = resolve_binding(self._cwd())
+                binding = resolve_binding(self.project_dir())
             except NotADirectoryError as exc:
                 raise _tool_error("invalid_cwd", str(exc)) from None
             vault, vault_source = binding.key, "cwd_binding"
@@ -1211,6 +1297,8 @@ class Shell:
         return meta
 
     def _download_target(self, path: str | None, filename: str) -> Path:
+        if path is None:
+            self.project_dir()  # 省略 path 會寫到殼工作目錄：不是專案就不寫
         try:
             return resolve_download_path(
                 path, self.upload_roots(), cwd=self._cwd(), filename=filename
@@ -1242,6 +1330,7 @@ class Shell:
             "snapshot_dir": (
                 str(self.settings.snapshot_dir) if self.settings.snapshot_dir else None
             ),
+            "cwd": self.cwd_info(),
             "last_pull_error": self.last_pull_error,
             "concept_snapshot_path": (
                 str(self.settings.concept_snapshot_path)
@@ -1330,15 +1419,17 @@ def build_server(shell: Shell) -> MCPServer:
         ] = None,
         ctx: Context | None = None,
     ) -> str:
-        with shell.request_scope(ctx):
+        async with shell.request_scope(ctx):
             return _dump(shell.space_tool(action, value))
 
     async def vault_resolve(
         cwd: Annotated[
             str | None,
             Field(
-                description="專案目錄（只用於 dev、只限本地 stdio 殼）；省略時用殼"
-                "啟動時的工作目錄（通常是專案根）。HTTP 端點不接受，改傳 remote_url"
+                description="專案目錄（只用於 dev、只限本地 stdio 殼）；省略時依序用"
+                "客戶端宣告的 root、環境變數 LORE_VAULT_CWD、殼的行程工作目錄；結果是"
+                "系統目錄或磁碟根時回 cwd_required，改傳這個參數。HTTP 端點不接受，"
+                "改傳 remote_url"
             ),
         ] = None,
         create: Annotated[
@@ -1373,7 +1464,7 @@ def build_server(shell: Shell) -> MCPServer:
         ] = None,
         ctx: Context | None = None,
     ) -> str:
-        with shell.request_scope(ctx):
+        async with shell.request_scope(ctx):
             return _dump(
                 await shell.vault_resolve(cwd, create, display, space, key, remote_url)
             )
@@ -1397,7 +1488,7 @@ def build_server(shell: Shell) -> MCPServer:
         ] = None,
         ctx: Context | None = None,
     ) -> str:
-        with shell.request_scope(ctx):
+        async with shell.request_scope(ctx):
             return _dump(await shell.recall(query, vault, kinds, limit, budget))
 
     async def ask(
@@ -1416,7 +1507,7 @@ def build_server(shell: Shell) -> MCPServer:
         ] = None,
         ctx: Context | None = None,
     ) -> str:
-        with shell.request_scope(ctx):
+        async with shell.request_scope(ctx):
             return _dump(await shell.ask(question, vault, kinds, k))
 
     async def get(
@@ -1434,7 +1525,7 @@ def build_server(shell: Shell) -> MCPServer:
         ] = None,
         ctx: Context | None = None,
     ) -> str:
-        with shell.request_scope(ctx):
+        async with shell.request_scope(ctx):
             return _dump(await shell.get(vault, ids, budget))
 
     async def list_(
@@ -1457,7 +1548,7 @@ def build_server(shell: Shell) -> MCPServer:
         ] = None,
         ctx: Context | None = None,
     ) -> str:
-        with shell.request_scope(ctx):
+        async with shell.request_scope(ctx):
             return _dump(await shell.list_(vault, since, topics, cursor, limit, kinds))
 
     async def write(
@@ -1477,7 +1568,7 @@ def build_server(shell: Shell) -> MCPServer:
         ] = None,
         ctx: Context | None = None,
     ) -> str:
-        with shell.request_scope(ctx):
+        async with shell.request_scope(ctx):
             return _dump(
                 await shell.write(
                     vault, title, body, topics, links, supersedes, author=author
@@ -1508,7 +1599,7 @@ def build_server(shell: Shell) -> MCPServer:
         ] = None,
         ctx: Context | None = None,
     ) -> str:
-        with shell.request_scope(ctx):
+        async with shell.request_scope(ctx):
             return _dump(
                 await shell.update(
                     vault,
@@ -1552,7 +1643,7 @@ def build_server(shell: Shell) -> MCPServer:
         ] = None,
         ctx: Context | None = None,
     ) -> str:
-        with shell.request_scope(ctx):
+        async with shell.request_scope(ctx):
             return _dump(await shell.upload(path, vault, filename, content_base64))
 
     async def download(
@@ -1575,7 +1666,7 @@ def build_server(shell: Shell) -> MCPServer:
         ] = False,
         ctx: Context | None = None,
     ) -> str:
-        with shell.request_scope(ctx):
+        async with shell.request_scope(ctx):
             return _dump(await shell.download(vault, id, path, overwrite))
 
     async def delete(
@@ -1596,7 +1687,7 @@ def build_server(shell: Shell) -> MCPServer:
         ] = None,
         ctx: Context | None = None,
     ) -> str:
-        with shell.request_scope(ctx):
+        async with shell.request_scope(ctx):
             return _dump(await shell.delete(vault, id, reason, confirm_token))
 
     async def undelete(
@@ -1606,7 +1697,7 @@ def build_server(shell: Shell) -> MCPServer:
         ],
         ctx: Context | None = None,
     ) -> str:
-        with shell.request_scope(ctx):
+        async with shell.request_scope(ctx):
             return _dump(await shell.undelete(id))
 
     async def status(
@@ -1615,7 +1706,7 @@ def build_server(shell: Shell) -> MCPServer:
         ] = None,
         ctx: Context | None = None,
     ) -> str:
-        with shell.request_scope(ctx):
+        async with shell.request_scope(ctx):
             return _dump(await shell.status(vault))
 
     descriptions = {
@@ -1627,7 +1718,9 @@ def build_server(shell: Shell) -> MCPServer:
         ),
         "vault_resolve": (
             "取得 vault key。dev：由專案的 git remote 算出（自動解析改名別名）——"
-            "本地 stdio 殼可用 cwd（省略時用殼的工作目錄）；HTTP 端點看不到你的檔案"
+            "本地 stdio 殼可用 cwd（省略時依序用客戶端的 root、LORE_VAULT_CWD、殼的行程"
+            "工作目錄；結果不是專案目錄會回 cwd_required，改傳 cwd）；"
+            "HTTP 端點看不到你的檔案"
             "系統，改傳 remote_url（`git remote get-url origin` 的輸出），沒有 remote "
             "時直接給 key。lore／personal：沒有 repo，必須帶 key（'<space>/名稱'），"
             "cwd／remote_url 會被忽略。每個 session 開始時先呼叫一次，之後所有工具都帶"

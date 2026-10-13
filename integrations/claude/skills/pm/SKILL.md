@@ -14,7 +14,7 @@ argument-hint: "[init|explore|query|note|sync|status] [args...]"
 
 每個 session 先呼叫一次 `vault_resolve()`，之後所有讀寫都帶回傳的 `key`；切換 repo 才重新解析。
 
-- dev space（預設）：省略 `cwd` 時用殼啟動時的工作目錄；不在專案根時傳 `cwd=<專案目錄>`。key 由 git remote 正規化算出（例如 `github.com/<owner>/<repo>`），改名前的舊 key 由服務端別名接起來。
+- dev space（預設）：省略 `cwd` 時殼依序取客戶端宣告的 root、環境變數 `LORE_VAULT_CWD`、殼行程的工作目錄；結果是系統目錄（如 `C:\Windows\system32`）或磁碟根時回 `cwd_required`，此時傳 `cwd=<專案目錄>`。不在專案根時也傳 `cwd=<專案目錄>`。key 由 git remote 正規化算出（例如 `github.com/<owner>/<repo>`），改名前的舊 key 由服務端別名接起來。
 - 無 git remote 的專案 key 為 `folder/<資料夾名>`，不是跨機器穩定識別；之後新增 remote 時 key 會改變，要請服務管理者在 UI 補別名，不另建新 vault。
 - 回 `unknown_vault` 表示此專案沒有記憶。`query`／`status` 就回報無記憶，不為查詢建 vault；`init` 或確實要保存時才用 `vault_resolve(create=true, display=...)`。
 - **HTTP 連線**（`claude mcp get lore-vault` 顯示 type 為 http，服務端看不到本機檔案系統）：不能用 `cwd` 推算。先跑 `git remote get-url origin`，以 `vault_resolve(remote_url=<輸出>)` 解析；沒有 remote 的專案直接傳 `key="folder/<資料夾名>"`。`vault_resolve()` 回錯誤要求 `remote_url`／`key` 時也照此處理。
