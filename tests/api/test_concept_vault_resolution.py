@@ -110,6 +110,49 @@ def test_source_turns_ambiguous_rejects_without_falling_back(client):
     assert _exported_ids(client) == []
 
 
+def _ambiguous_push(client, scope: str):
+    """p-1 在 Y、p-2 在 Z：source_turns 指向 [Y, Z] 兩個候選。"""
+    _vaults(client, X, Y, Z)
+    _episode(client, "p-1", Y)
+    _episode(client, "p-2", Z)
+    concept = spike_concept(
+        "c-1", scope=scope, source_turns=[["p-1", 0], ["p-2", 0]]
+    )
+    return _push(client, concept)
+
+
+def test_ambiguous_source_turns_decided_by_scope_within_candidates(client):
+    """A 指向 Y、Z，scope=repo-z 只命中候選之一 → 採用 Z（scope_match）。"""
+    result = _only(_ambiguous_push(client, "Repo-Z"))
+    assert (result["vault"], result["resolved_by"]) == (Z, "scope_match")
+
+
+def test_ambiguous_source_turns_scope_outside_candidates_stays_ambiguous(client):
+    """scope 命中候選外的 vault（repo-x）→ 不採用，仍歧義。"""
+    (result,) = _rejected(_ambiguous_push(client, "Repo-X"))
+    assert result["code"] == spike_api.CODE_VAULT_AMBIGUOUS
+    assert result["candidates"] == [Y, Z]
+    assert _exported_ids(client) == []
+
+
+def test_ambiguous_source_turns_scope_matches_nothing_stays_ambiguous(client):
+    (result,) = _rejected(_ambiguous_push(client, "Nowhere"))
+    assert result["code"] == spike_api.CODE_VAULT_AMBIGUOUS
+    assert result["candidates"] == [Y, Z]
+
+
+def test_ambiguous_source_turns_scope_matches_both_candidates_stays_ambiguous(client):
+    """兩個候選的 key 最後一段相同，scope 同時命中 → 仍歧義。"""
+    a, b = "github.com/org-a/same", "github.com/org-b/same"
+    _vaults(client, a, b)
+    _episode(client, "p-1", a)
+    _episode(client, "p-2", b)
+    concept = spike_concept("c-1", scope="same", source_turns=[["p-1", 0], ["p-2", 0]])
+    (result,) = _rejected(_push(client, concept))
+    assert result["code"] == spike_api.CODE_VAULT_AMBIGUOUS
+    assert result["candidates"] == [a, b]
+
+
 def test_no_episode_falls_back_to_scope(client):
     _vaults(client)
     result = _only(_push(client, spike_concept("c-1", source_turns=[["p-9", 0]])))
@@ -242,3 +285,12 @@ def test_removing_scope_stage_changes_outcome(client, monkeypatch):
     _vaults(client)
     (result,) = _rejected(_push(client, spike_concept("c-1")))
     assert result["code"] == spike_api.CODE_VAULT_UNRESOLVED
+
+
+def test_removing_scope_tiebreak_makes_ambiguous_scope_case_red(client, monkeypatch):
+    """拿掉候選內 scope 決勝：唯一命中的情境會變成歧義拒收。"""
+    monkeypatch.setattr(
+        spike_api._VaultResolver, "_scope_hits", lambda *_a, **_k: []
+    )
+    (result,) = _rejected(_ambiguous_push(client, "Repo-Z"))
+    assert result["code"] == spike_api.CODE_VAULT_AMBIGUOUS

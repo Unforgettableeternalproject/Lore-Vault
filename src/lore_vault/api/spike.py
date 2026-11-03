@@ -465,25 +465,32 @@ class _VaultResolver:
         self._turn_vaults = turn_vaults
         self._names: list[tuple[str, set[str]]] | None = None
 
-    def by_source_turns(self, concept: Concept) -> str | None:
-        """(A) 來源輪次所屬的 episode vault；查不到回 None，指向多個 vault 為歧義。"""
+    def by_source_turns(self, concept: Concept) -> tuple[str, str] | None:
+        """(A) 來源輪次所屬的 episode vault，回傳 (vault key, resolved_by)；查不到回 None。
+
+        指向多個 vault 時以 scope 在這些候選內決勝（2026-11-03 補充裁決）：
+        唯一命中採用（resolved_by=scope_match），零或多個命中仍為歧義。
+        """
         vaults: set[str] = set()
         for turn in concept.source_turns:
             vaults |= self._turn_vaults.get((turn.prompt_id, turn.turn_index), set())
         if len(vaults) > 1:
+            hits = self._scope_hits(concept, only=vaults)
+            if len(hits) == 1:
+                return hits[0], RESOLVED_SCOPE_MATCH
             raise _Reject(
                 "invalid",
-                f"concept {concept.id!r} 的 source_turns 指向多個 vault；"
-                "請每筆明確帶 vault",
+                f"concept {concept.id!r} 的 source_turns 指向多個 vault，"
+                "scope 也無法在其中唯一決定；請每筆明確帶 vault",
                 code=CODE_VAULT_AMBIGUOUS,
                 candidates=sorted(vaults),
             )
-        return next(iter(vaults), None)
+        found = next(iter(vaults), None)
+        return (found, RESOLVED_SOURCE_TURNS) if found is not None else None
 
-    def by_scope(self, concept: Concept) -> str | None:
-        """(B) scope 比對 vault 的 display／別名／key 的 repo 段；唯一命中才採用。
+    def _scope_hits(self, concept: Concept, only: set[str] | None = None) -> list[str]:
+        """scope 命中的 vault key（排序）；`only` 給定時只在該範圍內比對。
 
-        scope 寫成 `org/repo` 時只會命中 key／別名的最後兩段，用來區分同名 repo。
         vault 清單整批只讀一次（批次中途只會新建 global，不參與比對）。
         """
         if self._names is None:
@@ -494,7 +501,18 @@ class _VaultResolver:
                 if v.kind not in ("global", KIND_MISC)
             ]
         wanted = str(concept.scope).strip().lower()
-        hits = sorted(key for key, names in self._names if wanted in names)
+        return sorted(
+            key
+            for key, names in self._names
+            if wanted in names and (only is None or key in only)
+        )
+
+    def by_scope(self, concept: Concept) -> str | None:
+        """(B) scope 比對 vault 的 display／別名／key 的 repo 段；唯一命中才採用。
+
+        scope 寫成 `org/repo` 時只會命中 key／別名的最後兩段，用來區分同名 repo。
+        """
+        hits = self._scope_hits(concept)
         if len(hits) > 1:
             raise _Reject(
                 "invalid",
@@ -537,7 +555,7 @@ def _concept_target(
     - 既有 id：沿用原歸屬（歸屬凍結，不因 scope 改變而搬家）；有帶 vault 必須一致
     - 新 id、scope=None：`global`（不存在時自動建 kind=global）；帶別的 vault 為 invalid
     - 新 id、scope 為 repo 名：每筆 vault 或批次單一 vault（explicit）；
-      都沒有時依 A17：(A) source_turns 的 episode vault → (B) scope 比對 vault 名稱
+      都沒有時依 A17：(A) source_turns 的 episode vault（多個時以 scope 在候選內決勝）→ (B) scope 比對 vault 名稱
       → 都失敗或歧義即拒收（不猜、不自動建 vault）
     """
     requested = None
@@ -560,9 +578,9 @@ def _concept_target(
         return _ensure_global(conn, created), RESOLVED_GLOBAL
     if requested is not None:
         return requested, RESOLVED_EXPLICIT
-    found = resolver.by_source_turns(concept)
-    if found is not None:
-        return found, RESOLVED_SOURCE_TURNS
+    decided = resolver.by_source_turns(concept)
+    if decided is not None:
+        return decided
     found = resolver.by_scope(concept)
     if found is not None:
         return found, RESOLVED_SCOPE_MATCH
