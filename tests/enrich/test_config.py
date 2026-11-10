@@ -213,6 +213,15 @@ def test_query_timeout_must_be_positive():
         load_config(environ={"LORE_VAULT_EMBEDDING_QUERY_TIMEOUT": "0"})
 
 
+def test_embedding_num_ctx_default_env_and_invalid():
+    assert load_config(environ={}).embedding.num_ctx == 8192
+    cfg = load_config(environ={"LORE_VAULT_EMBEDDING_NUM_CTX": "4096"})
+    assert cfg.embedding.num_ctx == 4096
+    for bad in ("0", "-1"):
+        with pytest.raises(ConfigError, match="num_ctx"):
+            load_config(environ={"LORE_VAULT_EMBEDDING_NUM_CTX": bad})
+
+
 def test_api_token_only_from_env():
     from lore_vault.config import api_token
 

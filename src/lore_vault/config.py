@@ -95,6 +95,10 @@ class EmbeddingConfig:
     # 純整數視為秒數，負值＝常駐）。空字串＝不送，交給 Ollama 預設（5m）。
     # 冷啟動載入約 2 秒，逼近 query_timeout，所以預設拉長避免閒置後被卸載。
     keep_alive: str = "30m"
+    # 每個 `/api/embed` 請求帶 `options.num_ctx` 與 `options.num_batch`（同值）。
+    # Ollama 預設 num_batch=2048，embedding 要整段放進一個 batch；輸入介於 2049 與
+    # num_ctx 之間既不截斷又放不進 batch，會回 413。與 bge-m3 的 context_length 對齊。
+    num_ctx: int = 8192
 
 
 @dataclass(frozen=True)
@@ -447,6 +451,7 @@ def _validate(config: Config) -> None:
         "embedding.timeout": config.embedding.timeout,
         "embedding.query_timeout": config.embedding.query_timeout,
         "embedding.cold_query_timeout": config.embedding.cold_query_timeout,
+        "embedding.num_ctx": config.embedding.num_ctx,
         "summary.max_completion_tokens": config.summary.max_completion_tokens,
         "summary.timeout": config.summary.timeout,
         "ask.max_completion_tokens": config.ask.max_completion_tokens,

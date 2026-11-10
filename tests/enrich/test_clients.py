@@ -118,7 +118,19 @@ def test_embed_success_and_payload(http):
     assert embedder.embed("文字") == [0.1, 0.2, 0.3, 0.4]
     req = fake.requests[0]
     assert req["url"] == "http://localhost:11434/api/embed"
-    assert req["body"] == {"model": "bge-m3", "input": "文字", "keep_alive": "30m"}
+    assert req["body"] == {
+        "model": "bge-m3",
+        "input": "文字",
+        "keep_alive": "30m",
+        "options": {"num_ctx": 8192, "num_batch": 8192},
+    }
+
+
+def test_embed_options_follow_num_ctx(http):
+    """num_batch 必須與 num_ctx 同值，否則長輸入會 413。"""
+    fake = http.Transport(http.embed([0.1, 0.2, 0.3, 0.4]))
+    OllamaEmbedder(EmbeddingConfig(dim=4, num_ctx=4096), transport=fake).embed("x")
+    assert fake.requests[0]["body"]["options"] == {"num_ctx": 4096, "num_batch": 4096}
 
 
 @pytest.mark.parametrize(

@@ -25,6 +25,9 @@ rate_per_minute = 0
 # Ollama keep_alive：請求後模型留在記憶體多久（Go duration；純整數為秒數、負值＝常駐；
 # 空字串＝不送，用 Ollama 預設 5m）。冷啟動載入約 2 秒，逼近 query_timeout
 keep_alive = "30m"
+# 每個 embed 請求的 options.num_ctx 與 num_batch（同值）。Ollama 預設 num_batch=2048，
+# 2049~8192 token 的輸入會回 413；與模型 context_length 對齊（bge-m3 為 8192）
+num_ctx = 8192
 
 [summary]
 provider = "openai"

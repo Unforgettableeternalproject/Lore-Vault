@@ -171,13 +171,20 @@ class OllamaEmbedder:
         self.dim = config.dim
         self.timeout = config.timeout
         self.keep_alive = _keep_alive_value(config.keep_alive)
+        self.num_ctx = config.num_ctx
         self._transport = transport
 
     def __repr__(self) -> str:
         return f"OllamaEmbedder(base_url={self.base_url!r}, model={self.model!r})"
 
     def embed(self, text: str) -> list[float]:
-        body: dict[str, Any] = {"model": self.model, "input": text}
+        # num_batch 必須與 num_ctx 一致，否則 2049~num_ctx token 的輸入會 413；
+        # 所有請求（含暖機）options 相同，Ollama 才不會因參數不同而重載模型
+        body: dict[str, Any] = {
+            "model": self.model,
+            "input": text,
+            "options": {"num_ctx": self.num_ctx, "num_batch": self.num_ctx},
+        }
         if self.keep_alive is not None:
             body["keep_alive"] = self.keep_alive
         payload = json.dumps(body).encode()

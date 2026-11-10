@@ -49,6 +49,8 @@ def test_warmup_runs_in_background_with_full_timeout_and_keep_alive(make_client)
     # 暖機用完整 embedding.timeout，不是 query_timeout
     assert req["timeout"] == 30.0
     assert req["body"]["keep_alive"] == "30m"
+    # 暖機與正式請求的 options 一致，Ollama 才不會重載模型
+    assert req["body"]["options"] == {"num_ctx": 8192, "num_batch": 8192}
 
 
 def test_warmup_failure_is_logged_not_fatal(make_client):
