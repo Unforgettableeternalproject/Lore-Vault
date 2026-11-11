@@ -22,6 +22,7 @@ import { Memory } from '../screens/Memory';
 import { NoteDetail } from '../screens/NoteDetail';
 import { NoteNew } from '../screens/NoteNew';
 import { Notes } from '../screens/Notes';
+import { Review } from '../screens/Review';
 import { Search, SEARCH_INPUT_ID } from '../screens/Search';
 import { Settings } from '../screens/Settings';
 import { Tasks } from '../screens/Tasks';
@@ -515,6 +516,8 @@ function ScreenView({
       if (params[0] === 'new') return <NoteNew key={spaceKey} supersedes={query.get('supersedes')} />;
       if (params[0]) return <NoteDetail key={`${spaceKey}:${params[0]}`} id={params[0]} />;
       return <Notes key={spaceKey} />;
+    case 'review':
+      return <Review key={spaceKey} />;
     case 'docs':
       if (params[0]) {
         const chunk = query.get('chunk');

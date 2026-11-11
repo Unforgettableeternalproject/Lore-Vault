@@ -33,6 +33,7 @@
 | `COMPOSE_PROFILES` | （無） | 範本示範 `ollama`；要 tunnel 就 `ollama,tunnel` |
 | `LORE_VAULT_BIND`／`LORE_VAULT_PORT` | `127.0.0.1`／`5056` | 主機發布位址 |
 | `LORE_VAULT_API_TOKEN` | 自動產生 | bearer token；未設時首次啟動產生，存 `/data/secrets/api-token` |
+| `LORE_VAULT_UEP_TOKEN` | （無，不啟用） | U.E.P 專屬 bearer token，對應固定 principal `uep`；至少 16 字元，不可與 `LORE_VAULT_API_TOKEN` 相同。見下方「U.E.P 寫入審核」 |
 | `LORE_VAULT_PRINCIPAL` | `owner` | 單一使用者的名稱，寫入紀錄的擁有者；啟用後不要再改 |
 | `LORE_VAULT_ADMIN_USER`／`LORE_VAULT_ADMIN_PASSWORD` | 同 principal／自動產生 | UI 管理員；只在還沒有任何 UI 帳號時建立 |
 | `OPENAI_API_KEY` | （無） | `ask` 與摘要；未設時這兩項不可用 |
@@ -69,6 +70,22 @@ docker compose exec lore-vault cat /data/secrets/initial-admin-password
 ```
 
 - `.env` 有設 `LORE_VAULT_API_TOKEN` 時以它為準，不產生檔案
+
+## U.E.P 寫入審核
+
+`.env` 設 `LORE_VAULT_UEP_TOKEN` 後，持這組 token 的請求會被服務端視為 principal `uep`（固定名稱，
+不能自報；`LORE_VAULT_PRINCIPAL` 與 UI 管理員名稱不可取 `uep`）。沒設定時系統行為與未支援前完全相同。
+
+- 只能用 `dev`／`lore` space；`personal` 與其他 space 一律 403 `uep_space_forbidden`
+- 只能呼叫 `/v1/vault_resolve`、`recall`、`ask`、`get`、`list`、`write`、`update`、`note_delete`、
+  `status`、`document_download` 與 `/mcp`；其餘（undelete、上傳、建 vault、管理端點等）403 `uep_endpoint_forbidden`
+- `dev`：寫入、修改、刪除照常直接生效
+- `lore`：`write` 與 `update` 後 `review_state=pending`（只能改自己寫的 note，改完一律回 pending）；
+  `note_delete` 第二步只記刪除請求（`review_state=pending_delete`，note 照常可見）
+- 審核只能在 UI（`POST /v1/review/approve`／`reject`，bearer 一律 403）；使用者在 UI 編輯 pending 的 note 視同核准
+- `list` 可用 `review_state` 篩選；recall／get／list 對 pending／pending_delete 的項目附 `review: "unverified"`，
+  rejected 不進 recall／ask，只有 get 看得到
+- 啟動時兩組 token 相同、或 token 太短／含空白會拒絕啟動
 - 之後才在 `.env` 設 token，會取代先前產生的 token：已連線的客戶端要用新 token 重新登記
 - 管理員登入 UI 後請改密碼；`initial-admin-password` 之後不再有效用，可自行刪除
 
@@ -147,7 +164,9 @@ git pull
 docker compose up -d --build
 ```
 
-schema 遷移在啟動時自動執行。ollama／cloudflared 映像要更新時另跑 `docker compose pull`。
+schema 遷移在啟動時自動執行。升級到 schema v19（U.E.P 寫入審核）時，各機器的 stdio 殼要一起升級：
+降級快照的 schema 版本必須等於程式預期，舊殼拉到 v19 快照會被拒絕，且舊殼看不到審核欄位。
+ollama／cloudflared 映像要更新時另跑 `docker compose pull`。
 
 ## 疑難排解
 

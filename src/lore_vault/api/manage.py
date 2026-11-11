@@ -45,6 +45,7 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from lore_vault.notes import InvalidCursor
+from lore_vault.notes import review as review_service
 from lore_vault.schema import canonical_key
 from lore_vault.storage import admin
 from lore_vault.storage import manage as store
@@ -59,6 +60,7 @@ from .errors import (
     ConfirmTokenInvalid,
     DocumentsNotConfigured,
 )
+from .principals import principal_of
 from .state import AppState
 
 router = APIRouter(prefix="/v1")
@@ -155,6 +157,8 @@ def _two_phase(
 ) -> dict[str, Any]:
     """`plan(conn) -> (回給客戶端的規劃, 指紋)`；`execute(conn) -> 額外回應欄位`。"""
     signer = _signer(request)
+    # token 同時綁定簽發者的 principal：別的憑證不能拿去執行
+    args = {**args, "principal": principal_of(request)}
     with _state(request).connection() as conn:
         if token is None:
             shown, fingerprint = plan(conn)
@@ -375,6 +379,13 @@ def vault_move_space(request: Request, req: MoveSpaceRequest) -> dict[str, Any]:
 # ── 刪除（T-73）──
 
 
+def store_note(conn: sqlite3.Connection, req: Any) -> Any:
+    """範圍內取 note（vault／space 檢查同其他讀寫）。"""
+    from lore_vault.storage.notes import get_note
+
+    return get_note(conn, req.vault, req.id, space=req.space)
+
+
 def _reason(value: str | None, default: str) -> str:
     return default if value is None else value
 
@@ -406,6 +417,12 @@ def vault_delete(request: Request, req: VaultDeleteRequest) -> dict[str, Any]:
 
 @router.post("/note_delete")
 def note_delete(request: Request, req: ItemDeleteRequest) -> dict[str, Any]:
+    """兩步式刪除 note。uep 在 lore：第二步不真刪，改記刪除請求
+    （`review_state: pending_delete`，note 照常可見），等使用者在 UI 核准才真刪；
+    uep 在 dev 與其他身分照常真刪（回 `review_state: none`）。"""
+    principal = principal_of(request)
+    review_service.check_uep_space(principal, req.space)
+    request_only = review_service.is_review_space(principal, req.space or "")
     reason = _reason(req.reason, admin.DEFAULT_NOTE_REASON)
 
     def plan(conn: sqlite3.Connection) -> tuple[dict[str, Any], Any]:
@@ -416,12 +433,24 @@ def note_delete(request: Request, req: ItemDeleteRequest) -> dict[str, Any]:
             space=req.space,  # type: ignore[arg-type]  # None → SpaceRequired
         )
         shown = result.to_dict()
-        updated = conn.execute(
-            "SELECT updated FROM notes WHERE id = ?", (req.id,)
-        ).fetchone()[0]
-        return shown, {"plan": shown, "updated": updated}
+        row = conn.execute(
+            "SELECT updated, review_state FROM notes WHERE id = ?", (req.id,)
+        ).fetchone()
+        if request_only:
+            current = store_note(conn, req)
+            review_service.assert_can_request_delete(current)
+            shown["review_request"] = True
+        return shown, {"plan": shown, "updated": row[0], "review": row[1]}
 
     def execute(conn: sqlite3.Connection) -> dict[str, Any]:
+        if request_only:
+            note = review_service.request_delete(
+                conn,
+                req.vault,  # type: ignore[arg-type]
+                req.id,
+                space=req.space,  # type: ignore[arg-type]
+            )
+            return {"review_state": note.review_state}
         admin.delete_note(
             conn,
             req.vault,  # type: ignore[arg-type]
@@ -429,7 +458,7 @@ def note_delete(request: Request, req: ItemDeleteRequest) -> dict[str, Any]:
             space=req.space,  # type: ignore[arg-type]
             reason=reason,
         )
-        return {}
+        return {"review_state": "none"}
 
     return _two_phase(
         request, "note_delete", _args(req), req.confirm_token, plan, execute

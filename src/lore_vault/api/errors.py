@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 from lore_vault.ask import AskError, AskRateLimited
 from lore_vault.documents.service import UploadRejected
 from lore_vault.notes import InvalidCursor, NoChanges, VersionConflict
+from lore_vault.notes.review import ReviewStateConflict, UepForbidden
 from lore_vault.recall import UnsupportedKind
 from lore_vault.schema import InvalidCharacters
 from lore_vault.storage.admin import (
@@ -294,6 +295,18 @@ def install_error_handlers(app: FastAPI) -> None:
     simple(EpisodeIngestDisabled, 403, "episode_ingest_disabled")
     simple(TasksRemoteSyncDisabled, 403, "tasks_remote_sync_disabled")
     simple(UiSessionRequired, 403, "ui_session_required")
+
+    async def uep_forbidden(request: Request, exc: Exception) -> JSONResponse:
+        assert isinstance(exc, UepForbidden)
+        return _json(403, exc.code, exc)
+
+    async def review_conflict(request: Request, exc: Exception) -> JSONResponse:
+        assert isinstance(exc, ReviewStateConflict)
+        extra = {} if exc.updated is None else {"updated": exc.updated}
+        return _json(409, "review_state_conflict", exc, current=exc.current, **extra)
+
+    app.add_exception_handler(UepForbidden, uep_forbidden)
+    app.add_exception_handler(ReviewStateConflict, review_conflict)
     simple(AuthorizationWriteForbidden, 403, "authorization_write_forbidden")
 
     async def task_authorization_rejected(

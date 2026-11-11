@@ -60,6 +60,7 @@ from lore_vault.ask import service as ask_service
 from lore_vault.doctor import DoctorContext, default_registry
 from lore_vault.doctor.builtin import DEFAULT_BACKLOG_MAX_AGE
 from lore_vault.documents import service as document_service
+from lore_vault.notes.review import check_uep_space
 from lore_vault.notes.service import (
     DEFAULT_GET_BUDGET,
     DEFAULT_LIST_BUDGET,
@@ -70,7 +71,7 @@ from lore_vault.recall import recall as recall_service
 from lore_vault.recall.service import DEFAULT_BUDGET as RECALL_DEFAULT_BUDGET
 from lore_vault.recall.service import DEFAULT_LIMIT as RECALL_DEFAULT_LIMIT
 from lore_vault.recall.service import MODE_HYBRID
-from lore_vault.schema import Vault, canonical_key
+from lore_vault.schema import UEP_PRINCIPAL, Vault, canonical_key
 from lore_vault.storage import document_index as storage_document_index
 from lore_vault.storage import documents as storage_documents
 from lore_vault.storage import enrichment as storage_enrichment
@@ -99,7 +100,7 @@ from .errors import (
     VaultExists,
     error_body,
 )
-from .principals import principal_of
+from .principals import AUTH_UI, auth_method_of, principal_of
 from .state import AppState
 from .tasks_admin import AUTHORIZATION_PREFIX as AUTHORIZATION_KEY_PREFIX
 from .tasks_admin import CHANGE_PREFIX as CHANGE_KEY_PREFIX
@@ -181,6 +182,9 @@ class ListRequest(_ScopedReq):
     title: str | None = None
     author: str | None = None
     author_state: str | None = None
+    # 審核狀態（none／pending／verified／rejected／pending_delete），一次一個值；
+    # 只屬 note，指定時不列文件
+    review_state: str | None = None
     statuses: list[str] | None = None
     extensions: list[str] | None = None
 
@@ -241,6 +245,7 @@ def _single_vault(conn: sqlite3.Connection, key: str | None, space: object) -> V
 def vault_resolve(request: Request, req: ResolveRequest) -> dict[str, Any]:
     """binding key（或別名）→ 該 space 內的現行 vault。服務端讀不到客戶端 cwd，
     key 由客戶端算；key 屬於別的 space 時與不存在相同（404 unknown_vault）。"""
+    check_uep_space(principal_of(request), req.space)
     with _state(request).connection() as conn:
         vault = _single_vault(conn, req.key, req.space)
         result = _vault_dict(conn, vault)
@@ -292,6 +297,7 @@ def create_vault(request: Request, req: CreateVaultRequest) -> dict[str, Any]:
 
 @router.post("/recall")
 def recall(request: Request, req: RecallRequest) -> dict[str, Any]:
+    check_uep_space(principal_of(request), req.space)
     state = _state(request)
     with state.connection() as conn:
         result = recall_service(
@@ -320,6 +326,7 @@ def ask(request: Request, req: AskRequest) -> dict[str, Any]:
     查詢 embedding 用 `state.ask_embedder`：一律 `embedding.cold_query_timeout`，
     不像 recall 在模型已載入時用 3 秒短逾時——ask 本來就要等模型數秒，
     embedding 偶發卡住不該讓整個回答降級成只走 lexical。"""
+    check_uep_space(principal_of(request), req.space)
     state = _state(request)
     runtime = state.runtime.current()
     if not runtime.ask.enabled:
@@ -341,6 +348,7 @@ def ask(request: Request, req: AskRequest) -> dict[str, Any]:
 
 @router.post("/get")
 def get(request: Request, req: GetRequest) -> dict[str, Any]:
+    check_uep_space(principal_of(request), req.space)
     with _state(request).connection() as conn:
         result = notes_service.get(
             conn,
@@ -355,6 +363,7 @@ def get(request: Request, req: GetRequest) -> dict[str, Any]:
 
 @router.post("/list")
 def list_(request: Request, req: ListRequest) -> dict[str, Any]:
+    check_uep_space(principal_of(request), req.space)
     with _state(request).connection() as conn:
         result = notes_service.list_(
             conn,
@@ -372,6 +381,7 @@ def list_(request: Request, req: ListRequest) -> dict[str, Any]:
             title=req.title,
             author=req.author,
             author_state=req.author_state,
+            review_state=req.review_state,
             statuses=req.statuses,
             extensions=req.extensions,
         )
@@ -382,6 +392,7 @@ def list_(request: Request, req: ListRequest) -> dict[str, Any]:
 def write(request: Request, req: WriteRequest, response: Response) -> dict[str, Any]:
     """新增 note（201）。`dry_run: true` 只查重與解析連結、不寫入（200）：
     與正式寫入同一個函式，驗證、vault／space 範圍、supersedes 檢查完全相同。"""
+    check_uep_space(principal_of(request), req.space)
     state = _state(request)
     with state.connection() as conn:
         result = notes_service.write(
@@ -408,6 +419,7 @@ def write(request: Request, req: WriteRequest, response: Response) -> dict[str, 
 
 @router.post("/update")
 def update(request: Request, req: UpdateRequest) -> dict[str, Any]:
+    check_uep_space(principal_of(request), req.space)
     state = _state(request)
     extra: dict[str, Any] = {}
     if "supersedes" in req.model_fields_set:
@@ -425,6 +437,10 @@ def update(request: Request, req: UpdateRequest) -> dict[str, Any]:
             body=req.body,
             topics=req.topics,
             links=req.links,
+            # UI session 編輯 pending 的 note 視同核准（審核契約）
+            reviewer=(
+                principal_of(request) if auth_method_of(request) == AUTH_UI else None
+            ),
             **extra,
         )
     if result.summary_stale or result.embedding_stale:
@@ -443,6 +459,7 @@ def status_(
     """
     state = _state(request)
     vault_key = req.vault if req is not None else None
+    check_uep_space(principal_of(request), req.space if req is not None else None)
     space = validate_space(req.space) if req is not None else None
     now = datetime.now(UTC)
     # 門檻類設定可由設定頁覆寫（D13）：一律讀執行期有效值
@@ -491,6 +508,15 @@ def status_(
         schema = {"version": current_version(conn), "expected": SCHEMA_VERSION}
     worker = state.worker_status()
     doc_worker = state.documents_worker_status()
+    if principal_of(request) == UEP_PRINCIPAL:
+        # uep 只拿健康摘要：不含 doctor 明細與跨 space 的統計
+        return {
+            "ok": report.ok
+            and not worker.get("fatal_error")
+            and not doc_worker.get("fatal_error"),
+            "checked_at": format_utc(now),
+            "schema": schema,
+        }
     return {
         # 同程序的 worker 起不來（fatal_error）也算不健康
         "ok": report.ok
@@ -646,6 +672,7 @@ def document_download(request: Request, req: DocumentDownloadRequest) -> Respons
     """取回文件原始檔（上傳時的位元組）。範圍同 get：vault／space 內找不到一律 404；
     讀 blob 時驗 sha256，遺失或損毀回 500（`blob_missing`／`blob_corrupt`），
     不回傳可能損毀的內容。墓碑中的文件不可下載（先 undelete）。"""
+    check_uep_space(principal_of(request), req.space)
     state = _state(request)
     if not state.settings.config.documents.blob_dir:
         raise DocumentsNotConfigured("服務未設定 documents.blob_dir，不能下載文件")

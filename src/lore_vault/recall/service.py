@@ -33,6 +33,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from lore_vault.notes.summary import LEAD_MAX_CHARS, clip, display_summary
+from lore_vault.schema import REVIEW_REJECTED, REVIEW_UNVERIFIED_STATES
 from lore_vault.storage import chunk_vectors, fts, vectors
 from lore_vault.storage.document_index import chunk_id, chunks_by_key, parse_chunk_id
 from lore_vault.storage.documents import get_documents
@@ -102,6 +103,8 @@ class RecallItem:
     locator: dict[str, Any] | None = None
     # 僅 kind="note"：寫入者自報名（A22；未具名為 None）
     author: str | None = None
+    # 僅 kind="note"：pending／pending_delete 時為 "unverified"（uep 審核契約）
+    review: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -116,6 +119,8 @@ class RecallItem:
         }
         if self.kind == KIND_NOTE:
             data["author"] = self.author
+            if self.review is not None:
+                data["review"] = self.review
         if self.kind == KIND_CHUNK:
             data["document_id"] = self.document_id
             data["chunk_id"] = self.chunk_id
@@ -313,6 +318,7 @@ def recall(
                 chunk_id(h.document_id, h.idx) for h in fts_hits
             ]
 
+    _drop_rejected(conn, rankings)
     fused = rrf_fuse(rankings, k=rrf_k)
     if scope.is_all:
         fused = _demote_misc(conn, space, fused)
@@ -335,6 +341,27 @@ def recall(
         kinds=active,
         missing_chunk_embeddings=missing_chunk_embeddings,
     )
+
+
+def _drop_rejected(conn: sqlite3.Connection, rankings: dict[str, list[str]]) -> None:
+    """被駁回（review_state=rejected）的 note 不進 recall／ask：在融合前從各路
+    排名移除，才不會佔掉 limit 名額。"""
+    ids = sorted(
+        {i for ranked in rankings.values() for i in ranked if parse_chunk_id(i) is None}
+    )
+    rejected: set[str] = set()
+    for start in range(0, len(ids), _ID_CHUNK):
+        part = ids[start : start + _ID_CHUNK]
+        rows = conn.execute(
+            f"SELECT id FROM notes WHERE review_state = ? "
+            f"AND id IN ({','.join('?' * len(part))})",
+            (REVIEW_REJECTED, *part),
+        )
+        rejected.update(r[0] for r in rows)
+    if not rejected:
+        return
+    for name, ranked in rankings.items():
+        rankings[name] = [i for i in ranked if i not in rejected]
 
 
 def _misc_ids(
@@ -427,6 +454,11 @@ def _materialize(
                     f.score,
                     note.updated,
                     author=note.author,
+                    review=(
+                        "unverified"
+                        if note.review_state in REVIEW_UNVERIFIED_STATES
+                        else None
+                    ),
                 )
             )
             continue

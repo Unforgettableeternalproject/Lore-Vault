@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from lore_vault.schema import canonical_key
+from lore_vault.schema import REVIEW_STATES, canonical_key
 from lore_vault.schema.chars import check_fields
 
 from . import documents as store
@@ -761,6 +761,63 @@ def note_attribution(conn: sqlite3.Connection) -> Reconciliation:
         f"{len(missing)} 則 note 缺 principal／updated_by_principal",
         counts,
         tuple(f"note {i} 缺 principal" for i in missing[:MAX_DETAILS]),
+    )
+
+
+def note_review(conn: sqlite3.Connection) -> Reconciliation:
+    """uep 審核欄位的一致性（add-uep-interface）。違反任一條為 fail：
+
+    1. `review_state` 在白名單內（欄位有 CHECK，這裡防範繞過或舊程式寫入）
+    2. pending／pending_delete 只能出現在 lore space 的 note
+    3. verified／rejected 必須有 `reviewed_by` 與 `reviewed_at`
+    4. pending_delete 必須有合法的 `review_prev_state`（不可是 pending_delete 本身）
+    5. 非 pending_delete 的 note 不可殘留 `review_prev_state`
+    """
+    allowed = ", ".join(f"'{s}'" for s in REVIEW_STATES)
+    prev_allowed = ", ".join(f"'{s}'" for s in REVIEW_STATES if s != "pending_delete")
+    rules = {
+        "invalid_state": f"review_state NOT IN ({allowed})",
+        "pending_outside_lore": (
+            "review_state IN ('pending', 'pending_delete') AND vault NOT IN "
+            "(SELECT key FROM vaults WHERE space = 'lore')"
+        ),
+        "reviewer_missing": (
+            "review_state IN ('verified', 'rejected') "
+            "AND (reviewed_by IS NULL OR reviewed_at IS NULL)"
+        ),
+        "prev_state_missing": (
+            "review_state = 'pending_delete' AND "
+            f"(review_prev_state IS NULL OR review_prev_state NOT IN ({prev_allowed}))"
+        ),
+        "prev_state_stray": (
+            "review_state != 'pending_delete' AND review_prev_state IS NOT NULL"
+        ),
+    }
+    counts: dict[str, int] = {}
+    details: list[str] = []
+    for name, where in rules.items():
+        ids = [
+            r[0]
+            for r in conn.execute(f"SELECT id FROM notes WHERE {where} ORDER BY id")
+        ]
+        counts[name] = len(ids)
+        details.extend(f"note {i} 違反 {name}" for i in ids)
+    total = int(
+        conn.execute(
+            "SELECT count(*) FROM notes WHERE review_state != 'none'"
+        ).fetchone()[0]
+    )
+    counts["in_review"] = total
+    bad = sum(v for k, v in counts.items() if k != "in_review")
+    if not bad:
+        return Reconciliation(
+            "pass", f"審核欄位一致（{total} 則 note 有審核狀態）", counts
+        )
+    return Reconciliation(
+        "fail",
+        f"{bad} 項審核欄位不一致",
+        counts,
+        tuple(details[:MAX_DETAILS]),
     )
 
 

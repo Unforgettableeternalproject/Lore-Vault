@@ -1338,3 +1338,14 @@ details.lv-check > .lv-check__head { cursor: pointer; }
 @media (max-width: 760px) {
   .lv-task { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* UEP 寫入審核：狀態徽章 */
+.lv-review-line { margin: 4px 0 10px; }
+.lv-review-badge {
+  display: inline-block; font-family: var(--font-mono); font-size: var(--lv-fs-meta); letter-spacing: .06em;
+  padding: 2px 8px; border: 1px solid var(--line-strong); border-radius: 3px; color: var(--ink-soft);
+}
+.lv-review-badge--pending { color: var(--lv-gold-text); border-color: rgba(213, 182, 24, .55); }
+.lv-review-badge--danger { color: var(--status-error); border-color: var(--status-error); }
+.lv-review-badge--ok { color: var(--status-success); border-color: var(--status-success); }
+.lv-review-badge--rejected { color: var(--ink-mute); border-style: dashed; }

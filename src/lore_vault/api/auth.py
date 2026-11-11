@@ -21,6 +21,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from lore_vault.config import Secret
+from lore_vault.schema import UEP_PRINCIPAL
 
 from .principals import AUTH_UI, Principals, set_principal
 from .ui_auth import UiAuth, has_ui_header, read_cookie
@@ -35,6 +36,32 @@ CSRF_BODY = {
     "error": {
         "code": "csrf_required",
         "message": "以 session cookie 認證的請求必須帶 X-Lore-Vault-UI: 1",
+    }
+}
+
+
+# uep 的 token 只能打這些端點（其餘一律 403 `uep_endpoint_forbidden`）：
+# 不含 undelete、文件上傳／刪除／復原、建 vault、墓碑、設定、任務層側載、快照與審核。
+# space 限制（只能 dev／lore）在各端點的處理函式內檢查
+UEP_ALLOWED_PATHS = frozenset(
+    {
+        "/mcp",
+        "/v1/vault_resolve",
+        "/v1/recall",
+        "/v1/ask",
+        "/v1/get",
+        "/v1/list",
+        "/v1/write",
+        "/v1/update",
+        "/v1/note_delete",
+        "/v1/status",
+        "/v1/document_download",
+    }
+)
+UEP_FORBIDDEN_BODY = {
+    "error": {
+        "code": "uep_endpoint_forbidden",
+        "message": "uep 憑證不可使用此端點",
     }
 }
 
@@ -101,6 +128,14 @@ class BearerAuthMiddleware:
                 self._principals.match(provided) if provided is not None else None
             )
             if principal is not None:
+                if (
+                    principal == UEP_PRINCIPAL
+                    and scope["type"] == "http"
+                    and scope["path"].rstrip("/") not in UEP_ALLOWED_PATHS
+                ):
+                    response = JSONResponse(UEP_FORBIDDEN_BODY, status_code=403)
+                    await response(scope, receive, send)
+                    return
                 set_principal(scope, principal)
                 await self.app(scope, receive, send)
                 return

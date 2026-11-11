@@ -846,6 +846,30 @@ def _v18(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+# 審核欄位（v19，add-uep-interface）：
+# - review_state：none／pending／verified／rejected／pending_delete，既有資料一律 none
+# - reviewed_by／reviewed_at／review_reason：最近一次審核動作的人、時間與原因
+# - review_prev_state：pending_delete 被駁回時要還原的狀態（其餘狀態為 NULL）
+# CHECK 只擋值域；跨欄位規則（pending 類只在 lore、verified 需有審核人等）由 doctor
+# `notes.review` 對帳
+_V19_STATEMENTS: tuple[str, ...] = (
+    "ALTER TABLE notes ADD COLUMN review_state TEXT NOT NULL DEFAULT 'none'"
+    " CHECK (review_state IN"
+    " ('none', 'pending', 'verified', 'rejected', 'pending_delete'))",
+    "ALTER TABLE notes ADD COLUMN reviewed_by TEXT",
+    "ALTER TABLE notes ADD COLUMN reviewed_at TEXT",
+    "ALTER TABLE notes ADD COLUMN review_reason TEXT",
+    "ALTER TABLE notes ADD COLUMN review_prev_state TEXT",
+    "CREATE INDEX notes_review_state ON notes(review_state)"
+    " WHERE review_state != 'none'",
+)
+
+
+def _v19(conn: sqlite3.Connection) -> None:
+    for statement in _V19_STATEMENTS:
+        conn.execute(statement)
+
+
 # 有序遷移：索引 i 的函式把版本從 i 升到 i+1。只能往後加，不可改動已發佈的項目。
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _v1,
@@ -866,6 +890,7 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _v16,
     _v17,
     _v18,
+    _v19,
 )
 
 SCHEMA_VERSION = len(MIGRATIONS)

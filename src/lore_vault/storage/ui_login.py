@@ -42,6 +42,8 @@ MAX_FAILURES = 3
 MIN_PASSWORD_LENGTH = 12
 # 密碼上限：擋掉拿超長輸入耗 CPU（scrypt 會先對密碼做 PBKDF2）
 MAX_PASSWORD_LENGTH = 1024
+# 保留給 U.E.P 專屬憑證的 principal（schema.UEP_PRINCIPAL），UI 帳號不可使用
+RESERVED_USERNAME = "uep"
 USERNAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 # 紀錄裡「嘗試的 username」是未認證輸入：去控制字元並截斷
 LOG_USERNAME_MAX = 64
@@ -126,6 +128,10 @@ def validate_username(username: str) -> str:
     if not USERNAME_PATTERN.fullmatch(username):
         raise AccountError(
             f"username 必須是 1～64 個英數字或 . _ -（開頭為英數字），得到 {username!r}"
+        )
+    if username.casefold() == RESERVED_USERNAME:
+        raise AccountError(
+            f"username {username!r} 是 U.E.P 憑證的保留名稱（principal uep），不可建立"
         )
     return username
 

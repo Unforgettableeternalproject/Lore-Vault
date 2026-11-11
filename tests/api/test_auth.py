@@ -149,6 +149,8 @@ def test_openapi_is_served_behind_auth(anon):
         "/v1/tasks_enable",
         "/v1/tasks_disable",
         "/v1/tasks_status",
+        "/v1/review/approve",
+        "/v1/review/reject",
     } == paths
 
 

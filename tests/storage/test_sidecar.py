@@ -91,7 +91,7 @@ def test_v18_adds_version_and_existing_rows_start_at_one(tmp_path):
         assert _doctor(raw, "sidecar.version_conflict_integrity").status.value == (
             "skipped"
         )
-        assert migrate(raw) == SCHEMA_VERSION == 18
+        assert migrate(raw) == SCHEMA_VERSION == 19
         assert sidecar.has_version_column(raw)
         blob = sidecar.get(raw, "folder/x", "tasks-snapshot", space="dev")
         assert (blob.version, blob.content) == (1, b"{}")

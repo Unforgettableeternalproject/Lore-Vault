@@ -3,12 +3,15 @@
 // 覆寫＝二次確認後以目前版本的 updated 重送，放棄＝不重送、顯示目前版本。
 import { useEffect, useState } from 'preact/hooks';
 
+import { ReviewBadge } from '../components/ReviewBadge';
+import { ReviewPanel, type ReviewOutcome } from '../components/ReviewPanel';
 import { Banner, Dialog, EmptyState, ErrorState, Loading, SourceTag, TwoPhaseDelete } from '../components/ui';
 import { ApiError } from '../lib/api';
 import { useApp } from '../lib/context';
 import { diffLines, hasConflictMarkers, mergeDraft } from '../lib/diff';
 import { authorLabel, describeError, describeUnresolvedLink, formatTime, isAbort } from '../lib/format';
 import { Markdown } from '../lib/markdown';
+import { isPendingReview, REVIEW_CONFLICT_TEXT } from '../lib/review';
 import { routePath } from '../lib/router';
 import type { ConflictCurrent, GetResult, NoteFull, NoteUndeleteResult, UnresolvedLink, UpdateResult } from '../lib/types';
 
@@ -74,6 +77,8 @@ export function NoteDetail({ id }: { id: string }) {
   const [undeleteResult, setUndeleteResult] = useState<{ tone: 'ok' | 'warn' | 'error'; text: string } | null>(null);
   // 最近一次儲存時服務回報解析不到／歧義的 [[ ]]（下次儲存或離開前都顯示）
   const [unresolved, setUnresolved] = useState<UnresolvedLink[]>([]);
+  // 審核遇到 409 時的說明（重新載入後仍顯示）
+  const [reviewNotice, setReviewNotice] = useState<string | null>(null);
 
   const fetchNote = async (signal?: AbortSignal, want = budget): Promise<GetResult<NoteFull>> => {
     const { data } = await api.post<GetResult<NoteFull>>(
@@ -127,6 +132,24 @@ export function NoteDetail({ id }: { id: string }) {
       });
     return () => ctrl.abort();
   }, [api, space.id, note?.id, note?.updated, note?.superseded_by, limits.get_max_ids]);
+
+  const onReviewDone = (outcome: ReviewOutcome) => {
+    if (outcome === 'conflict') {
+      setReviewNotice(REVIEW_CONFLICT_TEXT);
+      toast('審核狀態已改變，已重新載入', 'warning');
+      setTick((t) => t + 1);
+      return;
+    }
+    setReviewNotice(null);
+    if (outcome.deleted) {
+      toast('已核准刪除，筆記已移除（留有墓碑，可復原）', 'success');
+      refreshVaults();
+      navigate(routePath('review'));
+      return;
+    }
+    toast(outcome.action === 'approve' ? '已核准' : '已駁回', 'success');
+    setTick((t) => t + 1);
+  };
 
   const startEdit = () => {
     if (!note) return;
@@ -393,6 +416,17 @@ export function NoteDetail({ id }: { id: string }) {
             這則已被更正取代{links.titles[note.superseded_by] ? `（「${links.titles[note.superseded_by]}」）` : ''}，內容可能已過時。
           </Banner>
         )}
+        {(note.review_state === 'pending' || note.review_state === 'pending_delete' || note.review_state === 'rejected' || note.review_state === 'verified') && (
+          <div class="lv-review-line">
+            <ReviewBadge item={note} />
+          </div>
+        )}
+        {reviewNotice && (
+          <Banner tone="warn" label="REVIEW" testId="review-conflict">
+            {reviewNotice}
+          </Banner>
+        )}
+        {mode === 'read' && isPendingReview(note.review_state) && <ReviewPanel key={note.review_state} note={note} onDone={onReviewDone} />}
         <div class="lv-meta-line">
           <span>
             寫入 <span data-testid="note-author">{authorLabel(note.author)}</span>

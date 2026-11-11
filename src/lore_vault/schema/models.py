@@ -119,6 +119,26 @@ AUTHOR_LEGACY = "legacy"
 # 未設定 LORE_VAULT_PRINCIPAL 時的 principal（D12）。遷移 v12／v13 的歷史字面值
 # （xavier → UEPBernie）不受影響；既有部署以 LORE_VAULT_PRINCIPAL=UEPBernie 維持相容
 DEFAULT_PRINCIPAL = "owner"
+# U.E.P 專屬憑證對應的 principal（固定常數，不可設定；見 add-uep-interface）
+UEP_PRINCIPAL = "uep"
+
+# 審核狀態（只在 lore space 由 uep 的寫入產生；其餘 note 一律 none）：
+# pending＝待審；verified＝已核准；rejected＝已駁回；
+# pending_delete＝uep 發出的刪除請求，等使用者核准（note 照常可見）
+REVIEW_NONE = "none"
+REVIEW_PENDING = "pending"
+REVIEW_VERIFIED = "verified"
+REVIEW_REJECTED = "rejected"
+REVIEW_PENDING_DELETE = "pending_delete"
+REVIEW_STATES = (
+    REVIEW_NONE,
+    REVIEW_PENDING,
+    REVIEW_VERIFIED,
+    REVIEW_REJECTED,
+    REVIEW_PENDING_DELETE,
+)
+# 對讀者標示「尚未審核」的狀態
+REVIEW_UNVERIFIED_STATES = (REVIEW_PENDING, REVIEW_PENDING_DELETE)
 AUTHOR_MAX_CHARS = 64
 _AUTHOR_FORBIDDEN_WS = frozenset(chr(c) for c in (9, 10, 13))  # tab, LF, CR
 
@@ -168,6 +188,12 @@ class Note(Record):
     principal: str | None = None
     updated_by: str | None = None
     updated_by_principal: str | None = None
+    # 審核（uep 寫入契約）：review_prev_state 是 pending_delete 被駁回時要還原的狀態
+    review_state: str = REVIEW_NONE
+    reviewed_by: str | None = None
+    reviewed_at: str | None = None
+    review_reason: str | None = None
+    review_prev_state: str | None = None
 
     REQUIRED: ClassVar[frozenset[str]] = frozenset(
         {"id", "vault", "title", "body", "created", "updated"}
@@ -191,6 +217,22 @@ class Note(Record):
             raise fail("Note", "supersedes", "不可取代自己")
         for name in ("author", "principal", "updated_by", "updated_by_principal"):
             opt_str("Note", name, getattr(self, name))
+        if self.review_state not in REVIEW_STATES:
+            raise fail(
+                "Note",
+                "review_state",
+                f"必須是 {list(REVIEW_STATES)}，得到 {self.review_state!r}",
+            )
+        if self.review_prev_state is not None and (
+            self.review_prev_state not in REVIEW_STATES
+            or self.review_prev_state == REVIEW_PENDING_DELETE
+        ):
+            raise fail(
+                "Note", "review_prev_state", f"不合法：{self.review_prev_state!r}"
+            )
+        for name in ("reviewed_by", "review_reason"):
+            opt_str("Note", name, getattr(self, name))
+        opt_utc_timestamp("Note", "reviewed_at", self.reviewed_at)
 
 
 def _ts(value: str) -> datetime:

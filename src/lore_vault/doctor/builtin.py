@@ -246,6 +246,10 @@ def notes_attribution(ctx: DoctorContext) -> CheckResult:
     return _to_result(storage_manage.note_attribution(ctx.require("db")))
 
 
+def notes_review(ctx: DoctorContext) -> CheckResult:
+    return _to_result(storage_manage.note_review(ctx.require("db")))
+
+
 def notes_principal_agreement(ctx: DoctorContext) -> CheckResult:
     """D12：設定的 principal（`LORE_VAULT_PRINCIPAL`）出現在既有 note 的 principal
     （含 updated_by_principal）之中。
@@ -598,6 +602,14 @@ def default_registry() -> Registry:
             "notes",
             notes_attribution,
             "每則 note 都記錄了寫入者與最後修改者的帳號",
+        )
+    )
+    registry.add(
+        Check(
+            "notes.review",
+            "notes",
+            notes_review,
+            "uep 審核欄位一致（狀態值、pending 只在 lore、審核人與還原狀態齊全）",
         )
     )
     registry.add(

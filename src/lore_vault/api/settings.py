@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 from lore_vault.config import (
     API_TOKEN_ENV,
+    UEP_TOKEN_ENV,
     Config,
     ConfigError,
     Secret,
@@ -26,6 +27,7 @@ from lore_vault.config import (
     configured_principal,
     load_config,
     openai_api_key,
+    uep_token,
 )
 from lore_vault.enrich.clients import Transport
 from lore_vault.enrich.worker import EnrichWorker
@@ -84,6 +86,8 @@ class ApiSettings:
     llm_transport: Transport | None = None
     # 唯一憑證對應的 principal（D12，`LORE_VAULT_PRINCIPAL`）
     principal: str = DEFAULT_PRINCIPAL
+    # U.E.P 專屬 token（選配）：對應固定 principal `uep`；None = 不啟用
+    uep_token: Secret | None = None
     # 首次啟動建立 UI 管理員（D12）。只有 `load_settings()`（正式啟動路徑）打開；
     # 直接建構設定的測試預設不建，避免憑空多一個帳號
     bootstrap_admin: bool = False
@@ -121,6 +125,18 @@ class ApiSettings:
         if self.embedding_warmup is not None:
             return self.embedding_warmup
         return self.config.api.embedding_warmup
+
+
+def validate_uep_token(token: Secret | None) -> Secret | None:
+    """未設定回 None；設定了就套用與主 token 相同的長度與空白規則。"""
+    if token is None:
+        return None
+    value = token.reveal()
+    if len(value) < MIN_TOKEN_LENGTH:
+        raise ConfigError(f"{UEP_TOKEN_ENV} 太短，至少 {MIN_TOKEN_LENGTH} 個字元")
+    if any(ch.isspace() for ch in value):
+        raise ConfigError(f"{UEP_TOKEN_ENV} 不可包含空白字元")
+    return token
 
 
 def validate_token(token: Secret | None) -> Secret:
@@ -166,6 +182,7 @@ def load_settings(
         config=config,
         openai_key=openai_api_key(env_file=env_file, environ=environ),
         principal=principal,
+        uep_token=validate_uep_token(uep_token(env_file=env_file, environ=environ)),
         bootstrap_admin=True,
         admin_user=admin_user,
         admin_password=admin_password,

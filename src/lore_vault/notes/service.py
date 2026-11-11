@@ -23,7 +23,15 @@ from typing import Any
 
 from lore_vault.documents import service as document_service
 from lore_vault.recall.embedder import REASON_UNAVAILABLE, Embedder, embed_text
-from lore_vault.schema import Note, validate_author
+from lore_vault.schema import (
+    REVIEW_NONE,
+    REVIEW_PENDING,
+    REVIEW_REJECTED,
+    REVIEW_STATES,
+    REVIEW_VERIFIED,
+    Note,
+    validate_author,
+)
 from lore_vault.schema.chars import check_fields
 from lore_vault.storage import fts, vectors
 from lore_vault.storage.db import transaction
@@ -43,6 +51,7 @@ from lore_vault.storage.timeutil import normalize_utc, utc_now
 from lore_vault.storage.vaults import resolve_read, resolve_write
 
 from .links import merge_links, resolve_body_links
+from .review import check_uep_owns, is_review_space, unverified
 from .summary import clip, display_summary
 from .text import embedding_text
 
@@ -172,10 +181,13 @@ class WriteResult:
     # 實際（或 dry_run 時將會）存下的 vault key 與 links
     vault: str = ""
     links: tuple[str, ...] = ()
+    # 實際（或 dry_run 時將會）寫入的審核狀態：uep 在 lore 為 pending，其餘 none
+    review_state: str = REVIEW_NONE
 
     def to_dict(self) -> dict[str, Any]:
         common = {
             "vault": self.vault,
+            "review_state": self.review_state,
             "links": list(self.links),
             "unresolved_links": [dict(u) for u in self.unresolved_links],
             "duplicates": [d.to_dict() for d in self.duplicates],
@@ -241,7 +253,7 @@ def find_duplicates(
     own_title = _norm_title(title)
     found: list[DuplicateCandidate] = []
     for note in get_notes(conn, key, list(candidate_ids), space=space):
-        if note.id in excluded:
+        if note.id in excluded or note.review_state == REVIEW_REJECTED:
             continue
         lexical = _jaccard(own_tokens, _token_set(f"{note.title} {note.body}"))
         vec = cosine.get(note.id)
@@ -331,6 +343,8 @@ def write(
     )
     parsed = resolve_body_links(conn, key, body, self_title=title)
     links = merge_links(links, parsed.ids)
+    # uep 在 lore 的寫入進審核（pending）；其餘 space／身分不變
+    review_state = REVIEW_PENDING if is_review_space(principal, space) else REVIEW_NONE
     if dry_run:
         return WriteResult(
             None,
@@ -341,6 +355,7 @@ def write(
             dry_run=True,
             vault=key,
             links=links,
+            review_state=review_state,
         )
     stamp = normalize_utc(now) if now is not None else utc_now()
     note = Note(
@@ -358,6 +373,7 @@ def write(
         principal=principal,
         updated_by=author,
         updated_by_principal=principal,
+        review_state=review_state,
     )
     stored = insert_note(conn, key, note, space=space)
     return WriteResult(
@@ -368,6 +384,7 @@ def write(
         parsed.unresolved,
         vault=stored.vault,
         links=stored.links,
+        review_state=stored.review_state,
     )
 
 
@@ -396,6 +413,7 @@ class UpdateResult:
             "unresolved_links": [dict(u) for u in self.unresolved_links],
             "summary_stale": self.summary_stale,
             "embedding_stale": self.embedding_stale,
+            "review_state": self.note.review_state,
         }
 
 
@@ -417,6 +435,7 @@ def update(
     links: Sequence[str] | None = None,
     supersedes: str | None = _UNSET,
     now: str | None = None,
+    reviewer: str | None = None,
 ) -> UpdateResult:
     """樂觀鎖更新：`expected_updated` 必須等於目前版本，否則拋 `VersionConflict`
     （附目前版本），不寫入任何東西。
@@ -431,6 +450,13 @@ def update(
       解析出的 id。正文刪掉 `[[x]]` 後自動連結會消失，明確加的連結保留（但若它剛好
       也寫在舊 body 的 `[[ ]]` 裡，視為自動連結一併移除）
     - 兩者都沒有：links 不動、不重新解析（`unresolved_links` 為空）
+
+    審核（uep 寫入契約）：
+    - uep 在 lore 只能改自己寫的 note（否則 `UepForbidden`），改完 `review_state`
+      一律回 pending（包含 verified／rejected／pending_delete），並清空審核欄位
+    - `reviewer`（HTTP 層在 UI session 時傳入使用者的 principal）編輯 pending 的
+      note，視同核准：`review_state` 改為 verified，記 `reviewed_by`／`reviewed_at`
+    - 其他情況審核欄位不動
     """
     _check_principal(principal)
     author = validate_author(author)
@@ -458,6 +484,22 @@ def update(
             get_note(conn, key, changes["supersedes"], space=space)
         body_changed = "body" in changes and changes["body"] != current.body
         title_changed = "title" in changes and changes["title"] != current.title
+        if is_review_space(principal, space):
+            check_uep_owns(principal, current)
+            changes.update(
+                review_state=REVIEW_PENDING,
+                reviewed_by=None,
+                reviewed_at=None,
+                review_reason=None,
+                review_prev_state=None,
+            )
+        elif reviewer is not None and current.review_state == REVIEW_PENDING:
+            changes.update(
+                review_state=REVIEW_VERIFIED,
+                reviewed_by=reviewer,
+                reviewed_at=utc_now(),
+                review_reason=None,
+            )
         unresolved: tuple[dict[str, Any], ...] = ()
         if "links" in changes or body_changed:
             parsed = resolve_body_links(
@@ -611,6 +653,8 @@ def get(
             "summary": summary,
             "summary_source": source,
         }
+        if unverified(note.review_state):
+            entry["review"] = "unverified"
         if meta_only:
             entry["truncated"] = False
         else:
@@ -634,6 +678,10 @@ def get(
                 "updated_by_principal": note.updated_by_principal,
                 "created": note.created,
                 "updated": note.updated,
+                "review_state": note.review_state,
+                "reviewed_by": note.reviewed_by,
+                "reviewed_at": note.reviewed_at,
+                "review_reason": note.review_reason,
             }
         )
     missing = [
@@ -750,6 +798,7 @@ def list_(
     author_state: str | None = None,
     statuses: Sequence[str] | None = None,
     extensions: Sequence[str] | None = None,
+    review_state: str | None = None,
 ) -> ListResult:
     """標題清單，依 updated 由新到舊；note 與文件（`kinds` 預設兩者）合併分頁。
 
@@ -790,9 +839,16 @@ def list_(
     author = filter_text("author", author)
     if author_state is not None and author_state not in AUTHOR_STATES:
         raise ValueError(f"author_state 必須是 {list(AUTHOR_STATES)} 之一")
+    if review_state is not None and review_state not in REVIEW_STATES:
+        raise ValueError(f"review_state 必須是 {list(REVIEW_STATES)} 之一")
     statuses = filter_choices("statuses", statuses, sorted(DOCUMENT_STATUSES))
     extensions = filter_extensions(extensions)
-    note_only = topics is not None or author is not None or author_state is not None
+    note_only = (
+        topics is not None
+        or author is not None
+        or author_state is not None
+        or review_state is not None
+    )
     doc_only = statuses is not None or extensions is not None
     list_notes_kind = LIST_KIND_NOTE in wanted and not doc_only
     list_docs_kind = LIST_KIND_DOCUMENT in wanted and not note_only
@@ -815,6 +871,7 @@ def list_(
             "title": title,
             "author": author,
             "author_state": author_state,
+            "review_state": review_state,
         }
         notes, next_notes = list_notes(
             conn,
@@ -844,6 +901,8 @@ def list_(
                     "supersedes": n.supersedes,
                     "superseded_by": replaced.get(n.id),
                     "updated": n.updated,
+                    "review_state": n.review_state,
+                    **({"review": "unverified"} if unverified(n.review_state) else {}),
                     # 暫存：預算分配後換成 summary／summary_source
                     "_note": n,
                 },
