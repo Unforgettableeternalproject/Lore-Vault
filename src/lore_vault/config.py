@@ -27,6 +27,8 @@ ENV_PREFIX = "LORE_VAULT_"
 CONFIG_PATH_ENV = "LORE_VAULT_CONFIG"
 OPENAI_KEY_ENV = "OPENAI_API_KEY"
 API_TOKEN_ENV = "LORE_VAULT_API_TOKEN"
+# U.E.P 專屬憑證（選配）：對應固定的 principal `uep`，受審核契約限制
+UEP_TOKEN_ENV = "LORE_VAULT_UEP_TOKEN"
 CF_ACCESS_ID_ENV = "CF_ACCESS_CLIENT_ID"
 CF_ACCESS_SECRET_ENV = "CF_ACCESS_CLIENT_SECRET"
 # D12：單一使用者的 principal 名稱與首次啟動的 UI 管理員
@@ -521,6 +523,18 @@ def api_token(
     （或 `.env`）讀；沒有或空白時回 None。長度等規則由 API 層檢查。"""
     env = _merged_environ(os.environ if environ is None else environ, env_file)
     value = env.get(API_TOKEN_ENV, "").strip()
+    return Secret(value) if value else None
+
+
+def uep_token(
+    *,
+    env_file: str | PathLike[str] | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> Secret | None:
+    """U.E.P 專屬 bearer token（`LORE_VAULT_UEP_TOKEN`）；沒有或空白時回 None
+    （未設定 = 沒有 uep 這個主體，系統行為與未支援前完全相同）。"""
+    env = _merged_environ(os.environ if environ is None else environ, env_file)
+    value = env.get(UEP_TOKEN_ENV, "").strip()
     return Secret(value) if value else None
 
 

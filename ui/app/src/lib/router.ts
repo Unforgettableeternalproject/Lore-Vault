@@ -5,6 +5,7 @@ import { useEffect, useState } from 'preact/hooks';
 export const SCREENS = [
   { id: 'search', glyph: '◎', label: '檢索' },
   { id: 'notes', glyph: '¶', label: '筆記' },
+  { id: 'review', glyph: '⚑', label: '審核' },
   { id: 'docs', glyph: '▤', label: '文件' },
   { id: 'memory', glyph: '✦', label: '記憶層' },
   { id: 'tasks', glyph: '◇', label: '任務' },

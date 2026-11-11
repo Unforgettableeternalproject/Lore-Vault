@@ -66,6 +66,7 @@ def test_write_stores_note_without_waiting_for_summary_or_embedding(vaults, embe
         "dedup_degraded": True,  # 沒給 embedder
         "dedup_reason": "embedder_unavailable",
         "dry_run": False,
+        "review_state": "none",
     }
 
 
@@ -264,6 +265,7 @@ def test_update_body_clears_summary_and_embedding(vaults, add_note):
         "unresolved_links": [],
         "summary_stale": True,
         "embedding_stale": True,
+        "review_state": "none",
     }
 
 

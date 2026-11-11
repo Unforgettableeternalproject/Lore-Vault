@@ -311,6 +311,12 @@ DOWNLOAD_TOO_LARGE_HINTS = {
 }
 
 
+REVIEW_NOTE = (
+    '審核標註：項目帶 review="unverified"（或 get 的 review_state 為 pending／'
+    "pending_delete）代表 U.E.P 寫入、尚未經使用者核准，引用時要說明未審核；"
+    "被駁回（rejected）的 note 不出現在 recall／ask，只有 get 看得到。"
+)
+
 AUTHOR_FIELD_DESCRIPTION = (
     "你自己的角色名（例如 Minka；子代理用各自的名稱），單行、最多 64 字。"
     "不可代填別人的名字，也不可填 legacy；省略記為未具名"
@@ -1731,7 +1737,7 @@ def build_server(shell: Shell) -> MCPServer:
             "1–2 句摘要；文件段落（kind=chunk）回檔名、locator（頁／投影片／標題）與"
             "片段摘錄。不含全文；字數受 budget 限制，被裁掉的筆數見 omitted。"
             "需要全文時再用 get。degraded=true 表示服務不可達、結果來自本地快照"
-            "（不含文件，chunk 列在 unsupported_kinds）。"
+            "（不含文件，chunk 列在 unsupported_kinds）。" + REVIEW_NOTE
         ),
         "ask": (
             "用 recall 的同一條檢索取前 k 則 note，交模型整理成逐點回答"
@@ -1742,12 +1748,17 @@ def build_server(shell: Shell) -> MCPServer:
             "status=insufficient 表示片段不足；unsupported=true 的點沒有有效引用"
             "（引用了片段外的 id 已移除，見 dropped_citations），不要當成事實。"
             "degraded=true 表示檢索降級（只走關鍵字）。目前只用 note，不含文件。"
+            'sources 中帶 review="unverified" 的片段是未審核內容，'
+            "回答時不可當成已確認事實。"
             "服務不可達時直接失敗（沒有快照降級）。"
         ),
         "get": (
             "依 id 批次取全文：note id 回 body；doc:… 回整份文件文字；chunk:… 回該段。"
             "字數總和受 budget 限制（依 ids 順序分配），超過的標 truncated；"
             "不在該 vault 的 id 列在 missing。"
+            "note 另帶 review_state（none／pending／verified／rejected／"
+            "pending_delete）、reviewed_by、reviewed_at、review_reason；"
+            '未審核的另有 review="unverified"。'
         ),
         "list": (
             "列出 vault 的 note 標題與文件（新到舊，分頁；文件含 status、error_code、"
@@ -1756,22 +1767,28 @@ def build_server(shell: Shell) -> MCPServer:
             "note 摘要受字數預算（預設 4000）限制，在本頁平均分配：過長的被截短"
             "（結尾「…」、項目標 summary_truncated=true），預算連下限都給不起的尾端"
             "note 摘要省略（summary_source=omitted）；要完整內容用 get 取該 id 的全文。"
+            'note 項目帶 review_state；未審核的另有 review="unverified"。'
         ),
         "write": (
             "寫入新的 note。回傳 id 與疑似重複清單（duplicates）；若與既有 note 重複，"
             "改用 update 修正原 note，不要另建更正篇。author 請填你自己的角色名"
             "（例如 Minka；子代理用各自的名稱），不要填別人的名字；不確定就省略"
             "（記為未具名）。服務不可達時直接失敗。"
+            "若以 U.E.P 憑證在 lore space 寫入，note 會進入待審核（回傳 review_state="
+            'pending），使用者核准前讀者會看到 review="unverified"。'
         ),
         "update": (
             "修改既有 note；必須帶讀到的 expected_updated。版本衝突時錯誤內附 "
             "current（目前版本），確認後以 current.updated 重試。author 填你自己的"
             "角色名（記為最後修改者，原作者不變）。服務不可達時直接失敗。"
+            "U.E.P 憑證在 lore space 只能修改自己寫的 note，改完一律回到待審核"
+            "（review_state=pending，即使原本已核准）。"
         ),
         "upload": (
             "上傳本機文件（md、txt、程式碼、json、yaml、toml、pdf、docx、pptx；單檔 "
             "25MB）到目前 space 的 vault。回 document_id 與 status（pending：背景抽取"
             "中）；同內容再傳回 duplicate=true；同檔名不同內容為新版本（supersedes）。"
+            "U.E.P 憑證不可使用（403）。"
             "兩種給法擇一：path（只限本地 stdio 殼，只能讀殼工作目錄或 "
             "mcp.upload_roots 之下的檔案），或 filename + content_base64（HTTP 端點"
             "只能用這個）。服務不可達時直接失敗。"
@@ -1793,13 +1810,16 @@ def build_server(shell: Shell) -> MCPServer:
             "token 5 分鐘內有效，資料在兩步之間變動會回 plan_changed"
             "（附新 plan 與新 token，仍需使用者再確認）。"
             "刪除會寫墓碑，可用 undelete 還原；文件的原始檔不會被刪。不能刪整個 vault。"
+            "U.E.P 憑證在 lore space 的第二步不會真的刪除：只記下刪除請求"
+            "（回傳 review_state=pending_delete，note 照常可見），"
+            "要使用者在 UI 核准才刪。"
         ),
         "undelete": (
             "從墓碑還原先前刪除的 note 或文件（同一個 id，範圍為目前 space）。"
             "note 以原內容還原（v12 前的舊墓碑沒有內容快照，只移除墓碑，"
             "見 restored）；文件以仍在的原始檔重建並重新排入抽取（status 回 "
             "pending）。vault 已刪除、原始檔遺失或同內容已重新上傳時回 "
-            "not_restorable。"
+            "not_restorable。U.E.P 憑證不可使用（403）。"
         ),
         "status": (
             "服務健康狀態（doctor 對帳、補算積壓、schema 版本）。本地 stdio 殼另附"

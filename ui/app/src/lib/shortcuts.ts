@@ -12,6 +12,7 @@ export interface ShortcutDef {
 export const GOTO: Record<string, ScreenId> = {
   s: 'search',
   n: 'notes',
+  a: 'review',
   d: 'docs',
   m: 'memory',
   t: 'tasks',
@@ -24,6 +25,7 @@ export const GOTO: Record<string, ScreenId> = {
 const GOTO_LABEL: Record<ScreenId, string> = {
   search: '檢索',
   notes: '筆記',
+  review: '審核',
   docs: '文件',
   memory: '記憶層',
   tasks: '任務',

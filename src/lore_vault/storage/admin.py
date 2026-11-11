@@ -62,7 +62,13 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
 
-from lore_vault.schema import SPACE_DEV, Note, canonical_key
+from lore_vault.schema import (
+    REVIEW_NONE,
+    REVIEW_PENDING_DELETE,
+    SPACE_DEV,
+    Note,
+    canonical_key,
+)
 
 from . import document_index, sidecar
 from .db import transaction
@@ -314,6 +320,13 @@ def restore_note(
         if not isinstance(data, dict) or data.get("id") != note_id:
             raise StorageError(f"note {note_id!r} 的墓碑快照與墓碑 id 不符")
         note = dataclasses.replace(Note.from_dict(data), vault=key)
+        if note.review_state == REVIEW_PENDING_DELETE:
+            # 刪除請求經核准而真刪：還原後回到請求前的狀態，不再是待刪
+            note = dataclasses.replace(
+                note,
+                review_state=note.review_prev_state or REVIEW_NONE,
+                review_prev_state=None,
+            )
         conn.execute("DELETE FROM note_tombstones WHERE note_id = ?", (note_id,))
         stored = insert_note(conn, key, note, space=space or row[0])
         return {"tombstone": grave, "restored": True, "note": stored}

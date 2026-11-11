@@ -8,6 +8,7 @@
 // 更正鏈（supersedes／superseded_by）在列上標示。
 import { useEffect, useState } from 'preact/hooks';
 
+import { UnverifiedTag } from '../components/ReviewBadge';
 import { Badge, Banner, EmptyState, ErrorState, Loading, SourceTag } from '../components/ui';
 import {
   ChipGroup,
@@ -37,6 +38,15 @@ const AUTHOR_STATES = [
 ] as const;
 type AuthorState = (typeof AUTHOR_STATES)[number]['id'];
 const AUTHOR_STATE_IDS = AUTHOR_STATES.map((a) => a.id);
+const REVIEW_STATES = [
+  { id: '', label: '全部' },
+  { id: 'pending', label: '待審' },
+  { id: 'pending_delete', label: '待刪除' },
+  { id: 'rejected', label: '已駁回' },
+  { id: 'verified', label: '已核准' },
+] as const;
+type ReviewFilter = (typeof REVIEW_STATES)[number]['id'];
+const REVIEW_STATE_IDS = REVIEW_STATES.map((r) => r.id);
 
 /** 截斷橫幅標題：分別列出截短與省略的筆數 */
 function truncatedTitle(page: ListResult<NoteListItem>): string {
@@ -60,6 +70,7 @@ export function Notes() {
   const [title, setTitle] = useState(() => queryText(initial, 'title'));
   const [author, setAuthor] = useState(() => queryText(initial, 'author'));
   const [authorState, setAuthorState] = useState<AuthorState>(() => queryChoice(initial, 'author_state', AUTHOR_STATE_IDS, ''));
+  const [reviewState, setReviewState] = useState<ReviewFilter>(() => queryChoice(initial, 'review_state', REVIEW_STATE_IDS, ''));
   const [page, setPage] = useState<ListResult<NoteListItem> | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [loading, setLoading] = useState(true);
@@ -67,21 +78,22 @@ export function Notes() {
   const [topics, setTopics] = useState<TopicsResult['topics'] | null>(null);
   const [topicsError, setTopicsError] = useState<string | null>(null);
 
-  useQuerySync('notes', { tag, from: range.from, to: range.to, title, author, author_state: authorState });
-  const filtered = Boolean(tag || range.from || range.to || title || author || authorState);
+  useQuerySync('notes', { tag, from: range.from, to: range.to, title, author, author_state: authorState, review_state: reviewState });
+  const filtered = Boolean(tag || range.from || range.to || title || author || authorState || reviewState);
   const clearFilters = () => {
     setTag(null);
     setRange({ from: '', to: '' });
     setTitle('');
     setAuthor('');
     setAuthorState('');
+    setReviewState('');
   };
 
   // 篩選或每頁筆數變了回第一頁、摘要預算重置
   useEffect(() => {
     setPageNo(1);
     setBudget(baseBudget);
-  }, [vault, tag, range.from, range.to, title, author, authorState, pageSize]);
+  }, [vault, tag, range.from, range.to, title, author, authorState, reviewState, pageSize]);
 
   // 標籤選項：範圍內全部標籤（不是只看已載入的那一頁）
   useEffect(() => {
@@ -117,6 +129,7 @@ export function Notes() {
           ...(title ? { title } : {}),
           ...(author ? { author } : {}),
           ...(authorState ? { author_state: authorState } : {}),
+          ...(reviewState ? { review_state: reviewState } : {}),
           ...rangeParams(range),
         },
         ctrl.signal,
@@ -131,7 +144,7 @@ export function Notes() {
         setLoading(false);
       });
     return () => ctrl.abort();
-  }, [api, space.id, vault, tag, range.from, range.to, title, author, authorState, pageNo, pageSize, budget, tick]);
+  }, [api, space.id, vault, tag, range.from, range.to, title, author, authorState, reviewState, pageNo, pageSize, budget, tick]);
 
   const items = page?.items ?? [];
   const maxBudget = baseBudget * BUDGET_GROWTH_CAP;
@@ -165,6 +178,7 @@ export function Notes() {
             {title ? ` · 標題含「${title}」` : ''}
             {author ? ` · 作者含「${author}」` : ''}
             {authorState === 'named' ? ' · 已具名' : authorState === 'missing' ? ' · 未具名' : ''}
+            {reviewState ? ` · 審核：${REVIEW_STATES.find((r) => r.id === reviewState)?.label}` : ''}
             {range.from || range.to ? ` · ${range.from || '最早'}～${range.to || '今天'}` : ''}
           </>
         }
@@ -205,6 +219,7 @@ export function Notes() {
           <TextFilter value={title} onApply={setTitle} inputLabel="標題關鍵字" placeholder="標題含…（不分大小寫）" submitLabel="套用標題" testId="filter-title" />
           <ChipGroup label="作者" groupLabel="作者狀態" options={AUTHOR_STATES} value={authorState} onChange={setAuthorState} />
           <TextFilter value={author} onApply={setAuthor} inputLabel="作者名稱" placeholder="作者含…（不分大小寫）" submitLabel="套用作者" testId="filter-author" />
+          <ChipGroup label="審核" groupLabel="審核狀態" options={REVIEW_STATES} value={reviewState} onChange={setReviewState} />
         </div>
       </FilterPanel>
       {topicsError && (
@@ -267,6 +282,7 @@ export function Notes() {
               >
                 <span role="cell" class="lv-table__main">
                   <span class="lv-table__title">{n.title}</span>
+                  <UnverifiedTag item={n} />
                   {(n.supersedes || n.superseded_by) && (
                     <span class="lv-table__chain">
                       {n.superseded_by && (

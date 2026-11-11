@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 
 import { Ask } from './Ask';
 
+import { UnverifiedTag } from '../components/ReviewBadge';
 import { Badge, Banner, EmptyState, ErrorState, Loading, SourceTag } from '../components/ui';
 import { VaultPicker } from '../components/VaultPicker';
 import { useApp, vaultName } from '../lib/context';
@@ -373,6 +374,7 @@ function ResultRow({
       </span>
       <span class="lv-result__main">
         <span class="lv-result__title">{item.title}</span>
+        {item.kind === 'note' && <UnverifiedTag item={item} />}
         <span class="lv-result__summary">
           <SourceTag source={item.summary_source} />
           <span class="lv-result__text">{item.summary ?? '（沒有摘要可顯示）'}</span>

@@ -58,6 +58,8 @@ export interface RecallItem {
   chunk_id?: string;
   locator?: Locator;
   author?: string | null;
+  review?: 'unverified' | null;
+  review_state?: ReviewState;
 }
 
 export interface RecallResult {
@@ -76,6 +78,8 @@ export interface RecallResult {
   kinds: string[];
   missing_chunk_embeddings: number | null;
 }
+
+export type ReviewState = 'none' | 'pending' | 'verified' | 'rejected' | 'pending_delete';
 
 export interface NoteFull {
   id: string;
@@ -97,6 +101,13 @@ export interface NoteFull {
   /** A22：原作者（寫入者自報）；最後修改者另記 updated_by */
   author?: string | null;
   updated_by?: string | null;
+  /** UEP 寫入審核：none｜pending｜verified｜rejected｜pending_delete；舊服務沒有此欄 */
+  review_state?: ReviewState;
+  reviewed_by?: string | null;
+  reviewed_at?: string | null;
+  review_reason?: string | null;
+  /** 待審與待刪除項目另帶 unverified */
+  review?: 'unverified' | null;
 }
 
 export interface DocumentWarning {
@@ -173,6 +184,13 @@ export interface NoteListItem {
   summary_truncated?: boolean;
   supersedes?: string | null;
   superseded_by?: string | null;
+  /** UEP 寫入審核：none｜pending｜verified｜rejected｜pending_delete；舊服務沒有此欄 */
+  review_state?: ReviewState;
+  reviewed_by?: string | null;
+  reviewed_at?: string | null;
+  review_reason?: string | null;
+  /** 待審與待刪除項目另帶 unverified */
+  review?: 'unverified' | null;
 }
 
 export type ListItem = NoteListItem | DocumentMeta;

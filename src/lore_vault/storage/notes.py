@@ -12,7 +12,7 @@ import sqlite3
 from collections.abc import Iterable, Sequence
 from typing import Any
 
-from lore_vault.schema import Note, SchemaError
+from lore_vault.schema import REVIEW_STATES, Note, SchemaError
 from lore_vault.schema.chars import check_fields
 
 from . import fts
@@ -24,7 +24,19 @@ from .vaults import resolve_read, resolve_write, vault_clause
 
 # update_note_if 允許改動的欄位
 UPDATABLE_FIELDS = frozenset(
-    {"title", "summary", "body", "topics", "links", "supersedes"}
+    {
+        "title",
+        "summary",
+        "body",
+        "topics",
+        "links",
+        "supersedes",
+        "review_state",
+        "reviewed_by",
+        "reviewed_at",
+        "review_reason",
+        "review_prev_state",
+    }
 )
 # 這些欄位一變，舊 embedding 就不再代表內容，同一交易內刪掉
 # （doctor 會回報缺向量、背景補算）
@@ -33,6 +45,7 @@ _EMBEDDING_FIELDS = frozenset({"title", "body"})
 
 def note_from_row(row: sqlite3.Row) -> Note:
     """notes 表的一列 → Note（含作者欄位）。"""
+    keys = row.keys()
     return Note(
         id=row["id"],
         vault=row["vault"],
@@ -48,6 +61,14 @@ def note_from_row(row: sqlite3.Row) -> Note:
         principal=row["principal"],
         updated_by=row["updated_by"],
         updated_by_principal=row["updated_by_principal"],
+        # v19 前的資料庫（遷移測試、舊快照）沒有審核欄位：視為 none
+        review_state=row["review_state"] if "review_state" in keys else "none",
+        reviewed_by=row["reviewed_by"] if "reviewed_by" in keys else None,
+        reviewed_at=row["reviewed_at"] if "reviewed_at" in keys else None,
+        review_reason=row["review_reason"] if "review_reason" in keys else None,
+        review_prev_state=(
+            row["review_prev_state"] if "review_prev_state" in keys else None
+        ),
     )
 
 
@@ -107,8 +128,10 @@ def insert_note(
             """
             INSERT INTO notes (id, vault, title, summary, body, topics, links,
                                supersedes, created, updated, author, principal,
-                               updated_by, updated_by_principal, enqueued)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                               updated_by, updated_by_principal, enqueued,
+                               review_state, reviewed_by, reviewed_at,
+                               review_reason, review_prev_state)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 stored.id,
@@ -127,6 +150,11 @@ def insert_note(
                 stored.updated_by_principal,
                 # 補算入列時間一律用牆鐘：匯入與還原保留舊 `updated`，不能拿它當入列時間
                 utc_now(),
+                stored.review_state,
+                stored.reviewed_by,
+                stored.reviewed_at,
+                stored.review_reason,
+                stored.review_prev_state,
             ),
         )
         seq = cursor.lastrowid
@@ -180,11 +208,14 @@ def _note_filters(
     title: str | None = None,
     author: str | None = None,
     author_state: str | None = None,
+    review_state: str | None = None,
 ) -> tuple[list[str], list[Any]]:
     title = filter_text("title", title)
     author = filter_text("author", author)
     if author_state is not None and author_state not in AUTHOR_STATES:
         raise ValueError(f"author_state 必須是 {list(AUTHOR_STATES)} 之一")
+    if review_state is not None and review_state not in REVIEW_STATES:
+        raise ValueError(f"review_state 必須是 {list(REVIEW_STATES)} 之一")
     scope = resolve_read(conn, vault, space=space)
     clause, params = vault_clause(scope, "vault")
     conditions = [clause]
@@ -218,6 +249,9 @@ def _note_filters(
         conditions.append("author IS NOT NULL AND trim(author) != ''")
     elif author_state == AUTHOR_MISSING:
         conditions.append("(author IS NULL OR trim(author) = '')")
+    if review_state is not None:
+        conditions.append("review_state = ?")
+        args.append(review_state)
     return conditions, args
 
 
@@ -235,6 +269,7 @@ def list_notes(
     title: str | None = None,
     author: str | None = None,
     author_state: str | None = None,
+    review_state: str | None = None,
 ) -> tuple[list[Note], tuple[str, str] | None]:
     """依 (updated, id) 由新到舊分頁。回傳 (本頁, 下一頁 cursor 或 None)。
 
@@ -261,6 +296,7 @@ def list_notes(
         title=title,
         author=author,
         author_state=author_state,
+        review_state=review_state,
     )
     if cursor is not None:
         conditions.append("(updated, id) < (?, ?)")
@@ -288,6 +324,7 @@ def count_listed_notes(
     title: str | None = None,
     author: str | None = None,
     author_state: str | None = None,
+    review_state: str | None = None,
 ) -> int:
     """與 `list_notes` 相同篩選條件下的總筆數（頁碼分頁用）。"""
     conditions, args = _note_filters(
@@ -300,6 +337,7 @@ def count_listed_notes(
         title=title,
         author=author,
         author_state=author_state,
+        review_state=review_state,
     )
     row = conn.execute(
         f"SELECT count(*) FROM notes WHERE {' AND '.join(conditions)}", args
@@ -394,7 +432,9 @@ def update_note_if(
             """
             UPDATE notes SET title = ?, summary = ?, body = ?, topics = ?, links = ?,
                              supersedes = ?, updated = ?, updated_by = ?,
-                             updated_by_principal = ?, enqueued = ?
+                             updated_by_principal = ?, enqueued = ?,
+                             review_state = ?, reviewed_by = ?, reviewed_at = ?,
+                             review_reason = ?, review_prev_state = ?
             WHERE seq = ? AND updated = ?
             """,
             (
@@ -409,6 +449,11 @@ def update_note_if(
                 updated.updated_by_principal,
                 # 新版本重新入列（不用 `now`：匯入更新傳的是來源的舊時間）
                 utc_now(),
+                updated.review_state,
+                updated.reviewed_by,
+                updated.reviewed_at,
+                updated.review_reason,
+                updated.review_prev_state,
                 row["seq"],
                 expected_updated,
             ),
@@ -460,3 +505,50 @@ def note_seqs(
         (vault_key, *ids),
     ).fetchall()
     return {r["id"]: r["seq"] for r in rows}
+
+
+def set_note_review(
+    conn: sqlite3.Connection,
+    vault: str,
+    note_id: str,
+    *,
+    space: str,
+    expect_state: str,
+    review_state: str,
+    reviewed_by: str | None,
+    reviewed_at: str | None,
+    review_reason: str | None,
+    review_prev_state: str | None,
+) -> bool:
+    """只改審核欄位的條件更新：目前狀態必須等於 `expect_state` 才寫入（回 True）。
+
+    不動 `updated`（內容沒變，樂觀鎖版本與 embedding 都維持）。note 不存在拋
+    `NotFound`；狀態不符回 False，不寫入。
+    """
+    if review_state not in REVIEW_STATES:
+        raise SchemaError(f"review_state 不合法：{review_state!r}")
+    with transaction(conn):
+        key = resolve_write(conn, vault, space=space)
+        row = conn.execute(
+            "SELECT 1 FROM notes WHERE id = ? AND vault = ?", (note_id, key)
+        ).fetchone()
+        if row is None:
+            raise NotFound(f"vault {key!r} 內找不到 note {note_id!r}")
+        cursor = conn.execute(
+            """
+            UPDATE notes SET review_state = ?, reviewed_by = ?, reviewed_at = ?,
+                             review_reason = ?, review_prev_state = ?
+            WHERE id = ? AND vault = ? AND review_state = ?
+            """,
+            (
+                review_state,
+                reviewed_by,
+                reviewed_at,
+                review_reason,
+                review_prev_state,
+                note_id,
+                key,
+                expect_state,
+            ),
+        )
+        return cursor.rowcount == 1

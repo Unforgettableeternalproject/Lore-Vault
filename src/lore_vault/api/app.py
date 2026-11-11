@@ -19,6 +19,7 @@ Vite 建置後的靜態檔（SPA fallback 到 index.html）。
 
 from __future__ import annotations
 
+import hmac
 import logging
 import time
 from collections.abc import AsyncIterator, Mapping
@@ -28,7 +29,9 @@ from datetime import UTC, datetime
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
+from lore_vault.config import UEP_TOKEN_ENV, ConfigError
 from lore_vault.mcp.http import MCP_PATH, build_http_endpoint
+from lore_vault.schema import UEP_PRINCIPAL
 from lore_vault.storage import ui_login
 
 from .auth import BearerAuthMiddleware
@@ -36,8 +39,14 @@ from .bootstrap import ensure_admin_account
 from .errors import install_error_handlers
 from .manage import router as manage_router
 from .principals import Principals
+from .review import router as review_router
 from .routes import router
-from .settings import ApiSettings, load_settings, validate_token
+from .settings import (
+    ApiSettings,
+    load_settings,
+    validate_token,
+    validate_uep_token,
+)
 from .settings_admin import router as settings_router
 from .spike import router as spike_router
 from .state import AppState
@@ -90,6 +99,25 @@ def _bootstrap_admin(state: AppState, ui_auth: UiAuth) -> None:
         )
 
 
+def _build_principals(settings: ApiSettings) -> Principals:
+    """主 token → 設定的 principal；有 UEP token 時另加 `uep`（固定 principal）。
+    兩組 token 相同、或 principal／UI 管理員名稱與 `uep` 衝突都拒絕啟動。"""
+    uep = validate_uep_token(settings.uep_token)
+    if uep is None:
+        return Principals.single(settings.token, settings.principal)
+    for name in (settings.principal, settings.resolved_admin_user):
+        if name.casefold() == UEP_PRINCIPAL:
+            raise ConfigError(
+                f"啟用 {UEP_TOKEN_ENV} 時，principal 與 UI 管理員名稱不可是保留名稱 "
+                f"{UEP_PRINCIPAL!r}"
+            )
+    if hmac.compare_digest(
+        uep.reveal().encode("utf-8"), settings.token.reveal().encode("utf-8")
+    ):
+        raise ConfigError(f"{UEP_TOKEN_ENV} 不可與 API token 相同")
+    return Principals([(settings.token, settings.principal), (uep, UEP_PRINCIPAL)])
+
+
 def create_app(
     settings: ApiSettings | None = None,
     *,
@@ -102,7 +130,7 @@ def create_app(
         settings = load_settings(environ=environ)
     validate_token(settings.token)
     # 憑證 → principal（A22）：目前唯一的 token 對應設定的 principal（D12）
-    principals = Principals.single(settings.token, settings.principal)
+    principals = _build_principals(settings)
     ui_auth = UiAuth.from_config(settings.config.ui, settings.clock or time.time)
     ui_static = (
         static_app(settings.config.ui.static_dir)
@@ -152,6 +180,7 @@ def create_app(
     app.include_router(manage_router)
     app.include_router(settings_router)
     app.include_router(tasks_router)
+    app.include_router(review_router)
     # /ui/api/* 必須在 /ui 靜態掛載之前註冊（Starlette 依註冊順序比對）
     app.include_router(build_ui_router())
     if ui_static is not None:

@@ -44,6 +44,7 @@ from lore_vault.recall import UnsupportedKind
 from lore_vault.recall import recall as recall_service
 from lore_vault.recall.embedder import Embedder
 from lore_vault.recall.service import KIND_CHUNK, KIND_NOTE, MODE_HYBRID
+from lore_vault.schema import REVIEW_UNVERIFIED_STATES
 from lore_vault.storage.notes import get_notes
 
 from .client import STATUS_ANSWERED, STATUS_INSUFFICIENT, STATUSES, Answerer
@@ -74,7 +75,9 @@ SYSTEM_PROMPT = (
     "3. 不要對檢索結果給予過高信心；如果片段之間有矛盾或新舊不一致，"
     "在 points 中明確指出（用一點描述矛盾，note_ids 帶兩邊）。\n"
     "4. 只根據片段的 updated 時間與 supersedes（取代關係）判斷新舊，不要臆測。\n"
-    "5. 用繁體中文回答。只輸出 JSON，符合給定 schema，不要多餘文字。"
+    "5. 標頭帶有『未審核』的片段是 U.E.P 寫入、尚未經使用者核准的內容；"
+    "引用它時必須在 claim 中明講該資訊未經審核，不可當成已確認的事實。\n"
+    "6. 用繁體中文回答。只輸出 JSON，符合給定 schema，不要多餘文字。"
 )
 
 
@@ -137,9 +140,13 @@ class Snippet:
     updated: str
     supersedes: str | None
     score: float
+    # pending／pending_delete 的 note 尚未審核（prompt 與 sources 都標註）
+    unverified: bool = False
 
     def source_dict(self) -> dict[str, Any]:
+        extra = {"review": "unverified"} if self.unverified else {}
         return {
+            **extra,
             "id": self.id,
             "vault": self.vault,
             "title": self.title,
@@ -285,6 +292,7 @@ def prepare(
                 updated=note.updated,
                 supersedes=note.supersedes,
                 score=scores[note.id],
+                unverified=note.review_state in REVIEW_UNVERIFIED_STATES,
             )
         )
     return AskContext(
@@ -307,6 +315,8 @@ def build_user_prompt(question: str, snippets: list[Snippet]) -> str:
         header = f"--- note_id={s.id} vault={s.vault} updated={s.updated}"
         if s.supersedes:
             header += f" supersedes={s.supersedes}"
+        if s.unverified:
+            header += " 未審核"
         lines = [f"{header} ---", f"標題：{s.title}"]
         # 首段頂替（lead）與正文開頭重複，只放 LLM 摘要
         if s.summary and s.summary_source == SOURCE_SUMMARY:
