@@ -479,6 +479,15 @@ button { font: inherit; }
 .lv-chip.is-on { background: var(--zone-tint); border-color: var(--zone-stroke); color: var(--ink-title); }
 .lv-chip--mono { font-family: var(--font-mono); font-size: var(--lv-fs-meta); padding: 4px 10px; }
 
+/* 標籤篩選：搜尋框＋固定列（全部／已選）＋限高（約 4 列）可捲動的清單 */
+.lv-tagfilter { display: flex; flex-direction: column; gap: 8px; flex: 1 1 100%; min-width: 0; }
+.lv-tagfilter__search { width: 200px; max-width: 100%; padding-top: 4px; padding-bottom: 4px; }
+.lv-tagfilter__list {
+  max-height: 136px; overflow-y: auto; overscroll-behavior: contain;
+  padding: 2px 4px 2px 0; scrollbar-width: thin;
+}
+.lv-tagfilter__empty { margin: 0; color: var(--ink-mute); font-size: var(--lv-fs-meta); }
+
 /* ── 檢索 ─────────────────────────────────────────────── */
 .lv-search {
   display: flex; align-items: center; gap: 12px; padding: 0 12px 0 18px; min-height: 56px;
