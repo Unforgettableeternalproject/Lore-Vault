@@ -91,10 +91,24 @@ def clean_root_logger():
     """還原 root logger 的 handler，避免測試之間汙染。"""
     root = logging.getLogger()
     before = list(root.handlers)
+    # 其他測試可能停用 logger 或全域 disable，這裡先還原成可記錄的狀態；
+    # 服務端的 logging 設定會把 lore_vault 設成 propagate=False，記錄到不了 root
+    chain = [logging.getLogger("lore_vault.mcp"), logging.getLogger("lore_vault")]
+    saved_disable = logging.root.manager.disable
+    saved = [(lg, lg.disabled, lg.propagate, lg.level) for lg in chain]
+    logging.disable(logging.NOTSET)
+    for lg in chain:
+        lg.disabled = False
+        lg.propagate = True
+        lg.setLevel(logging.NOTSET)
     yield root
     for handler in [h for h in root.handlers if h not in before]:
         root.removeHandler(handler)
         handler.close()
+    logging.disable(saved_disable)
+    for lg, disabled, propagate, level in saved:
+        lg.disabled, lg.propagate = disabled, propagate
+        lg.setLevel(level)
 
 
 def test_attach_file_log_writes_traceback_and_rotates(tmp_path, clean_root_logger):
