@@ -21,6 +21,7 @@ import {
   useQuerySync,
 } from '../components/Filters';
 import { DateRange, DEFAULT_PAGE_SIZE, Pager, rangeParams, type DateRangeValue } from '../components/Pager';
+import { TagFilter } from '../components/TagFilter';
 import { VaultPicker } from '../components/VaultPicker';
 import { useApp, vaultName } from '../lib/context';
 import { authorLabel, describeError, formatTime, isAbort } from '../lib/format';
@@ -150,7 +151,6 @@ export function Notes() {
   const maxBudget = baseBudget * BUDGET_GROWTH_CAP;
   // 目前選的標籤不在清單裡（例如剛被改名）時仍要顯示，才能取消
   const tagOptions = topics ?? [];
-  const tagMissing = tag !== null && !tagOptions.some((t) => t.topic === tag);
 
   return (
     <section class="lv-screen lv-screen--wide" aria-labelledby="lv-notes-title">
@@ -188,32 +188,7 @@ export function Notes() {
           <DateRange value={range} onChange={setRange} />
         </div>
         <div class="lv-filter-panel__row">
-          <div class="lv-chips" role="group" aria-label="標籤篩選">
-            <span class="lv-filters__label">TAGS</span>
-            <button type="button" class={'lv-chip lv-chip--mono' + (tag === null ? ' is-on' : '')} aria-pressed={tag === null} onClick={() => setTag(null)}>
-              全部
-            </button>
-            {tagOptions.map((t) => (
-              <button
-                key={t.topic}
-                type="button"
-                class={'lv-chip lv-chip--mono' + (tag === t.topic ? ' is-on' : '')}
-                aria-pressed={tag === t.topic}
-                aria-label={`#${t.topic}（${t.count} 則）`}
-                onClick={() => setTag(tag === t.topic ? null : t.topic)}
-              >
-                #{t.topic}
-                <span class="lv-chip__count" aria-hidden="true">
-                  {t.count}
-                </span>
-              </button>
-            ))}
-            {tagMissing && (
-              <button type="button" class="lv-chip lv-chip--mono is-on" aria-pressed="true" onClick={() => setTag(null)}>
-                #{tag}
-              </button>
-            )}
-          </div>
+          <TagFilter options={tagOptions} value={tag} onChange={setTag} />
         </div>
         <div class="lv-filter-panel__row">
           <TextFilter value={title} onApply={setTitle} inputLabel="標題關鍵字" placeholder="標題含…（不分大小寫）" submitLabel="套用標題" testId="filter-title" />
