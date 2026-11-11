@@ -1,5 +1,6 @@
 // 記憶層瀏覽（T-84，唯讀）：concept 依 vault／scope／kind 篩選分頁（只顯示 statement 與 metadata），
 // 以及收料概況（by_machine／by_vault）。concept 與 episode 只屬於 dev，其他 space 只顯示說明。
+import type { ComponentType } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 
 import { ChipGroup, FilterPanel, TextFilter } from '../components/Filters';
@@ -8,9 +9,10 @@ import { Badge, EmptyState, ErrorState, Loading } from '../components/ui';
 import { VaultPicker } from '../components/VaultPicker';
 import { ALL, useApp, vaultName } from '../lib/context';
 import { formatTime, isAbort } from '../lib/format';
+import { GRAPH_MAX_NODES, scopeLabel } from '../lib/graph';
 import { routePath } from '../lib/router';
 import { formatAge, hoursSince } from '../lib/health';
-import type { ConceptItem, ConceptPage, EpisodeGroup, EpisodeSummary } from '../lib/types';
+import type { ConceptGraphData, ConceptItem, ConceptScopeCount, ConceptPage, EpisodeGroup, EpisodeSummary } from '../lib/types';
 
 const KINDS = [
   { id: '', label: '全部類型' },
@@ -25,6 +27,12 @@ const SCOPE_STATES = [
   { id: 'global', label: '跨專案' },
   { id: 'missing', label: '缺 scope' },
 ] as const;
+
+const VIEWS = [
+  { id: 'list', label: '列表' },
+  { id: 'graph', label: '圖譜' },
+] as const;
+type View = (typeof VIEWS)[number]['id'];
 
 export function Memory() {
   const { space, switchSpace } = useApp();
@@ -71,11 +79,17 @@ function ConceptList() {
   const [error, setError] = useState<unknown>(null);
   const [loading, setLoading] = useState(true);
   const [tick, setTick] = useState(0);
+  const [view, setView] = useState<View>('list');
+  const [graph, setGraph] = useState<ConceptGraphData | null>(null);
+  const [graphError, setGraphError] = useState<unknown>(null);
+  const [graphLoading, setGraphLoading] = useState(false);
+  const [scopes, setScopes] = useState<ConceptScopeCount[]>([]);
 
   // 篩選或每頁筆數變了回第一頁
   useEffect(() => setPageNo(1), [vault, kind, scopeState, scope, range.from, range.to, pageSize]);
 
   useEffect(() => {
+    if (view !== 'list') return;
     const ctrl = new AbortController();
     setLoading(true);
     setError(null);
@@ -105,7 +119,62 @@ function ConceptList() {
         setLoading(false);
       });
     return () => ctrl.abort();
-  }, [api, space.id, vault, kind, scopeState, scope, range.from, range.to, pageNo, pageSize, tick]);
+  }, [api, view, space.id, vault, kind, scopeState, scope, range.from, range.to, pageNo, pageSize, tick]);
+
+  // scope 下拉選單的選項（依目前 vault、類型、scope 狀態）
+  useEffect(() => {
+    if (view !== 'graph') return;
+    const ctrl = new AbortController();
+    api
+      .post<{ scopes: ConceptScopeCount[] }>(
+        '/v1/concept_scopes',
+        { space: space.id, vault, ...(kind ? { kind } : {}), ...(scopeState ? { scope_state: scopeState } : {}) },
+        ctrl.signal,
+      )
+      .then(({ data }) => setScopes(data.scopes))
+      .catch(() => {
+        // 選項取不到不阻擋圖譜：下拉退回只有「全部」與目前 scope
+        if (!ctrl.signal.aborted) setScopes([]);
+      });
+    return () => ctrl.abort();
+  }, [api, view, space.id, vault, kind, scopeState, tick]);
+
+  // 圖譜：一次只畫一個 scope；scope 未指定（全部）不查詢，只顯示提示
+  useEffect(() => {
+    if (view !== 'graph' || !scope) {
+      setGraph(null);
+      setGraphError(null);
+      setGraphLoading(false);
+      return;
+    }
+    const ctrl = new AbortController();
+    setGraphLoading(true);
+    setGraphError(null);
+    api
+      .post<ConceptGraphData>(
+        '/v1/concept_graph',
+        {
+          space: space.id,
+          vault,
+          scope,
+          max_nodes: GRAPH_MAX_NODES,
+          ...(kind ? { kind } : {}),
+          ...(scopeState ? { scope_state: scopeState } : {}),
+          ...rangeParams(range),
+        },
+        ctrl.signal,
+      )
+      .then(({ data }) => {
+        setGraph(data);
+        setGraphLoading(false);
+      })
+      .catch((err) => {
+        if (isAbort(err) || ctrl.signal.aborted) return;
+        setGraphError(err);
+        setGraphLoading(false);
+      });
+    return () => ctrl.abort();
+  }, [api, view, space.id, vault, kind, scopeState, scope, range.from, range.to, tick]);
 
   const total = page?.total ?? page?.items.length ?? 0;
 
@@ -120,6 +189,9 @@ function ConceptList() {
           </>
         }
       >
+        <div class="lv-filter-panel__row">
+          <ChipGroup label="檢視" groupLabel="檢視方式" options={VIEWS} value={view} onChange={setView} />
+        </div>
         <div class="lv-filter-panel__row">
           <VaultPicker />
           <label class="lv-filters__group">
@@ -136,35 +208,146 @@ function ConceptList() {
         </div>
         <div class="lv-filter-panel__row">
           <ChipGroup label="SCOPE" groupLabel="scope 狀態" options={SCOPE_STATES} value={scopeState} onChange={setScopeState} />
-          <TextFilter value={scope} onApply={setScope} inputLabel="scope 名稱" placeholder="repo scope（不分大小寫）" submitLabel="套用 scope" />
+          {view === 'graph' ? (
+            <ScopeSelect scopes={scopes} value={scope} onChange={setScope} />
+          ) : (
+            <TextFilter value={scope} onApply={setScope} inputLabel="scope 名稱" placeholder="repo scope（不分大小寫）" submitLabel="套用 scope" />
+          )}
         </div>
       </FilterPanel>
 
-      {error !== null && <ErrorState error={error} onRetry={() => setTick((t) => t + 1)} />}
-      {loading && !page && <Loading />}
-      {page && page.items.length === 0 && !loading && error === null && (
-        <EmptyState title="沒有符合條件的 concept">調整類型、scope、日期或 vault 篩選再試一次。</EmptyState>
-      )}
-      {page && page.items.length > 0 && (
-        <ul class="lv-concepts" data-testid="concepts" aria-busy={loading}>
-          {page.items.map((c) => (
-            <ConceptRow key={c.id} concept={c} showVault={vault === ALL} />
-          ))}
-        </ul>
-      )}
-      {page && total > 0 && (
-        <Pager
-          page={pageNo}
-          pageSize={pageSize}
-          total={total}
-          loading={loading}
-          unit="則"
-          label="concept 分頁"
-          onPage={setPageNo}
-          onPageSize={setPageSize}
+      {view === 'graph' ? (
+        <GraphPane
+          scope={scope}
+          graph={graph}
+          error={graphError}
+          loading={graphLoading}
+          onRetry={() => setTick((t) => t + 1)}
         />
+      ) : (
+        <>
+        {error !== null && <ErrorState error={error} onRetry={() => setTick((t) => t + 1)} />}
+        {loading && !page && <Loading />}
+        {page && page.items.length === 0 && !loading && error === null && (
+          <EmptyState title="沒有符合條件的 concept">調整類型、scope、日期或 vault 篩選再試一次。</EmptyState>
+        )}
+        {page && page.items.length > 0 && (
+          <ul class="lv-concepts" data-testid="concepts" aria-busy={loading}>
+            {page.items.map((c) => (
+              <ConceptRow key={c.id} concept={c} showVault={vault === ALL} />
+            ))}
+          </ul>
+        )}
+        {page && total > 0 && (
+          <Pager
+            page={pageNo}
+            pageSize={pageSize}
+            total={total}
+            loading={loading}
+            unit="則"
+            label="concept 分頁"
+            onPage={setPageNo}
+            onPageSize={setPageSize}
+          />
+        )}
+        </>
       )}
     </div>
+  );
+}
+
+function ScopeSelect({
+  scopes,
+  value,
+  onChange,
+}: {
+  scopes: ConceptScopeCount[];
+  value: string;
+  onChange: (scope: string) => void;
+}) {
+  const named = scopes.filter((s): s is { scope: string; count: number } => s.scope !== null);
+  const generic = scopes.find((s) => s.scope === null);
+  // 目前的 scope（例如從列表帶過來的輸入）不在選項裡時補一個，避免下拉顯示成「全部」
+  const missing = value && !named.some((s) => s.scope.toLowerCase() === value.toLowerCase());
+  return (
+    <label class="lv-filters__group">
+      <span class="lv-filters__label">scope</span>
+      <select class="lv-input lv-select" value={value} aria-label="scope 名稱" onChange={(e) => onChange((e.target as HTMLSelectElement).value)}>
+        <option value="">全部</option>
+        {missing && <option value={value}>{value}</option>}
+        {named.map((s) => (
+          <option key={s.scope} value={s.scope}>
+            {s.scope}（{s.count}）
+          </option>
+        ))}
+        {generic && (
+          <option value="" disabled>
+            通用・無 scope（{generic.count}，不能畫圖）
+          </option>
+        )}
+      </select>
+    </label>
+  );
+}
+
+function GraphPane({
+  scope,
+  graph,
+  error,
+  loading,
+  onRetry,
+}: {
+  scope: string;
+  graph: ConceptGraphData | null;
+  error: unknown;
+  loading: boolean;
+  onRetry: () => void;
+}) {
+  if (!scope) {
+    return (
+      <EmptyState testId="graph-need-scope" title="請先選擇 scope">
+        圖譜一次只畫一個 scope 的 concept。請在上方 scope 下拉選單選一個 scope；選「全部」時不顯示圖譜。
+      </EmptyState>
+    );
+  }
+  return <GraphBody graph={graph} error={error} loading={loading} onRetry={onRetry} />;
+}
+
+type GraphComponent = ComponentType<{ data: ConceptGraphData; maxNodes: number }>;
+
+function GraphBody({
+  graph,
+  error,
+  loading,
+  onRetry,
+}: {
+  graph: ConceptGraphData | null;
+  error: unknown;
+  loading: boolean;
+  onRetry: () => void;
+}) {
+  // 圖譜元件連同 d3 在切到圖譜時才載入，不進主 bundle
+  const [Graph, setGraph] = useState<GraphComponent | null>(null);
+  const [loadFailed, setLoadFailed] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    import('../components/ConceptGraph')
+      .then((m) => alive && setGraph(() => m.ConceptGraph))
+      .catch(() => alive && setLoadFailed(true));
+    return () => {
+      alive = false;
+    };
+  }, []);
+  return (
+    <>
+      {error !== null && <ErrorState error={error} onRetry={onRetry} />}
+      {loadFailed && <ErrorState error={new Error('圖譜元件載入失敗，請重新整理頁面')} />}
+      {(loading || (!Graph && !loadFailed)) && !graph && <Loading />}
+      {graph && graph.nodes.length === 0 && !loading && error === null && (
+        <EmptyState title="這個 scope 沒有符合條件的 concept">調整類型、日期或 vault 篩選再試一次。</EmptyState>
+      )}
+      {graph && graph.nodes.length > 0 && Graph && <Graph data={graph} maxNodes={GRAPH_MAX_NODES} />}
+    </>
   );
 }
 
@@ -185,8 +368,7 @@ function anchorText(anchors: unknown): string[] {
 function ConceptRow({ concept, showVault }: { concept: ConceptItem; showVault: boolean }) {
   const { vaults } = useApp();
   const anchors = anchorText(concept.anchors);
-  const scopeText =
-    concept.scope_state === 'global' ? '跨專案' : concept.scope_state === 'missing' ? '缺 scope' : (concept.scope ?? '—');
+  const scopeText = scopeLabel(concept.scope_state, concept.scope);
   return (
     <li class="lv-concept" data-kind={concept.kind}>
       <div class="lv-concept__main">
@@ -217,8 +399,12 @@ function ConceptRow({ concept, showVault }: { concept: ConceptItem; showVault: b
         <Badge tone="score" label="surprisal">
           {typeof concept.surprisal === 'number' ? concept.surprisal.toFixed(2) : '—'}
         </Badge>
-        <Badge tone={concept.usability_verdict ? 'tag' : 'plain'} label="可用性">
-          {concept.usability_verdict ?? '未校準'}
+        <Badge
+          tone={concept.usability_verdict ? 'tag' : 'plain'}
+          label="可用性"
+          title="注入實驗判定，非 surprisal 校準"
+        >
+          {concept.usability_verdict ?? '未驗證'}
         </Badge>
         <Badge tone="time" label="更新">
           {formatTime(concept.updated)}

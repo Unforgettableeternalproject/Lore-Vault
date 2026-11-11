@@ -369,6 +369,27 @@ export interface ConceptPage {
   total?: number;
 }
 
+/** `concept_graph` 的邊：兩個 concept 共用 anchor；weight＝共用的 anchor 數，via 最多 3 個 */
+export interface ConceptEdge {
+  source: string;
+  target: string;
+  weight: number;
+  via: string[];
+}
+
+/** `concept_scopes`：scope 為 null 的是沒有 scope 的 concept（通用） */
+export interface ConceptScopeCount {
+  scope: string | null;
+  count: number;
+}
+
+export interface ConceptGraphData {
+  nodes: ConceptItem[];
+  edges: ConceptEdge[];
+  truncated: boolean;
+  total: number;
+}
+
 export interface EpisodeGroup {
   machine?: string | null;
   vault?: string | null;

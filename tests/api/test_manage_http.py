@@ -14,7 +14,7 @@ from lore_vault.config import Config, DocumentsConfig, EmbeddingConfig
 from lore_vault.documents.worker import DocumentWorker
 from lore_vault.storage.blobs import BlobStore
 from lore_vault.storage.db import connect
-from lore_vault.storage.manage import MAX_MANUAL_RETRIES
+from lore_vault.storage.manage import MAX_MANUAL_RETRIES, derive_concept_edges
 
 from .conftest import DIM, FakeEmbedder, create_vault, write_note
 from .test_spike_endpoints import episode, spike_concept
@@ -715,6 +715,198 @@ def test_concept_query_filters_and_pages(memory):
     assert none["items"] == [] and none["next_cursor"] is None
     resp = post(memory, "/v1/concept_query", space="dev", vault="*", scope_state="x")
     assert code(resp) == "invalid_request"
+
+
+# ── concept_graph：共用 anchor 推導的關聯圖（唯讀，沒有新資料流） ──
+
+
+def _item(cid: str, *anchors: str) -> dict:
+    return {"id": cid, "anchors": list(anchors)}
+
+
+def test_derive_edges_weight_counts_shared_anchors_and_via_capped():
+    items = [
+        _item("a", "x", "y", "z", "w", "x"),  # 重複 anchor 只算一次
+        _item("b", "x", "y", "z", "w"),
+        _item("c", "y"),
+        _item("d", "solo"),
+    ]
+    edges = {(e["source"], e["target"]): e for e in derive_concept_edges(items)}
+    assert set(edges) == {("a", "b"), ("a", "c"), ("b", "c")}
+    assert edges[("a", "b")]["weight"] == 4
+    assert edges[("a", "b")]["via"] == ["w", "x", "y"]  # 最多 3 個、排序後取前段
+    assert edges[("a", "c")] == {
+        "source": "a",
+        "target": "c",
+        "weight": 1,
+        "via": ["y"],
+    }
+
+
+def test_derive_edges_skips_anchor_shared_by_more_than_cap():
+    items = [_item(f"n{i}", "root", f"own{i}") for i in range(4)]
+    assert derive_concept_edges(items, anchor_fanout_cap=3) == []
+    assert (
+        len(derive_concept_edges(items, anchor_fanout_cap=4)) == 6
+    )  # 剛好等於上限仍算
+
+
+@pytest.fixture
+def graph(client):
+    create_vault(client, REPO, display="Repo-X")
+
+    def concept(cid: str, anchors: list[str], **extra) -> dict:
+        return spike_concept(
+            cid,
+            scope="graph-x",
+            anchors=anchors,
+            probe=SECRET,
+            why=SECRET,
+            usability={"verdict": "APPLIED", "evidence": SECRET, "note": SECRET},
+            **extra,
+        )
+
+    concepts = [
+        concept("g-0", ["a.py", "shared"]),
+        concept("g-1", ["a.py", "b.py"]),
+        concept("g-2", ["b.py", "shared"], kind="user-stance"),
+        concept("g-3", ["lonely.py"]),
+        spike_concept("other", scope="other-scope", anchors=["a.py"]),
+    ]
+    ok(
+        client.post(
+            "/v1/concepts", json={"mode": "upsert", "vault": REPO, "concepts": concepts}
+        )
+    )
+    return client
+
+
+def _graph(client, **body) -> dict:
+    return ok(
+        post(
+            client, "/v1/concept_graph", space="dev", vault="*", scope="graph-x", **body
+        )
+    )
+
+
+def test_concept_graph_nodes_edges_and_whitelist(graph):
+    data = _graph(graph)
+    assert data["truncated"] is False and data["total"] == 4
+    assert sorted(n["id"] for n in data["nodes"]) == ["g-0", "g-1", "g-2", "g-3"]
+    assert set(data["nodes"][0]) == {
+        "id",
+        "vault",
+        "kind",
+        "scope",
+        "scope_state",
+        "statement",
+        "anchors",
+        "surprisal",
+        "usability_verdict",
+        "updated",
+    }
+    assert {(e["source"], e["target"]): e["weight"] for e in data["edges"]} == {
+        ("g-0", "g-1"): 1,
+        ("g-0", "g-2"): 1,
+        ("g-1", "g-2"): 1,
+    }
+    assert any(n["id"] == "g-3" for n in data["nodes"])  # 孤立節點照樣回傳
+    assert SECRET not in json.dumps(data)
+
+
+def test_concept_graph_filters_by_kind(graph):
+    data = _graph(graph, kind="user-stance")
+    assert [n["id"] for n in data["nodes"]] == ["g-2"] and data["edges"] == []
+
+
+def test_concept_graph_fanout_cap_drops_common_anchor(graph):
+    # a.py 被 g-0／g-1 共用（2 個）；上限 2 時仍成邊，shared 與 b.py 同為 2
+    assert len(_graph(graph, anchor_fanout_cap=2)["edges"]) == 3
+
+
+def test_concept_graph_truncates_by_degree(graph):
+    # g-3 孤立（degree 0）；其餘三者彼此相連（degree 2）。取前 3 個應留下連通的三個
+    data = _graph(graph, max_nodes=3)
+    assert data["truncated"] is True and data["total"] == 4
+    assert sorted(n["id"] for n in data["nodes"]) == ["g-0", "g-1", "g-2"]
+    assert len(data["edges"]) == 3
+    one = _graph(graph, max_nodes=1)
+    assert len(one["nodes"]) == 1 and one["edges"] == []  # 邊不指向被截掉的節點
+
+
+def test_concept_graph_empty_scope_and_bad_args(graph):
+    empty = ok(post(graph, "/v1/concept_graph", space="dev", vault="*", scope="nope"))
+    assert empty == {"nodes": [], "edges": [], "truncated": False, "total": 0}
+    for bad in ({"max_nodes": 0}, {"max_nodes": 1501}, {"anchor_fanout_cap": 1}):
+        assert (
+            code(
+                post(
+                    graph, "/v1/concept_graph", space="dev", vault="*", scope="x", **bad
+                )
+            )
+            == "invalid_request"
+        )
+    assert (
+        code(post(graph, "/v1/concept_graph", space="dev", vault="*", scope=""))
+        == "invalid_request"
+    )
+    assert post(graph, "/v1/concept_graph", space="dev", vault="*").status_code == 422
+    resp = post(
+        graph, "/v1/concept_graph", space="dev", vault="*", scope="x", scope_state="x"
+    )
+    assert code(resp) == "invalid_request"
+
+
+def test_concept_graph_empty_outside_dev(graph):
+    for space in ("lore", "personal"):
+        data = ok(
+            post(graph, "/v1/concept_graph", space=space, vault="*", scope="graph-x")
+        )
+        assert data["nodes"] == [] and data["total"] == 0
+        resp = post(
+            graph, "/v1/concept_graph", space=space, vault=REPO, scope="graph-x"
+        )
+        assert resp.status_code == 404 and code(resp) == "unknown_vault"
+
+
+def test_concept_scopes_counts_sorted_with_null_group(memory):
+    data = ok(post(memory, "/v1/concept_scopes", space="dev", vault="*"))
+    # fixture：c-0、c-1 屬 Repo-X（scope 不分大小寫合併），c-2 無 scope（通用）
+    assert [
+        (s["scope"].lower() if s["scope"] else None, s["count"]) for s in data["scopes"]
+    ] == [
+        ("repo-x", 2),
+        (None, 1),
+    ]
+    only_global = ok(
+        post(memory, "/v1/concept_scopes", space="dev", vault="*", scope_state="global")
+    )
+    assert only_global["scopes"] == [{"scope": None, "count": 1}]
+    assert (
+        ok(
+            post(
+                memory, "/v1/concept_scopes", space="dev", vault="*", kind="user-stance"
+            )
+        )["scopes"]
+        == []
+    )
+    assert (
+        code(
+            post(memory, "/v1/concept_scopes", space="dev", vault="*", scope_state="x")
+        )
+        == "invalid_request"
+    )
+    assert SECRET not in post(memory, "/v1/concept_scopes", space="dev", vault="*").text
+
+
+def test_concept_scopes_empty_outside_dev(memory):
+    for space in ("lore", "personal"):
+        assert (
+            ok(post(memory, "/v1/concept_scopes", space=space, vault="*"))["scopes"]
+            == []
+        )
+        resp = post(memory, "/v1/concept_scopes", space=space, vault=REPO)
+        assert resp.status_code == 404 and code(resp) == "unknown_vault"
 
 
 def test_episode_summary_counts_without_text(memory):

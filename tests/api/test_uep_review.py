@@ -429,6 +429,8 @@ def test_uep_cannot_undelete_upload_or_use_admin_endpoints(rig):
             {"space": "lore", "vault": LORE, "id": "x", "expected_updated": "x"},
         ),
         ("/v1/snapshot", {}),
+        ("/v1/concept_graph", {"space": "dev", "vault": DEV, "scope": "x"}),
+        ("/v1/concept_scopes", {"space": "dev", "vault": DEV}),
     ]:
         _error(rig.uep.post(path, json=payload), 403, "uep_endpoint_forbidden")
     upload = rig.uep.post(
