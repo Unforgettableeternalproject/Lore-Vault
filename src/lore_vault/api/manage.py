@@ -283,6 +283,24 @@ class ConceptQueryRequest(_ScopedReq):
     with_total: bool = False
 
 
+class ConceptGraphRequest(_ScopedReq):
+    vault: str | None = None
+    scope: str
+    scope_state: str | None = None
+    kind: str | None = None
+    since: str | None = None
+    until: str | None = None
+    # 範圍檢查（max_nodes 上限、fanout 下限）在儲存層，違規回 400 invalid_request
+    max_nodes: int = store.GRAPH_DEFAULT_MAX_NODES
+    anchor_fanout_cap: int = store.GRAPH_DEFAULT_FANOUT_CAP
+
+
+class ConceptScopesRequest(_ScopedReq):
+    vault: str | None = None
+    scope_state: str | None = None
+    kind: str | None = None
+
+
 class EpisodeSummaryRequest(_ScopedReq):
     vault: str | None = None
 
@@ -640,6 +658,39 @@ def concept_query(request: Request, req: ConceptQueryRequest) -> dict[str, Any]:
     if total is not None:
         result["total"] = total
     return result
+
+
+@router.post("/concept_graph")
+def concept_graph(request: Request, req: ConceptGraphRequest) -> dict[str, Any]:
+    """單一 scope 的 concept 關聯圖（共用 anchor 推導、唯讀），欄位同 concept_query。"""
+    with _state(request).connection() as conn:
+        result = store.concept_graph(
+            conn,
+            req.vault,
+            space=req.space,
+            scope=req.scope,
+            scope_state=req.scope_state,
+            kind=req.kind,
+            since=req.since,
+            until=req.until,
+            max_nodes=req.max_nodes,
+            anchor_fanout_cap=req.anchor_fanout_cap,
+        )
+    return result
+
+
+@router.post("/concept_scopes")
+def concept_scopes(request: Request, req: ConceptScopesRequest) -> dict[str, Any]:
+    """各 scope 的 concept 筆數（UI 的 scope 下拉選單；唯讀）。"""
+    with _state(request).connection() as conn:
+        scopes = store.concept_scopes(
+            conn,
+            req.vault,
+            space=req.space,
+            scope_state=req.scope_state,
+            kind=req.kind,
+        )
+    return {"scopes": scopes}
 
 
 @router.post("/episode_summary")

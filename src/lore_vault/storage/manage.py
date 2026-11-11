@@ -611,6 +611,136 @@ def _concept_item(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def concept_scopes(
+    conn: sqlite3.Connection,
+    vault: object,
+    *,
+    space: object,
+    scope_state: str | None = None,
+    kind: str | None = None,
+) -> list[dict[str, Any]]:
+    """範圍內各 scope 的 concept 筆數（多到少、同數依名稱；scope 比對不分大小寫）。
+    沒有 scope 的 concept（通用）合為 `scope: None` 一組。"""
+    conditions, args = _concept_filters(
+        conn,
+        vault,
+        space=space,
+        scope=None,
+        scope_state=scope_state,
+        kind=kind,
+        since=None,
+        until=None,
+    )
+    rows = conn.execute(
+        f"""
+        SELECT scope, count(*) AS n FROM concepts
+        WHERE {" AND ".join(conditions)}
+        GROUP BY scope COLLATE NOCASE
+        ORDER BY n DESC, scope COLLATE NOCASE
+        """,
+        args,
+    ).fetchall()
+    return [{"scope": r["scope"], "count": int(r["n"])} for r in rows]
+
+
+GRAPH_DEFAULT_MAX_NODES = 500
+GRAPH_MAX_NODES_CAP = 1500
+GRAPH_DEFAULT_FANOUT_CAP = 30
+GRAPH_VIA_LIMIT = 3
+
+
+def derive_concept_edges(
+    items: list[dict[str, Any]], *, anchor_fanout_cap: int = GRAPH_DEFAULT_FANOUT_CAP
+) -> list[dict[str, Any]]:
+    """由共用 anchor 推導 concept 之間的邊（純函式，不碰資料庫）。
+
+    兩個 concept 共用 anchor 即有一條邊，`weight`＝共用的相異 anchor 數，`via`＝
+    共用的 anchor（排序後最多 `GRAPH_VIA_LIMIT` 個）。被超過 `anchor_fanout_cap`
+    個 concept 共用的 anchor 太泛（例如專案根目錄），略過、不產生邊。
+    `source`＜`target`（以 id 字串比較），結果依 (source, target) 排序。
+    """
+    members: dict[str, list[str]] = {}
+    for item in items:
+        for anchor in {a for a in item["anchors"] if a}:
+            members.setdefault(anchor, []).append(item["id"])
+    shared: dict[tuple[str, str], list[str]] = {}
+    for anchor in sorted(members):
+        ids = sorted(set(members[anchor]))
+        if len(ids) < 2 or len(ids) > anchor_fanout_cap:
+            continue
+        for i, a in enumerate(ids):
+            for b in ids[i + 1 :]:
+                shared.setdefault((a, b), []).append(anchor)
+    return [
+        {
+            "source": a,
+            "target": b,
+            "weight": len(via),
+            "via": via[:GRAPH_VIA_LIMIT],
+        }
+        for (a, b), via in sorted(shared.items())
+    ]
+
+
+def concept_graph(
+    conn: sqlite3.Connection,
+    vault: object,
+    *,
+    space: object,
+    scope: str,
+    scope_state: str | None = None,
+    kind: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    max_nodes: int = GRAPH_DEFAULT_MAX_NODES,
+    anchor_fanout_cap: int = GRAPH_DEFAULT_FANOUT_CAP,
+) -> dict[str, Any]:
+    """單一 scope 的 concept 圖：節點沿用 `_concept_item` 白名單，邊見
+    `derive_concept_edges`。孤立節點照樣回傳；節點超過 `max_nodes` 時依 degree
+    （相鄰節點數，同值依 updated 較新者）取前 N 個、邊只留兩端都入選者，
+    `truncated` 為 true。`total`＝篩選條件下的 concept 總數。
+    """
+    if not scope:
+        raise ValueError("scope 必填")
+    if not 0 < max_nodes <= GRAPH_MAX_NODES_CAP:
+        raise ValueError(f"max_nodes 必須在 1～{GRAPH_MAX_NODES_CAP}，得到 {max_nodes}")
+    if anchor_fanout_cap < 2:
+        raise ValueError(f"anchor_fanout_cap 至少為 2，得到 {anchor_fanout_cap}")
+    conditions, args = _concept_filters(
+        conn,
+        vault,
+        space=space,
+        scope=scope,
+        scope_state=scope_state,
+        kind=kind,
+        since=since,
+        until=until,
+    )
+    rows = conn.execute(
+        f"""
+        SELECT id, vault, kind, scope_state, scope, data, updated FROM concepts
+        WHERE {" AND ".join(conditions)}
+        ORDER BY updated DESC, id DESC
+        """,
+        args,
+    ).fetchall()
+    nodes = [_concept_item(r) for r in rows]
+    edges = derive_concept_edges(nodes, anchor_fanout_cap=anchor_fanout_cap)
+    total = len(nodes)
+    truncated = total > max_nodes
+    if truncated:
+        degree: dict[str, int] = {}
+        for e in edges:
+            degree[e["source"]] = degree.get(e["source"], 0) + 1
+            degree[e["target"]] = degree.get(e["target"], 0) + 1
+        # nodes 已是 updated 由新到舊；穩定排序讓同 degree 者維持較新優先
+        picked = sorted(nodes, key=lambda n: -degree.get(n["id"], 0))[:max_nodes]
+        keep = {n["id"] for n in picked}
+        nodes = [n for n in nodes if n["id"] in keep]
+        edges = [e for e in edges if e["source"] in keep and e["target"] in keep]
+    return {"nodes": nodes, "edges": edges, "truncated": truncated, "total": total}
+
+
 def episode_summary(
     conn: sqlite3.Connection, vault: object, *, space: object
 ) -> dict[str, Any]:

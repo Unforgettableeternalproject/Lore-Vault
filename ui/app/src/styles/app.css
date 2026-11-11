@@ -13,6 +13,12 @@
   --lv-info-text: #1d5fa8;
   --lv-zone-text: var(--accent-ink);
   --lv-focus: var(--accent-ink);
+  /* 概念圖譜（canvas 由 JS 讀這些自訂屬性）：依 kind 上色，深淺主題各一組 */
+  --lv-graph-fact: #8a4423;
+  --lv-graph-correction: #1d5fa8;
+  --lv-graph-stance: #17754a;
+  --lv-graph-other: #6b6558;
+  --lv-graph-edge: rgba(59, 65, 80, .55);
   --lv-content-max: 1600px;
   /* 按鈕、篩選 chip、徽章的圓角：方形（Eternity 文件站風格），見「按鈕形狀」段 */
   --lv-radius-control: 2px;
@@ -33,6 +39,11 @@
   --lv-info-text: var(--status-info);
   --lv-zone-text: var(--uep-gold);
   --lv-focus: var(--uep-gold);
+  --lv-graph-fact: #e0a06a;
+  --lv-graph-correction: #6fb0f0;
+  --lv-graph-stance: #4fd09a;
+  --lv-graph-other: #9a9585;
+  --lv-graph-edge: rgba(236, 233, 223, .5);
 }
 /* 自訂屬性在宣告處解析：zone 文字色要宣告在帶 data-zone 的元素上才吃得到該 zone 的色 */
 [data-zone] { --lv-zone-text: var(--zone-main); }
@@ -1029,6 +1040,44 @@ details.lv-check > .lv-check__head { cursor: pointer; }
 .lv-concept__side { display: flex; flex-direction: column; gap: 5px; align-items: flex-end; }
 .lv-episode-group { margin-top: 16px; }
 
+/* 概念圖譜：canvas 與側欄（節點清單是 canvas 的文字替代） */
+.lv-graph { margin-top: 12px; }
+.lv-graph__body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(240px, 320px); gap: 16px; margin-top: 12px; align-items: start; }
+.lv-graph__stage { position: relative; min-width: 0; }
+.lv-graph__canvas {
+  display: block; width: 100%; height: 560px; background: var(--bg-sunken);
+  border: 1px solid var(--line-strong); touch-action: none; cursor: grab;
+}
+.lv-graph__canvas.is-pointer { cursor: pointer; }
+.lv-graph__canvas:active { cursor: grabbing; }
+.lv-graph__tools { position: absolute; top: 8px; right: 8px; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.lv-graph__tools .btn-outline { background: var(--bg-card); padding: 4px 10px; }
+.lv-graph__legend { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px 16px; color: var(--ink-soft); }
+.lv-graph__legend-item { display: inline-flex; align-items: center; gap: 6px; }
+.lv-graph__swatch { width: 12px; height: 12px; border-radius: 50%; background: var(--lv-graph-other); }
+.lv-graph__swatch[data-token='--lv-graph-fact'] { background: var(--lv-graph-fact); }
+.lv-graph__swatch[data-token='--lv-graph-correction'] { background: var(--lv-graph-correction); }
+.lv-graph__swatch[data-token='--lv-graph-stance'] { background: var(--lv-graph-stance); }
+.lv-graph__hint { margin: 6px 0 0; }
+.lv-graph__side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.lv-graph__detail { border: 1px solid var(--line-strong); padding: 12px; display: flex; flex-direction: column; gap: 8px; background: var(--bg-card); }
+.lv-graph__detail-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.lv-graph__detail-head .lv-side-block__label { margin-bottom: 0; }
+.lv-graph__anchors { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; color: var(--ink-soft); overflow-wrap: anywhere; }
+.lv-graph__nodes { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.lv-graph__nodes p { margin: 0; }
+.lv-graph__list { list-style: none; margin: 0; padding: 0; max-height: 320px; overflow-y: auto; border: 1px solid var(--line); }
+.lv-graph__detail .lv-graph__list { max-height: 220px; }
+.lv-graph__item {
+  display: flex; flex-direction: column; gap: 2px; align-items: flex-start; width: 100%; text-align: left;
+  padding: 8px 10px; background: transparent; border: 0; border-bottom: 1px solid var(--line);
+  color: var(--ink); font: inherit; cursor: pointer;
+}
+.lv-graph__item:hover { background: var(--bg-soft); }
+.lv-graph__item[aria-pressed='true'] { background: var(--bg-soft); box-shadow: inset 3px 0 0 var(--lv-focus); }
+.lv-graph__item-text { font-size: var(--lv-fs-body); overflow-wrap: anywhere; }
+.lv-graph__item-meta { color: var(--ink-soft); overflow-wrap: anywhere; }
+
 .lv-test-rows { list-style: none; margin: 16px 0 0; padding: 0; border: 1px solid var(--line); }
 .lv-test-row { display: grid; grid-template-columns: 20px 90px minmax(0, 1fr); gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--line); font-size: var(--lv-fs-body); }
 .lv-test-row:last-child { border-bottom: none; }
@@ -1158,7 +1207,7 @@ details.lv-check > .lv-check__head { cursor: pointer; }
   .lv-table--vaults { grid-template-columns: minmax(0, 1fr) 52px 52px 110px 90px auto; column-gap: 10px; }
   .lv-table__head, .lv-table__row { gap: 10px; }
   .lv-doc__grid { grid-template-columns: minmax(140px, 180px) minmax(0, 1fr); gap: 24px; }
-  .lv-health-grid, .lv-memory-grid { grid-template-columns: minmax(0, 1fr); }
+  .lv-health-grid, .lv-memory-grid, .lv-graph__body { grid-template-columns: minmax(0, 1fr); }
   /* 單欄時改回整頁捲動（內層捲動在窄螢幕難操作） */
   .lv-health-groups { max-height: none; overflow: visible; position: static; padding-right: 0; }
   .lv-detail { gap: 32px; grid-template-columns: minmax(0, 1fr) minmax(220px, 280px); }
@@ -1242,6 +1291,7 @@ details.lv-check > .lv-check__head { cursor: pointer; }
   .lv-health-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .lv-check__body { padding-left: 14px; }
   .lv-concept { grid-template-columns: minmax(0, 1fr); }
+  .lv-graph__canvas { height: 420px; }
   .lv-concept__side { flex-direction: row; flex-wrap: wrap; gap: 6px; align-items: center; }
   .lv-alias { grid-template-columns: minmax(0, 1fr) auto; }
   .lv-vcards { grid-template-columns: minmax(0, 1fr); }

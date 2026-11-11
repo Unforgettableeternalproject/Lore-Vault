@@ -134,6 +134,8 @@ def test_openapi_is_served_behind_auth(anon):
         "/v1/document_undelete",
         "/v1/document_retry",
         "/v1/concept_query",
+        "/v1/concept_graph",
+        "/v1/concept_scopes",
         "/v1/episode_summary",
         "/v1/topics",
         # 執行期設定（D13；只允許 UI session）
