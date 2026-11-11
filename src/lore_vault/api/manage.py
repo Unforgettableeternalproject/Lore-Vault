@@ -27,23 +27,24 @@ app 程序隨機產生（服務重啟後舊 token 失效）。驗證失敗 400 `
 
 from __future__ import annotations
 
-import base64
 import binascii
-import hashlib
-import hmac
 import json
-import secrets
 import sqlite3
 import threading
-import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from lore_vault.confirm import (
+    ConfirmSigner,
+    plan_digest,
+)
+from lore_vault.confirm import b64 as _b64
+from lore_vault.confirm import canonical as _canonical
+from lore_vault.confirm import unb64 as _unb64
 from lore_vault.notes import InvalidCursor
 from lore_vault.notes import review as review_service
 from lore_vault.schema import canonical_key
@@ -54,18 +55,12 @@ from lore_vault.storage.errors import UnknownVault
 from lore_vault.storage.timeutil import format_utc
 from lore_vault.storage.vaults import validate_space
 
-from .errors import (
-    ConfirmPlanChanged,
-    ConfirmTokenExpired,
-    ConfirmTokenInvalid,
-    DocumentsNotConfigured,
-)
+from .errors import ConfirmPlanChanged, DocumentsNotConfigured
 from .principals import principal_of
 from .state import AppState
 
 router = APIRouter(prefix="/v1")
 
-CONFIRM_TTL_SECONDS = 300
 DEFAULT_PAGE = 50
 
 
@@ -73,61 +68,7 @@ def _state(request: Request) -> AppState:
     return request.app.state.lore
 
 
-# ── 確認 token ──
-
-
-def _b64(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
-
-
-def _unb64(text: str) -> bytes:
-    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
-
-
-def _canonical(value: Any) -> bytes:
-    return json.dumps(
-        value, sort_keys=True, ensure_ascii=False, separators=(",", ":")
-    ).encode("utf-8")
-
-
-def plan_digest(fingerprint: Any) -> str:
-    return hashlib.sha256(_canonical(fingerprint)).hexdigest()
-
-
-@dataclass
-class ConfirmSigner:
-    """簽發與驗證確認 token。祕密與時鐘掛在 app.state 上（測試可注入時鐘）。"""
-
-    secret: bytes = field(default_factory=lambda: secrets.token_bytes(32))
-    ttl: float = CONFIRM_TTL_SECONDS
-    clock: Callable[[], float] = time.time
-
-    def _sign(self, body: bytes) -> str:
-        return _b64(hmac.new(self.secret, body, hashlib.sha256).digest())
-
-    def issue(self, op: str, args: dict[str, Any], digest: str) -> tuple[str, float]:
-        expires = self.clock() + self.ttl
-        payload = {"op": op, "args": args, "digest": digest, "exp": expires}
-        body = _canonical(payload)
-        return f"{_b64(body)}.{self._sign(body)}", expires
-
-    def verify(self, token: str, op: str, args: dict[str, Any]) -> str:
-        """回傳 token 綁定的規劃 digest。簽章在前：竄改過的內容一律不解讀。"""
-        try:
-            encoded, signature = token.split(".")
-            body = _unb64(encoded)
-        except (ValueError, binascii.Error):
-            raise ConfirmTokenInvalid("確認 token 格式錯誤") from None
-        if not hmac.compare_digest(signature, self._sign(body)):
-            raise ConfirmTokenInvalid("確認 token 簽章不符（遭竄改或來自其他服務程序）")
-        payload = json.loads(body)
-        if payload.get("op") != op or payload.get("args") != args:
-            raise ConfirmTokenInvalid(
-                "確認 token 與這次請求的操作或參數不符；請以規劃時相同的參數送出"
-            )
-        if self.clock() > float(payload["exp"]):
-            raise ConfirmTokenExpired("確認 token 已過期，請重新規劃")
-        return str(payload["digest"])
+# ── 確認 token（簽章邏輯在 `lore_vault.confirm`，殼共用）──
 
 
 _SIGNER_LOCK = threading.Lock()

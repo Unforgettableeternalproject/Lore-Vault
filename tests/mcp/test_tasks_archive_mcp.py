@@ -545,3 +545,43 @@ async def test_tool_schema_has_no_authorization_input(app, project):
         if "authoriz" in lowered or "approv" in lowered:
             assert key == "requires_authorization", key
     assert not keys & {"authorized_by", "authorization", "approved_by", "author_ized"}
+
+
+# ── 非預期例外 → 結構化 internal_error（guard_tool）──────────────────
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        KeyError("missing"),
+        RuntimeError(""),
+        ImportError("cannot import name 'x' from 'lore_vault.schema'"),
+        MemoryError(),
+        OSError("disk gone"),
+    ],
+    ids=lambda e: type(e).__name__,
+)
+async def test_archive_unexpected_exception_is_structured_internal_error(
+    db, spec_project, monkeypatch, caplog, exc
+):
+    app = make_app(db)
+    async with (
+        client_for(make_shell(app, spec_project)) as sc,
+        client_for(make_shell(app, spec_project, MODE_HTTP)) as hc,
+    ):
+        stdio, http = Tasks(sc), Tasks(hc)
+        await stdio.ok(action="init")
+        await setup_change(stdio, http, "boom")
+
+        async def explode(*args: Any, **kwargs: Any):
+            raise exc
+
+        monkeypatch.setattr(mcp_tools.remote_ops, "archive_plan", explode)
+        with caplog.at_level("ERROR", logger="lore_vault.mcp"):
+            payload = await http.err(action="archive", vault=VAULT, name="boom")
+
+    assert payload["error"]["code"] == "internal_error"
+    assert payload["error"]["message"].startswith(type(exc).__name__)
+    assert "重啟 MCP 殼" in payload["hint"]
+    # traceback 有落到 log
+    assert any(r.exc_info and r.exc_info[1] is exc for r in caplog.records)

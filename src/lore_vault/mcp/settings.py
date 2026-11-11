@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from os import PathLike
 from pathlib import Path
 
@@ -53,6 +53,12 @@ class ShellSettings:
     download_max_bytes: int = 25 * 1024 * 1024
     # 是否掛上任務層工具（`mcp.tasks_enabled`，見 `task_plugin.register`）
     tasks_enabled: bool = True
+    # 殼的輪替 log 檔（stdio 啟動時掛上；traceback 在這裡留底）
+    log_path: Path = field(default_factory=lambda: default_log_path())
+
+
+def default_log_path() -> Path:
+    return Path.home() / ".lore-vault" / "logs" / "mcp-shell.log"
 
 
 def load_shell_settings(
@@ -89,6 +95,9 @@ def load_shell_settings(
         ask_timeout=mcp.ask_timeout,
         download_max_bytes=config.documents.max_file_bytes,
         tasks_enabled=mcp.tasks_enabled,
+        log_path=Path(mcp.log_path).expanduser()
+        if mcp.log_path
+        else default_log_path(),
     )
 
 

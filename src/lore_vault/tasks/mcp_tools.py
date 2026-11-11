@@ -46,6 +46,12 @@ from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 
 from lore_vault.binding import resolve_binding
+from lore_vault.confirm import (
+    ConfirmSigner,
+    ConfirmTokenExpired,
+    ConfirmTokenInvalid,
+    plan_digest,
+)
 from lore_vault.mcp.client import ServiceError, ServiceUnreachable
 from lore_vault.mcp.server import (
     AUTHOR_FIELD_DESCRIPTION,
@@ -57,6 +63,7 @@ from lore_vault.mcp.workdir import is_system_dir
 
 from . import remote_ops, snapshot
 from . import remote_store as rs
+from .cli import _PROPOSAL_TEMPLATE, _TASKS_TEMPLATE, init_root
 from .decisions import DECISION_ID
 from .workspace import (
     DEFAULT_DIR,
@@ -452,8 +459,6 @@ class TaskOps:
         if target.local_root is None:
             result["local"] = self._local_skipped(target)
             return result
-        from .cli import init_root
-
         root = target.local_root
         files = init_root(root)
         ws = load_workspace(root, None, os.environ)
@@ -480,7 +485,6 @@ class TaskOps:
         requires_authorization: bool | None,
         skip_specs: bool | None,
     ) -> dict[str, Any]:
-        from .cli import _PROPOSAL_TEMPLATE, _TASKS_TEMPLATE
 
         name = rs.check_name(name)
         blocked = _decision_ids(_str_list(blocked_by or [], "blocked_by"))
@@ -817,10 +821,7 @@ class TaskOps:
 
     def _signer(self) -> Any:
         if self._confirm is None:
-            # 沿用服務端破壞性操作的 token 簽章（api.manage）；延遲載入，
-            # 只有用到 archive 時 stdio 殼才載入 API 層
-            from lore_vault.api.manage import ConfirmSigner
-
+            # 沿用服務端破壞性操作的 token 簽章（`lore_vault.confirm`，標準庫）
             self._confirm = ConfirmSigner(clock=lambda: _token_clock())
         return self._confirm
 
@@ -842,9 +843,6 @@ class TaskOps:
         confirm_token: str | None,
         author: str | None,
     ) -> dict[str, Any]:
-        from lore_vault.api.errors import ConfirmTokenExpired, ConfirmTokenInvalid
-        from lore_vault.api.manage import plan_digest
-
         name = rs.check_name(name)
         if self.shell.http and not vault:
             raise _tool_error(

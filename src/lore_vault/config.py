@@ -198,6 +198,9 @@ class McpConfig:
     # 是否把任務層工具（`mcp/task_plugin.py`）掛上 stdio 殼與 HTTP 端點；
     # 關閉時只有核心工具。與任務層遠端同步的寫入開關是兩回事
     tasks_enabled: bool = True
+    # stdio 殼的輪替 log 檔（1MB × 3 份，stderr 照常輸出）；
+    # 未設定 = `~/.lore-vault/logs/mcp-shell.log`
+    log_path: str | None = None
 
 
 @dataclass(frozen=True)
