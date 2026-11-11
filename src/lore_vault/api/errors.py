@@ -13,6 +13,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from lore_vault.ask import AskError, AskRateLimited
+from lore_vault.confirm import ConfirmTokenExpired, ConfirmTokenInvalid
 from lore_vault.documents.service import UploadRejected
 from lore_vault.notes import InvalidCursor, NoChanges, VersionConflict
 from lore_vault.notes.review import ReviewStateConflict, UepForbidden
@@ -119,14 +120,6 @@ class EpisodeIngestDisabled(Exception):
 
 class UiSessionRequired(Exception):
     """只允許以 UI 登入（session cookie）操作的管理端點，收到 bearer 請求。"""
-
-
-class ConfirmTokenInvalid(ValueError):
-    """確認 token 無法解析、簽章不符，或與這次請求的操作／參數不符（竄改或誤用）。"""
-
-
-class ConfirmTokenExpired(ValueError):
-    """確認 token 已過期：重新規劃取得新 token。"""
 
 
 class ConfirmPlanChanged(Exception):

@@ -10,7 +10,7 @@ stdio 的 `mcp/__main__.py` 與 HTTP 的 `mcp/http.py::build_http_server`；
   核心 13 個工具的清單與 schema 完全不變
 - 任務層是主套件的一部分（沒有 optional extra），載入失敗是 bug，不吞例外
 - 工具定義在 `lore_vault.tasks.mcp_tools.build_tools(shell)`；註冊慣例
-  （`structured_output=False`）由這裡統一套用，任務層工具不得與核心工具重名
+  （`structured_output=False`）與例外包裝（`guard_tool`）由這裡統一套用，任務層工具不得與核心工具重名
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from __future__ import annotations
 import importlib
 from typing import TYPE_CHECKING, Any
 
-from .server import TOOL_NAMES
+from .server import TOOL_NAMES, guard_tool
 
 if TYPE_CHECKING:
     from mcp.server.mcpserver import MCPServer
@@ -41,7 +41,7 @@ def register(server: MCPServer, shell: Shell) -> list[str]:
         if tool.name in TOOL_NAMES or tool.name in registered:
             raise ValueError(f"任務層工具 {tool.name!r} 與既有工具重名")
         server.add_tool(
-            tool.fn,
+            guard_tool(tool.fn),
             name=tool.name,
             description=tool.description,
             structured_output=False,

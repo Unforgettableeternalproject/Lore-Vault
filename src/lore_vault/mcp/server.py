@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import functools
 import hashlib
 import json
 import logging
@@ -1383,6 +1384,34 @@ def _dump(result: dict[str, Any]) -> str:
     return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
 
 
+INTERNAL_ERROR_HINT = "若程式剛更新過，請重啟 MCP 殼（/mcp 重連）後重試"
+
+
+def guard_tool(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """工具的共用例外包裝：任何非預期例外都轉成結構化的 `internal_error`。
+
+    FastMCP 對未處理的例外只回「Error executing tool <name>」，沒有任何線索；這裡
+    補上例外類別與訊息，並以 logger.exception 留下 traceback。
+    - 已是 `ToolError`（含 `_tool_error` 產生的結構化錯誤）原樣拋出
+    - 取消類例外（asyncio.CancelledError、anyio／trio 的取消）繼承自 BaseException，
+      不會被 `except Exception` 攔到，必須維持這樣，取消才能正常傳遞
+    """
+
+    @functools.wraps(fn)
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return await fn(*args, **kwargs)
+        except ToolError:
+            raise
+        except Exception as exc:
+            logger.exception("工具 %s 發生非預期例外", getattr(fn, "__name__", "?"))
+            raise _tool_error(
+                "internal_error", _describe(exc), hint=INTERNAL_ERROR_HINT
+            ) from None
+
+    return wrapper
+
+
 def build_server(shell: Shell) -> MCPServer:
     """註冊十三個工具。stdio 與 HTTP 共用同一份定義；只有 instructions 與 lifespan
     依 `shell.mode` 不同（HTTP 沒有快照背景工作）。"""
@@ -1844,6 +1873,9 @@ def build_server(shell: Shell) -> MCPServer:
     ):
         # 非結構化輸出：只回一份緊湊 JSON 文字，不重複送 structuredContent
         server.add_tool(
-            fn, name=name, description=descriptions[name], structured_output=False
+            guard_tool(fn),
+            name=name,
+            description=descriptions[name],
+            structured_output=False,
         )
     return server

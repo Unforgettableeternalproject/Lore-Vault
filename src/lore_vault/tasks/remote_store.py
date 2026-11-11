@@ -121,9 +121,12 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+import anyio.from_thread
+
 from lore_vault.api import task_format as tf
 
 from . import specs
+from .vault_client import ServiceRejected, ServiceUnavailable
 from .workspace import (
     META_FILE,
     NAME_RE,
@@ -981,10 +984,6 @@ class ThreadBridgeClient:
         self.store = store
 
     def _run(self, fn: Callable[..., Awaitable[Any]], *args: Any) -> Any:
-        import anyio.from_thread
-
-        from .vault_client import ServiceRejected, ServiceUnavailable
-
         try:
             return anyio.from_thread.run(fn, *args)
         except RemoteUnreachable as exc:
@@ -1025,7 +1024,6 @@ def vault_client_post(client: Any) -> Post:
 
     CLI 沒有事件迴圈，以 `asyncio.run(...)` 呼叫 `RemoteStore` 的方法即可；錯誤轉成
     `RemoteError`／`RemoteUnreachable`。"""
-    from .vault_client import ServiceRejected, ServiceUnavailable
 
     async def post(path: str, body: dict[str, Any]) -> dict[str, Any]:
         try:
