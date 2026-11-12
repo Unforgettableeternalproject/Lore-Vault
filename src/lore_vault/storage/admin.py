@@ -759,7 +759,8 @@ def delete_vault(
                 raise PlanChanged(f"vault {key!r} 仍有側載列未刪")
         done["aliases"] = plan.counts["aliases"]
         if _has_table(conn, "review_proposals"):
-            storage_proposals.close_for_vault(conn, key, reason="vault deleted")
+            # 提案 payload 含筆記原文：vault 刪除時一併刪掉，不留靜態副本
+            conn.execute("DELETE FROM review_proposals WHERE vault = ?", (key,))
         if conn.execute("DELETE FROM vaults WHERE key = ?", (key,)).rowcount != 1:
             raise PlanChanged(f"vault {key!r} 刪除失敗")
         leftover = _count(

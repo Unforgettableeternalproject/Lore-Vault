@@ -27,6 +27,7 @@ from lore_vault.proposals.types import (
     ACTOR_APPROVED,
     ACTOR_UI,
     KIND_LINK_CHANGE,
+    KIND_NOTE_DELETE,
     KIND_NOTE_UPDATE,
     SUPERSEDED,
     VIA_SYSTEM,
@@ -524,6 +525,10 @@ def _touched_snapshot(current: Note, requested: dict[str, Any]) -> dict[str, Any
     return snap
 
 
+def _plain_value(value: Any) -> Any:
+    return list(value) if isinstance(value, tuple) else value
+
+
 def _plain_changes(requested: dict[str, Any]) -> dict[str, Any]:
     return {k: (list(v) if isinstance(v, tuple) else v) for k, v in requested.items()}
 
@@ -608,6 +613,17 @@ def update(
         if governed and current.updated != expected_updated:
             # 提出時就要是最新版本：衝突照舊回 version_conflict，不產生提案
             raise VersionConflict(current, expected_updated)
+        if (
+            governed
+            and current.write_origin == "ui"
+            and all(
+                _plain_value(getattr(current, k)) == _plain_value(v)
+                for k, v in requested.items()
+            )
+        ):
+            # 受保護筆記的無變更 update：不建提案，也不寫入（寫入會把 write_origin
+            # 改成 agent、洗掉保護）；照一般 no-op 回傳目前版本
+            return UpdateResult(current, False, False)
         body_changed = "body" in changes and changes["body"] != current.body
         title_changed = "title" in changes and changes["title"] != current.title
         derived, unresolved = _derive_links(
@@ -715,7 +731,7 @@ def update(
                 to_state=SUPERSEDED,
                 via=VIA_UI_DIRECT if actor.kind == ACTOR_UI else VIA_SYSTEM,
                 reason="target edited",
-                kinds=(KIND_NOTE_UPDATE, KIND_LINK_CHANGE),
+                kinds=(KIND_NOTE_UPDATE, KIND_LINK_CHANGE, KIND_NOTE_DELETE),
             )
     partial = held is not None and held.hold
     payload_held = (held.payload or {}) if held is not None else {}

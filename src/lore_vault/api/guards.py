@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
-from fastapi import Request
+from fastapi import Request, Response
+from fastapi.routing import APIRoute
 
 from .errors import UiSessionRequired
 from .principals import AUTH_UI, auth_method_of
@@ -23,3 +24,21 @@ def ui_session_only(message: str = UI_ONLY_DEFAULT) -> Callable[[Request], None]
             raise UiSessionRequired(message)
 
     return require
+
+
+def ui_only_route(message: str = UI_ONLY_DEFAULT) -> type[APIRoute]:
+    """UI session 限定的路由類別：認證檢查在**解析 body 之前**，bearer 送壞 JSON 也
+    拿到 403 `ui_session_required`（router 依賴擋不住 body 解析錯誤的 422）。"""
+
+    class UiOnlyRoute(APIRoute):
+        def get_route_handler(self) -> Callable[[Request], Awaitable[Response]]:
+            original = super().get_route_handler()
+
+            async def handler(request: Request) -> Response:
+                if auth_method_of(request) != AUTH_UI:
+                    raise UiSessionRequired(message)
+                return await original(request)
+
+            return handler
+
+    return UiOnlyRoute

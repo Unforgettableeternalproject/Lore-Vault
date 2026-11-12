@@ -18,14 +18,18 @@ from pydantic import BaseModel, ConfigDict
 
 from lore_vault.notes import review as review_service
 
-from .guards import ui_session_only
+from .guards import ui_only_route, ui_session_only
 from .principals import principal_of
 from .state import AppState
 
 _require_ui = ui_session_only()
 
 
-router = APIRouter(prefix="/v1/review", dependencies=[Depends(_require_ui)])
+router = APIRouter(
+    prefix="/v1/review",
+    dependencies=[Depends(_require_ui)],
+    route_class=ui_only_route(),
+)
 
 
 def _state(request: Request) -> AppState:

@@ -83,7 +83,7 @@ from lore_vault.storage.db import transaction
 from lore_vault.storage.errors import ReservedVault, UnknownVault, VaultRequired
 from lore_vault.storage.migrate import SCHEMA_VERSION, current_version
 from lore_vault.storage.notes import count_notes, list_notes
-from lore_vault.storage.timeutil import format_utc
+from lore_vault.storage.timeutil import format_utc, utc_now
 from lore_vault.storage.vaults import (
     ALL_VAULTS,
     KIND_MISC,
@@ -348,9 +348,13 @@ def ask(request: Request, req: AskRequest) -> dict[str, Any]:
 
 
 def _attach_open_proposals(
-    conn: sqlite3.Connection, items: list[dict[str, Any]]
+    conn: sqlite3.Connection, items: list[dict[str, Any]], space: str | None
 ) -> None:
-    """每個項目附 `open_proposals: [{id, kind, state}]`（輪詢通道；不含 payload）。"""
+    """每個項目附 `open_proposals: [{id, kind, state}]`（輪詢通道；不含 payload）。
+    只在 dev／lore 附加（personal 不納入提案）；已過期但尚未被掃到的提案不算。"""
+    if space not in ("dev", "lore"):
+        return
+    now = utc_now()
     by_vault: dict[str, list[dict[str, Any]]] = {}
     for item in items:
         by_vault.setdefault(str(item.get("vault")), []).append(item)
@@ -362,6 +366,7 @@ def _attach_open_proposals(
             item["open_proposals"] = [
                 {"id": p.id, "kind": p.kind, "state": p.state}
                 for p in found.get(str(item["id"]), [])
+                if p.state == "executing" or p.expires_at > now
             ]
 
 
@@ -378,7 +383,7 @@ def get(request: Request, req: GetRequest) -> dict[str, Any]:
             fields=req.fields,
         )
         payload = result.to_dict()
-        _attach_open_proposals(conn, payload["items"])
+        _attach_open_proposals(conn, payload["items"], req.space)
     return payload
 
 

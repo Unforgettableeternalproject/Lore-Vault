@@ -163,6 +163,7 @@ def test_openapi_is_served_behind_auth(anon):
         "/v1/proposal_register",
         "/v1/proposal_claim",
         "/v1/proposal_close",
+        "/v1/proposal_renew",
         "/v1/proposal_status",
     } == paths
 

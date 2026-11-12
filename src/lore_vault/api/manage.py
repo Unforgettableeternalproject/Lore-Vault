@@ -60,7 +60,7 @@ from lore_vault.storage.errors import UnknownVault
 from lore_vault.storage.timeutil import format_utc
 from lore_vault.storage.vaults import resolve_write, validate_space
 
-from .errors import ConfirmPlanChanged, DocumentsNotConfigured
+from .errors import ConfirmPlanChanged, DocumentsNotConfigured, UiSessionRequired
 from .principals import actor_of, principal_of
 from .state import AppState
 
@@ -134,6 +134,7 @@ def _two_phase(
     args = {**args, "principal": principal_of(request)}
     actor = actor_of(request)
     governed = target is not None and policy.decide_delete(actor, target.space or "")
+    degraded: list[bool] = []
 
     def bind(conn: sqlite3.Connection, fingerprint: Any, *, upsert: bool):
         """回 (指紋, 提案或 None, deduped)。upsert=False 只查既有的開放提案。"""
@@ -141,20 +142,26 @@ def _two_phase(
             return fingerprint, None, False
         vault_key = resolve_write(conn, target.vault, space=target.space)
         if upsert and governed:
-            up = storage_proposals.upsert_open(
-                conn,
-                space=target.space,  # type: ignore[arg-type]
-                vault=vault_key,
-                kind=target.kind,
-                target_id=target.target_id,
-                payload={
-                    "reason": target.reason,
-                    "plan_summary": target.summary(conn, vault_key),
-                },
-                proposer_principal=actor.principal,
-            )
+            try:
+                up = storage_proposals.upsert_open(
+                    conn,
+                    space=target.space,  # type: ignore[arg-type]
+                    vault=vault_key,
+                    kind=target.kind,
+                    target_id=target.target_id,
+                    payload={
+                        "reason": target.reason,
+                        "plan_summary": target.summary(conn, vault_key),
+                    },
+                    proposer_principal=actor.principal,
+                )
+            except proposal_types.ProposalQueueFull:
+                # 降級：不建提案、指紋標記為無提案，對話授權（confirm_token）仍可用
+                degraded.append(True)
+                return {"fp": fingerprint, "proposal": None}, None, False
             prop, deduped = up.proposal, up.deduped
         else:
+            storage_proposals.expire_due(conn)
             prop, deduped = (
                 storage_proposals.find_open(
                     conn, vault_key, target.kind, target.target_id
@@ -179,6 +186,12 @@ def _two_phase(
             if governed and prop is not None:
                 response["proposal"] = _proposal_view(prop, deduped=deduped)
                 response["proposal_pending"] = True
+            elif degraded:
+                response["proposal_pending"] = False
+                response["proposal_note"] = (
+                    "待審提案已達上限，這次沒有登記提案；仍可在對話中取得使用者"
+                    "明確同意後帶 confirm_token 執行，或請使用者先處理審核頁的積壓"
+                )
             return response
         expected = signer.verify(token, op, args)
         changed: tuple[dict[str, Any], Any] | None = None
@@ -428,9 +441,20 @@ def vault_alias_remove(request: Request, req: AliasRequest) -> dict[str, Any]:
 # ── 換 space（T-72，A20）──
 
 
+def _vault_level_ui_only(request: Request, space: str | None) -> None:
+    """vault 層級的破壞性操作（整個 vault 刪除、換 space）會連同人類寫的筆記一起
+    帶走，不經逐筆提案：dev／lore 的一般 agent（bearer）一律只能由 UI 操作。"""
+    if policy.decide_delete(actor_of(request), space or ""):
+        raise UiSessionRequired(
+            "整個 vault 的刪除與換 space 只能由登入 UI 的使用者本人操作；"
+            "請使用者在 UI 操作"
+        )
+
+
 @router.post("/vault_move_space")
 def vault_move_space(request: Request, req: MoveSpaceRequest) -> dict[str, Any]:
     """只允許 lore↔personal；key 與別名換成新前綴，舊 key 不留別名。"""
+    _vault_level_ui_only(request, req.space)
 
     def plan(conn: sqlite3.Connection) -> tuple[dict[str, Any], Any]:
         key = _formal_key_in_space(conn, req.key, req.space)
@@ -470,6 +494,7 @@ def _reason(value: str | None, default: str) -> str:
 def vault_delete(request: Request, req: VaultDeleteRequest) -> dict[str, Any]:
     """刪整個 vault（只接受正式 key）。確認即等同 CLI 的 `--force`：規劃內容
     （含 `requires_force` 與各表筆數）已在第一步列出並綁進 token。"""
+    _vault_level_ui_only(request, req.space)
     reason = _reason(req.reason, admin.DEFAULT_VAULT_REASON)
 
     def plan(conn: sqlite3.Connection) -> tuple[dict[str, Any], Any]:

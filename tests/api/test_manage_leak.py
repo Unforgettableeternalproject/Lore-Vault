@@ -14,7 +14,7 @@ import pytest
 from lore_vault.config import Config, DocumentsConfig, EmbeddingConfig
 from lore_vault.storage.db import connect
 
-from .conftest import DIM, create_vault, write_note
+from .conftest import DIM, create_vault, make_ui_client, write_note
 
 P = "personal/diary"
 P_ALIAS = "personal/d-old"
@@ -63,7 +63,7 @@ def world(make_client, tmp_path, db_path):
         )
     finally:
         conn.close()
-    return client, live["id"], gone["id"]
+    return make_ui_client(client.app, db_path), live["id"], gone["id"]
 
 
 def _state(db_path) -> tuple:

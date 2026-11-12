@@ -43,11 +43,15 @@ from lore_vault.storage.notes import get_notes
 from lore_vault.storage.vaults import resolve_read, validate_space, vault_clause
 
 from . import tasks_admin
-from .guards import ui_session_only
+from .guards import ui_only_route, ui_session_only
 from .principals import principal_of
 from .state import AppState
 
-router = APIRouter(prefix="/v1/review", dependencies=[Depends(ui_session_only())])
+router = APIRouter(
+    prefix="/v1/review",
+    dependencies=[Depends(ui_session_only())],
+    route_class=ui_only_route(),
+)
 
 KIND_UEP_REVIEW = "uep_review"
 KIND_TASK_AUTH = "task_auth"
@@ -370,7 +374,15 @@ def counts(request: Request, req: CountsRequest) -> dict[str, Any]:
             storage_proposals.counts_by_kind(conn, space=space, vaults=vaults)
         )
         if space == "lore":
-            n = len(_uep_items(conn, scope, 10_000, None))
+            clause, params = vault_clause(scope, "vault")
+            n = int(
+                conn.execute(
+                    f"SELECT count(*) FROM notes WHERE {clause} AND review_state IN "
+                    "('pending', 'pending_delete') AND vault IN "
+                    "(SELECT key FROM vaults WHERE space = 'lore')",
+                    params,
+                ).fetchone()[0]
+            )
             if n:
                 found[KIND_UEP_REVIEW] = n
         if space == SPACE_DEV:
