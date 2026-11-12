@@ -11,6 +11,7 @@ import { useApp } from '../lib/context';
 import { diffLines, hasConflictMarkers, mergeDraft } from '../lib/diff';
 import { authorLabel, describeError, describeUnresolvedLink, formatTime, isAbort } from '../lib/format';
 import { Markdown } from '../lib/markdown';
+import { kindLabel } from '../lib/proposals';
 import { isPendingReview, REVIEW_CONFLICT_TEXT } from '../lib/review';
 import { routePath } from '../lib/router';
 import type { ConflictCurrent, GetResult, NoteFull, NoteUndeleteResult, UnresolvedLink, UpdateResult } from '../lib/types';
@@ -424,6 +425,20 @@ export function NoteDetail({ id }: { id: string }) {
         {reviewNotice && (
           <Banner tone="warn" label="REVIEW" testId="review-conflict">
             {reviewNotice}
+          </Banner>
+        )}
+        {mode === 'read' && note.open_proposals && note.open_proposals.length > 0 && (
+          <Banner
+            tone="warn"
+            label="PROPOSAL"
+            testId="open-proposals"
+            action={
+              <button type="button" class="btn-outline btn-outline--sm" onClick={() => navigate(routePath('review'))}>
+                前往審核頁
+              </button>
+            }
+          >
+            這則筆記有 {note.open_proposals.length} 個等待處理的 agent 提案（{note.open_proposals.map((p) => kindLabel(p.kind)).join('、')}）。
           </Banner>
         )}
         {mode === 'read' && isPendingReview(note.review_state) && <ReviewPanel key={note.review_state} note={note} onDone={onReviewDone} />}
