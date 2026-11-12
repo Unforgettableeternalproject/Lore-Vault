@@ -62,6 +62,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
 
+from lore_vault.proposals import types as proposal_types
 from lore_vault.schema import (
     REVIEW_NONE,
     REVIEW_PENDING_DELETE,
@@ -71,6 +72,7 @@ from lore_vault.schema import (
 )
 
 from . import document_index, sidecar
+from . import proposals as storage_proposals
 from .db import transaction
 from .errors import NotFound, StorageError, UnknownVault, VaultConflict
 from .notes import insert_note, note_from_row
@@ -122,6 +124,21 @@ def _has_table(conn: sqlite3.Connection, name: str) -> bool:
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
     ).fetchone()
     return row is not None
+
+
+def _close_proposals_for_target(
+    conn: sqlite3.Connection, vault: str, target_id: str
+) -> None:
+    """目標被刪：其上的開放提案轉 obsolete（token／UI 核准路徑已先把自己那筆結案）。"""
+    if _has_table(conn, "review_proposals"):
+        storage_proposals.close_for_target(
+            conn,
+            vault,
+            target_id,
+            to_state=proposal_types.OBSOLETE,
+            via=proposal_types.VIA_SYSTEM,
+            reason="target deleted",
+        )
 
 
 def _count(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...]) -> int:
@@ -180,6 +197,7 @@ def delete_note(
         done["notes"] = conn.execute("DELETE FROM notes WHERE seq = ?", (seq,)).rowcount
         _check_cascade(conn)
         _verify(plan, done)
+        _close_proposals_for_target(conn, plan.vault, note_id)
         return plan
 
 
@@ -507,6 +525,7 @@ def delete_document(
             document_index.sync_chain(conn, newer)
         if plan.supersedes is not None:
             document_index.sync_chain(conn, plan.supersedes)
+        _close_proposals_for_target(conn, plan.vault, document_id)
         return plan
 
 
@@ -739,6 +758,8 @@ def delete_vault(
             if sidecar.count_for_vault(conn, key):
                 raise PlanChanged(f"vault {key!r} 仍有側載列未刪")
         done["aliases"] = plan.counts["aliases"]
+        if _has_table(conn, "review_proposals"):
+            storage_proposals.close_for_vault(conn, key, reason="vault deleted")
         if conn.execute("DELETE FROM vaults WHERE key = ?", (key,)).rowcount != 1:
             raise PlanChanged(f"vault {key!r} 刪除失敗")
         leftover = _count(
@@ -799,6 +820,7 @@ KNOWN_VAULT_REFERENCES: frozenset[tuple[str, str]] = frozenset(
         ("documents", "vault"),
         ("document_tombstones", "vault"),
         ("sidecar_blobs", "vault"),
+        ("review_proposals", "vault"),
     }
 )
 
@@ -992,6 +1014,9 @@ def change_vault_space(
         # 提交前自行跑 foreign_key_check，不讓違規拖到 COMMIT 才爆。
         conn.execute("PRAGMA defer_foreign_keys = ON")
         plan = plan_space_change(conn, key, space, new_key=new_key)
+        if _has_table(conn, "review_proposals"):
+            # 開放提案的 space 與新 vault 不一致：改名前先結案（列數不變，不影響核對）
+            storage_proposals.close_for_vault(conn, key, reason="vault space changed")
         done: dict[str, int] = {
             "vaults.key": conn.execute(
                 "UPDATE vaults SET key = ?, space = ? WHERE key = ?",

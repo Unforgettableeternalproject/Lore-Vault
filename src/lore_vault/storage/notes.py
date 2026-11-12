@@ -69,6 +69,8 @@ def note_from_row(row: sqlite3.Row) -> Note:
         review_prev_state=(
             row["review_prev_state"] if "review_prev_state" in keys else None
         ),
+        # v20 前的資料庫（遷移測試、舊快照）沒有欄位：視為 agent
+        write_origin=row["write_origin"] if "write_origin" in keys else "agent",
     )
 
 
@@ -130,8 +132,8 @@ def insert_note(
                                supersedes, created, updated, author, principal,
                                updated_by, updated_by_principal, enqueued,
                                review_state, reviewed_by, reviewed_at,
-                               review_reason, review_prev_state)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                               review_reason, review_prev_state, write_origin)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 stored.id,
@@ -155,6 +157,7 @@ def insert_note(
                 stored.reviewed_at,
                 stored.review_reason,
                 stored.review_prev_state,
+                stored.write_origin,
             ),
         )
         seq = cursor.lastrowid
@@ -389,6 +392,7 @@ def update_note_if(
     space: str,
     now: str | None = None,
     editor: tuple[str | None, str] | None = None,
+    write_origin: str | None = None,
 ) -> Note | None:
     """條件更新原語（樂觀鎖）：只有資料庫中的 `updated` 字串與
     `expected_updated` 完全相同才寫入。
@@ -401,6 +405,8 @@ def update_note_if(
     `editor`：(自報名或 None, principal)，寫入 `updated_by`／`updated_by_principal`
     （A22；自報名 None 就記 None，不沿用上一位）。省略＝作者欄位不動，只給不代表
     任何寫入者的內部呼叫用；服務層與匯入一律傳入。
+    `write_origin`：這次內容寫入的來源（ui／agent）；None＝不動（審核、補算等
+    非內容寫入的路徑不可改到它）。
     """
     unknown = sorted(set(changes) - UPDATABLE_FIELDS)
     if unknown:
@@ -422,6 +428,8 @@ def update_note_if(
             by, by_principal = editor
             check_fields({"updated_by": by})
             attribution = {"updated_by": by, "updated_by_principal": by_principal}
+        if write_origin is not None:
+            attribution["write_origin"] = write_origin
         updated = dataclasses.replace(
             current,
             **changes,
@@ -434,7 +442,8 @@ def update_note_if(
                              supersedes = ?, updated = ?, updated_by = ?,
                              updated_by_principal = ?, enqueued = ?,
                              review_state = ?, reviewed_by = ?, reviewed_at = ?,
-                             review_reason = ?, review_prev_state = ?
+                             review_reason = ?, review_prev_state = ?,
+                             write_origin = ?
             WHERE seq = ? AND updated = ?
             """,
             (
@@ -454,6 +463,7 @@ def update_note_if(
                 updated.reviewed_at,
                 updated.review_reason,
                 updated.review_prev_state,
+                updated.write_origin,
                 row["seq"],
                 expected_updated,
             ),

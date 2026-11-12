@@ -62,6 +62,8 @@ SNAPSHOT_EXCLUDED_TABLES = (
     "document_enrichment",
     # 側載機器狀態（schema v17）只經 blob_get 讀取，不進降級快照
     "sidecar_blobs",
+    # 待審提案的 payload 含筆記原文，且與 recall 無關（schema v20）
+    "review_proposals",
 )
 
 # HTTP header（服務端回應 `GET /v1/snapshot` 時帶）

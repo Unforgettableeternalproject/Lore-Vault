@@ -870,6 +870,70 @@ def _v19(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+# 待審提案（v20，add-agent-review-proposals）：
+# - notes.write_origin：最後一次內容寫入的來源（ui／agent）；既有資料一律 agent，不追溯
+# - review_proposals：一般 agent（bearer）的受保護操作（刪除、改人類寫的筆記、連結
+#   移除、任務封存）不直接生效，先進這張表等 UI 核准。vault／target 不設外鍵（比照
+#   sidecar_blobs；vault 刪除與換 space 由 storage.admin 在同一交易內處理）。
+#   payload 含筆記原文：不進快照、日誌與 doctor 輸出
+# - claim_prev_state：task_archive 被殼 claim 前的狀態（pending／approved），
+#   租約逾時或釋放時據此回復（設計草案未列，實作補上）
+# - 同一 (vault, kind, target_id) 至多一筆開放提案由 partial unique index 保證
+_V20_STATEMENTS: tuple[str, ...] = (
+    "ALTER TABLE notes ADD COLUMN write_origin TEXT NOT NULL DEFAULT 'agent'"
+    " CHECK (write_origin IN ('ui', 'agent'))",
+    """
+    CREATE TABLE review_proposals (
+        id                TEXT PRIMARY KEY CHECK (length(trim(id)) > 0),
+        space             TEXT NOT NULL CHECK (space IN ('dev', 'lore')),
+        vault             TEXT NOT NULL CHECK (length(trim(vault)) > 0),
+        kind              TEXT NOT NULL CHECK (kind IN
+            ('note_delete', 'document_delete', 'note_update', 'link_change',
+             'task_archive')),
+        target_type       TEXT NOT NULL CHECK (target_type IN
+            ('note', 'document', 'task_change')),
+        target_id         TEXT NOT NULL CHECK (length(trim(target_id)) > 0),
+        payload           TEXT NOT NULL CHECK (json_valid(payload)),
+        payload_digest    TEXT NOT NULL,
+        base_updated      TEXT,
+        base_snapshot     TEXT CHECK (
+            base_snapshot IS NULL OR json_valid(base_snapshot)),
+        proposer_principal TEXT NOT NULL,
+        proposer_author   TEXT,
+        state             TEXT NOT NULL DEFAULT 'pending' CHECK (state IN
+            ('pending', 'approved', 'executing', 'applied', 'rejected',
+             'superseded', 'expired', 'obsolete')),
+        rev               INTEGER NOT NULL DEFAULT 1 CHECK (rev >= 1),
+        created_at        TEXT NOT NULL,
+        updated_at        TEXT NOT NULL,
+        expires_at        TEXT NOT NULL,
+        resolved_by       TEXT,
+        resolved_at       TEXT,
+        resolved_via      TEXT CHECK (resolved_via IS NULL OR resolved_via IN
+            ('ui', 'token', 'ui_direct', 'system')),
+        resolution_reason TEXT,
+        superseded_by     TEXT,
+        claim_id          TEXT,
+        claim_expires_at  TEXT,
+        claim_prev_state  TEXT CHECK (claim_prev_state IS NULL OR claim_prev_state IN
+            ('pending', 'approved')),
+        applied_updated   TEXT
+    ) STRICT
+    """,
+    "CREATE UNIQUE INDEX review_proposals_open"
+    " ON review_proposals(vault, kind, target_id)"
+    " WHERE state IN ('pending', 'approved', 'executing')",
+    "CREATE INDEX review_proposals_queue"
+    " ON review_proposals(space, state, created_at DESC)",
+    "CREATE INDEX review_proposals_target ON review_proposals(vault, target_id)",
+)
+
+
+def _v20(conn: sqlite3.Connection) -> None:
+    for statement in _V20_STATEMENTS:
+        conn.execute(statement)
+
+
 # 有序遷移：索引 i 的函式把版本從 i 升到 i+1。只能往後加，不可改動已發佈的項目。
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _v1,
@@ -891,6 +955,7 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _v17,
     _v18,
     _v19,
+    _v20,
 )
 
 SCHEMA_VERSION = len(MIGRATIONS)
