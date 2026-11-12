@@ -32,6 +32,8 @@ import json
 import sqlite3
 import threading
 from collections.abc import Callable
+from contextlib import nullcontext
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -47,16 +49,19 @@ from lore_vault.confirm import canonical as _canonical
 from lore_vault.confirm import unb64 as _unb64
 from lore_vault.notes import InvalidCursor
 from lore_vault.notes import review as review_service
+from lore_vault.proposals import policy
+from lore_vault.proposals import types as proposal_types
 from lore_vault.schema import canonical_key
 from lore_vault.storage import admin
 from lore_vault.storage import manage as store
+from lore_vault.storage import proposals as storage_proposals
 from lore_vault.storage.db import transaction
 from lore_vault.storage.errors import UnknownVault
 from lore_vault.storage.timeutil import format_utc
-from lore_vault.storage.vaults import validate_space
+from lore_vault.storage.vaults import resolve_write, validate_space
 
 from .errors import ConfirmPlanChanged, DocumentsNotConfigured
-from .principals import principal_of
+from .principals import actor_of, principal_of
 from .state import AppState
 
 router = APIRouter(prefix="/v1")
@@ -88,6 +93,25 @@ Planner = Callable[[sqlite3.Connection], tuple[dict[str, Any], Any]]
 Executor = Callable[[sqlite3.Connection], dict[str, Any]]
 
 
+@dataclass(frozen=True)
+class DeleteTarget:
+    """刪除操作要綁定的提案目標（note_delete／document_delete）。
+
+    `summary(conn, vault_key)` 回提案的 `plan_summary`（給審核頁看的穩定內容，
+    不放 embedding／補算這類背景會變的計數，否則去重會一直失效）。"""
+
+    kind: str
+    vault: str | None
+    space: str | None
+    target_id: str
+    reason: str
+    summary: Callable[[sqlite3.Connection, str], dict[str, Any]]
+
+
+def _proposal_view(proposal: Any, *, deduped: bool = False) -> dict[str, Any]:
+    return {**proposal.brief(), "deduped": deduped}
+
+
 def _two_phase(
     request: Request,
     op: str,
@@ -95,35 +119,124 @@ def _two_phase(
     token: str | None,
     plan: Planner,
     execute: Executor,
+    *,
+    target: DeleteTarget | None = None,
 ) -> dict[str, Any]:
-    """`plan(conn) -> (回給客戶端的規劃, 指紋)`；`execute(conn) -> 額外回應欄位`。"""
+    """`plan(conn) -> (回給客戶端的規劃, 指紋)`；`execute(conn) -> 額外回應欄位`。
+
+    `target`（刪除 note／文件）：一般 agent（bearer 非 uep、dev／lore）的刪除同時綁定
+    一筆開放提案——第一步在寫入交易內 upsert 提案，指紋納入 {提案 id, rev}；
+    第二步在同一交易內把提案轉 applied(via=token) 再刪除，轉移失敗整段 rollback
+    （`proposal_resolved`）。UI 核准提案後舊 token 的指紋對不上，不會再執行。
+    """
     signer = _signer(request)
     # token 同時綁定簽發者的 principal：別的憑證不能拿去執行
     args = {**args, "principal": principal_of(request)}
+    actor = actor_of(request)
+    governed = target is not None and policy.decide_delete(actor, target.space or "")
+
+    def bind(conn: sqlite3.Connection, fingerprint: Any, *, upsert: bool):
+        """回 (指紋, 提案或 None, deduped)。upsert=False 只查既有的開放提案。"""
+        if target is None:
+            return fingerprint, None, False
+        vault_key = resolve_write(conn, target.vault, space=target.space)
+        if upsert and governed:
+            up = storage_proposals.upsert_open(
+                conn,
+                space=target.space,  # type: ignore[arg-type]
+                vault=vault_key,
+                kind=target.kind,
+                target_id=target.target_id,
+                payload={
+                    "reason": target.reason,
+                    "plan_summary": target.summary(conn, vault_key),
+                },
+                proposer_principal=actor.principal,
+            )
+            prop, deduped = up.proposal, up.deduped
+        else:
+            prop, deduped = (
+                storage_proposals.find_open(
+                    conn, vault_key, target.kind, target.target_id
+                ),
+                False,
+            )
+        marker = None if prop is None else [prop.id, prop.rev]
+        return {"fp": fingerprint, "proposal": marker}, prop, deduped
+
     with _state(request).connection() as conn:
         if token is None:
-            shown, fingerprint = plan(conn)
+            with transaction(conn) if governed else nullcontext():
+                shown, fingerprint = plan(conn)
+                fingerprint, prop, deduped = bind(conn, fingerprint, upsert=True)
             issued, expires = signer.issue(op, args, plan_digest(fingerprint))
-            return {
+            response = {
                 "executed": False,
                 "plan": shown,
                 "confirm_token": issued,
                 "expires_at": format_utc(datetime.fromtimestamp(expires, UTC)),
             }
+            if governed and prop is not None:
+                response["proposal"] = _proposal_view(prop, deduped=deduped)
+                response["proposal_pending"] = True
+            return response
         expected = signer.verify(token, op, args)
+        changed: tuple[dict[str, Any], Any] | None = None
         with transaction(conn):
-            shown, fingerprint = plan(conn)
+            shown, raw = plan(conn)
+            fingerprint, prop, _ = bind(conn, raw, upsert=False)
             if plan_digest(fingerprint) != expected:
-                # 綁定新規劃的 token：仍要使用者看過新規劃再送一次，不在這裡執行
-                issued, expires = signer.issue(op, args, plan_digest(fingerprint))
-                raise ConfirmPlanChanged(
-                    "規劃後資料已變動，請確認新的規劃後以新的 confirm_token 重新送出",
-                    shown,
-                    confirm_token=issued,
-                    expires_at=format_utc(datetime.fromtimestamp(expires, UTC)),
-                )
-            extra = execute(conn)
-    return {"executed": True, "plan": shown, **extra}
+                # 重新規劃並（受管的刪除）重新 upsert 提案，讓新 token 綁在開放提案上；
+                # 離開交易（提交）後才拋，否則 upsert 會跟著 rollback
+                fingerprint, prop, _ = bind(conn, raw, upsert=True)
+                changed = (shown, fingerprint)
+            else:
+                if governed and prop is not None and not storage_proposals.transition(
+                    conn,
+                    prop.id,
+                    expect_state=proposal_types.PENDING,
+                    expect_rev=prop.rev,
+                    to_state=proposal_types.APPLIED,
+                    via=proposal_types.VIA_TOKEN,
+                    by=actor.principal,
+                ):
+                    raise proposal_types.ProposalResolved(
+                        f"提案 {prop.id} 已被另一個通道處理"
+                    )
+                if (
+                    not governed
+                    and target is not None
+                    and actor.kind == proposal_types.ACTOR_UI
+                ):
+                    # UI 直接刪除：該目標的開放提案隨之過時
+                    storage_proposals.close_for_target(
+                        conn,
+                        resolve_write(conn, target.vault, space=target.space),
+                        target.target_id,
+                        to_state=proposal_types.SUPERSEDED,
+                        via=proposal_types.VIA_UI_DIRECT,
+                        reason="target deleted by user",
+                    )
+                extra = execute(conn)
+        if changed is not None:
+            shown, fingerprint = changed
+            # 綁定新規劃的 token：仍要使用者看過新規劃再送一次，不在這裡執行
+            issued, expires = signer.issue(op, args, plan_digest(fingerprint))
+            raise ConfirmPlanChanged(
+                "規劃後資料已變動，請確認新的規劃後以新的 confirm_token 重新送出",
+                shown,
+                confirm_token=issued,
+                expires_at=format_utc(datetime.fromtimestamp(expires, UTC)),
+            )
+    result: dict[str, Any] = {"executed": True, "plan": shown, **extra}
+    if governed and prop is not None:
+        result["proposal"] = {
+            "id": prop.id,
+            "kind": prop.kind,
+            "state": proposal_types.APPLIED,
+            "resolved_via": proposal_types.VIA_TOKEN,
+        }
+    return result
 
 
 def _formal_key_in_space(conn: sqlite3.Connection, key: str, space: object) -> str:
@@ -374,6 +487,41 @@ def vault_delete(request: Request, req: VaultDeleteRequest) -> dict[str, Any]:
     )
 
 
+def _note_summary(conn: sqlite3.Connection, vault_key: str, note_id: str) -> dict:
+    """提案的 plan_summary（note）：標題與連結數，內容穩定、不含背景計數。"""
+    row = conn.execute(
+        "SELECT title, links FROM notes WHERE id = ? AND vault = ?",
+        (note_id, vault_key),
+    ).fetchone()
+    backlinks = conn.execute(
+        "SELECT count(*) FROM notes WHERE vault = ? AND id != ? AND EXISTS "
+        "(SELECT 1 FROM json_each(notes.links) WHERE value = ?)",
+        (vault_key, note_id, note_id),
+    ).fetchone()[0]
+    return {
+        "title": row["title"],
+        "link_count": len(json.loads(row["links"])),
+        "backlink_count": int(backlinks),
+    }
+
+
+def _document_summary(
+    conn: sqlite3.Connection, vault_key: str, document_id: str
+) -> dict:
+    row = conn.execute(
+        "SELECT filename, mime, size_bytes, version FROM documents "
+        "WHERE id = ? AND vault = ?",
+        (document_id, vault_key),
+    ).fetchone()
+    return {
+        "title": row["filename"],
+        "filename": row["filename"],
+        "mime": row["mime"],
+        "size_bytes": row["size_bytes"],
+        "version": row["version"],
+    }
+
+
 @router.post("/note_delete")
 def note_delete(request: Request, req: ItemDeleteRequest) -> dict[str, Any]:
     """兩步式刪除 note。uep 在 lore：第二步不真刪，改記刪除請求
@@ -420,7 +568,20 @@ def note_delete(request: Request, req: ItemDeleteRequest) -> dict[str, Any]:
         return {"review_state": "none"}
 
     return _two_phase(
-        request, "note_delete", _args(req), req.confirm_token, plan, execute
+        request,
+        "note_delete",
+        _args(req),
+        req.confirm_token,
+        plan,
+        execute,
+        target=DeleteTarget(
+            kind=proposal_types.KIND_NOTE_DELETE,
+            vault=req.vault,
+            space=req.space,
+            target_id=req.id,
+            reason=reason,
+            summary=lambda conn, key: _note_summary(conn, key, req.id),
+        ),
     )
 
 
@@ -455,7 +616,20 @@ def document_delete(request: Request, req: ItemDeleteRequest) -> dict[str, Any]:
         return {}
 
     result = _two_phase(
-        request, "document_delete", _args(req), req.confirm_token, plan, execute
+        request,
+        "document_delete",
+        _args(req),
+        req.confirm_token,
+        plan,
+        execute,
+        target=DeleteTarget(
+            kind=proposal_types.KIND_DOCUMENT_DELETE,
+            vault=req.vault,
+            space=req.space,
+            target_id=req.id,
+            reason=reason,
+            summary=lambda conn, key: _document_summary(conn, key, req.id),
+        ),
     )
     if result["executed"]:
         # 刪掉現行版本時前一版回到索引，向量由 worker 補

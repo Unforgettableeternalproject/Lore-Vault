@@ -39,6 +39,8 @@ from .bootstrap import ensure_admin_account
 from .errors import install_error_handlers
 from .manage import router as manage_router
 from .principals import Principals
+from .proposals import router as proposals_router
+from .proposals_agent import router as proposals_agent_router
 from .review import router as review_router
 from .routes import router
 from .settings import (
@@ -181,6 +183,8 @@ def create_app(
     app.include_router(settings_router)
     app.include_router(tasks_router)
     app.include_router(review_router)
+    app.include_router(proposals_router)
+    app.include_router(proposals_agent_router)
     # /ui/api/* 必須在 /ui 靜態掛載之前註冊（Starlette 依註冊順序比對）
     app.include_router(build_ui_router())
     if ui_static is not None:

@@ -11,6 +11,7 @@ import pytest
 
 from lore_vault import notes as notes_service
 from lore_vault.doctor import DoctorContext, Status, default_registry
+from lore_vault.proposals.types import Actor
 from lore_vault.schema import Vault
 from lore_vault.storage import enrichment, vectors
 from lore_vault.storage import snapshot as storage_snapshot
@@ -26,6 +27,8 @@ pytestmark = pytest.mark.anyio
 VAULT = "github.com/o/a"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
+ACTOR = Actor.system("xavier")
+
 
 @pytest.fixture
 def seeded(db_path):
@@ -34,7 +37,7 @@ def seeded(db_path):
     try:
         ids = [
             notes_service.write(
-                conn, VAULT, f"記憶 {i}", f"內容 {i}", space="dev", principal="xavier"
+                conn, VAULT, f"記憶 {i}", f"內容 {i}", space="dev", actor=ACTOR
             ).note.id
             for i in range(3)
         ]
@@ -83,7 +86,7 @@ async def test_etag_and_304(app, seeded):
 def _mutations():
     def write(conn, ids):
         notes_service.write(
-            conn, VAULT, "新的", "新內容", space="dev", principal="xavier"
+            conn, VAULT, "新的", "新內容", space="dev", actor=ACTOR
         )
 
     def update_title(conn, ids):
@@ -94,7 +97,7 @@ def _mutations():
             ids[0],
             note["updated"],
             space="dev",
-            principal="xavier",
+            actor=ACTOR,
             title="改標題",
         )
 
@@ -111,7 +114,7 @@ def _mutations():
         # 筆數不變
         delete_note(conn, VAULT, ids[2], space="dev")
         notes_service.write(
-            conn, VAULT, "替代", "替代內容", space="dev", principal="xavier"
+            conn, VAULT, "替代", "替代內容", space="dev", actor=ACTOR
         )
 
     def add_alias(conn, ids):

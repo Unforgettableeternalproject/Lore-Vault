@@ -153,6 +153,17 @@ def test_openapi_is_served_behind_auth(anon):
         "/v1/tasks_status",
         "/v1/review/approve",
         "/v1/review/reject",
+        # 待審提案（add-agent-review-proposals）：審核頁只收 UI session，
+        # 殼端協調（task_archive）收 bearer
+        "/v1/review/queue",
+        "/v1/review/counts",
+        "/v1/review/proposal_get",
+        "/v1/review/proposal_approve",
+        "/v1/review/proposal_reject",
+        "/v1/proposal_register",
+        "/v1/proposal_claim",
+        "/v1/proposal_close",
+        "/v1/proposal_status",
     } == paths
 
 

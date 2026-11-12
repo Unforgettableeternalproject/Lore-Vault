@@ -22,6 +22,7 @@ from starlette.requests import Request
 from starlette.types import Scope
 
 from lore_vault.config import Secret
+from lore_vault.proposals.types import Actor
 from lore_vault.schema import DEFAULT_PRINCIPAL
 
 SCOPE_KEY = "lore_principal"
@@ -92,3 +93,12 @@ def principal_of(request: Request) -> str:
     if not isinstance(principal, str) or not principal:
         raise RuntimeError("請求缺少 principal（未經認證中介層）")
     return principal
+
+
+def actor_of(request: Request, author: str | None = None) -> Actor:
+    """寫入者：認證方式決定 `kind`（UI session → ui、bearer → agent），
+    **絕不由 principal 判斷**（UI 帳號與 bearer 可能是同一個 principal）。"""
+    principal = principal_of(request)
+    if auth_method_of(request) == AUTH_UI:
+        return Actor.ui(principal, author)
+    return Actor.agent(principal, author)

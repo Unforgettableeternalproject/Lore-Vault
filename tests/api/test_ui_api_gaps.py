@@ -276,10 +276,16 @@ def test_update_link_merge_rules(client):
     # 只改 title：links 不動、不重新解析
     data = update(title="本體（改名）")
     assert data["links"] == ["manual", t2["id"]] and data["unresolved_links"] == []
-    # 明傳 links：傳入值 ∪ 目前正文解析結果
+    # 明傳 links：傳入值 ∪ 目前正文解析結果；明確拿掉的 "manual" 屬連結移除，
+    # 一般 agent 送審：新增的 "other" 照套，"manual" 留著等核准（partial）
     data = update(links=["other"])
-    assert data["links"] == ["other", t2["id"]]
-    assert _get_note(client, DEV, note["id"])["links"] == ["other", t2["id"]]
+    assert data["links"] == ["other", "manual", t2["id"]]
+    assert data["partial"] is True and data["held"]["links_removed"] == ["manual"]
+    assert _get_note(client, DEV, note["id"])["links"] == [
+        "other",
+        "manual",
+        t2["id"],
+    ]
 
 
 def test_dry_run_previews_links(client, db_path):
