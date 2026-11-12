@@ -113,6 +113,12 @@ ARCHIVE_NEXT_STEP = (
     "這一步只規劃、沒有寫入。把 plan 給使用者看、取得明確同意後，才以完全相同的參數"
     "加上 confirm_token 再呼叫一次 archive；不要自動連打兩步。token 5 分鐘內有效"
 )
+ARCHIVE_PROPOSAL_NEXT_STEP = (
+    "這一步只規劃、沒有寫入，且已登記為待審提案（proposal）。把 plan 給使用者看，"
+    "使用者可(a)在對話中明確同意，你再以完全相同的參數加上 confirm_token 呼叫一次 "
+    "archive；或(b)到 UI 審核頁核准，之後你再呼叫一次 archive（不帶 token）即會執行。"
+    "不要自動連打兩步；token 5 分鐘內有效"
+)
 PENDING_APPLY_NEXT_STEP = (
     "note 已寫入、服務端主 spec 鏡像已更新（已封存，待落地）；本機 specs/ 要等之後在"
     "有本機 repo 的機器以 stdio 殼同步（sync_specs）才會更新"
@@ -196,6 +202,19 @@ HINTS = {
         "規劃後資料已變動、這次未執行：把錯誤附的新 plan 給使用者看，同意後才以"
         "附帶的新 confirm_token 重送"
     ),
+    "service_outdated": (
+        "服務端還不支援待審提案（缺 /v1/proposal_register）：請使用者先升級服務"
+        "（殼與服務需一起升版）再用 archive；這次沒有執行任何寫入"
+    ),
+    "proposal_resolved": (
+        "這份同意已被另一個通道（UI 核准或對話確認）處理：用 tasks(action='list') "
+        "確認 change 狀態，不要重送舊 token"
+    ),
+    "proposal_state_conflict": (
+        "提案內容與這次的規劃不符或已被處理：重新規劃 archive（不帶 token）"
+    ),
+    "proposal_executing": "另一個 archive 呼叫正在執行這份提案；稍後用 list 確認結果",
+    "proposal_queue_full": "這個 vault 的待審提案已達上限：請使用者先到審核頁處理",
     "mirror_changed": "重新規劃 archive（不帶 token）、給使用者確認後再送",
     "archive_write_failed": (
         "服務恢復後重新規劃 archive；已寫入的 note 會被沿用、不會重複"
@@ -891,6 +910,31 @@ class TaskOps:
             target, change, record, allow_incomplete=allow_incomplete, reason=reason
         )
         digest = plan_digest(plan)
+        # 3. 向服務端登記待審提案（upsert）：同內容回既有提案（可能已被 UI 核准），
+        #    內容不同則舊提案作廢、新提案等同意
+        proposal = await self._register_proposal(
+            target.vault,
+            name,
+            change,
+            digest,
+            reason=reason,
+            allow_incomplete=allow_incomplete,
+            author=author,
+        )
+        if expected_digest is None and proposal.get("state") == "approved":
+            # UI 已核准同一份規劃：視同使用者同意，直接執行
+            return await self._claim_and_execute(
+                target,
+                change,
+                record,
+                merged,
+                mirrors,
+                proposal,
+                expect="approved",
+                plan_digest_=digest,
+                reason=reason,
+                author=author,
+            )
         if expected_digest is None:
             issued, expires = signer.issue(ARCHIVE_OP, token_args, digest)
             return {
@@ -898,7 +942,9 @@ class TaskOps:
                 "plan": plan,
                 "confirm_token": issued,
                 "expires_at": _utc(expires),
-                "next_step": ARCHIVE_NEXT_STEP,
+                "proposal": proposal,
+                "proposal_pending": True,
+                "next_step": ARCHIVE_PROPOSAL_NEXT_STEP,
             }
         if digest != expected_digest:
             issued, expires = signer.issue(ARCHIVE_OP, token_args, digest)
@@ -909,10 +955,117 @@ class TaskOps:
                 plan=plan,
                 confirm_token=issued,
                 expires_at=_utc(expires),
+                proposal=proposal,
             )
-        return await self._archive_execute(
-            target, change, record, merged, mirrors, reason=reason, author=author
+        return await self._claim_and_execute(
+            target,
+            change,
+            record,
+            merged,
+            mirrors,
+            proposal,
+            expect="approved" if proposal.get("state") == "approved" else "pending",
+            plan_digest_=digest,
+            reason=reason,
+            author=author,
         )
+
+    async def _register_proposal(
+        self,
+        vault: str,
+        name: str,
+        change: rs.RemoteChange,
+        digest: str,
+        *,
+        reason: str | None,
+        allow_incomplete: bool,
+        author: str | None,
+    ) -> dict[str, Any]:
+        """`/v1/proposal_register`；服務端沒有這個端點（殼比服務新）時明確報錯，
+        不靜默略過提案。"""
+        body: dict[str, Any] = {
+            "vault": vault,
+            "name": name,
+            "plan_digest": digest,
+            "reason": reason or "",
+            "allow_incomplete": bool(allow_incomplete),
+            "change_version": change.version,
+            "content_digest": rs.authorization_digest(change.to_doc()),
+        }
+        if author:
+            body["author"] = author
+        try:
+            result = await self.post("/v1/proposal_register", body)
+        except rs.RemoteError as exc:
+            if exc.status in (404, 405) and exc.code is None:
+                raise _tool_error(
+                    "service_outdated",
+                    "服務端不支援待審提案（缺 /v1/proposal_register）；"
+                    "殼與服務需一起升版",
+                    hint=HINTS["service_outdated"],
+                ) from None
+            raise
+        return dict(result["proposal"])
+
+    async def _claim_and_execute(
+        self,
+        target: Target,
+        change: rs.RemoteChange,
+        record: rs.AuthorizationRecord | None,
+        merged: dict[str, str],
+        mirrors: dict[str, rs.Mirror],
+        proposal: dict[str, Any],
+        *,
+        expect: str,
+        plan_digest_: str,
+        reason: str | None,
+        author: str | None,
+    ) -> dict[str, Any]:
+        """取得服務端租約後才執行封存：對話 token（claim pending）與 UI 核准
+        （claim approved）兩條路互斥，輸的收到 `proposal_resolved`、不執行。"""
+        claim = await self.post(
+            "/v1/proposal_claim",
+            {
+                "vault": target.vault,
+                "id": proposal["id"],
+                "expect": expect,
+                "plan_digest": plan_digest_,
+            },
+        )
+        closing = {
+            "vault": target.vault,
+            "id": proposal["id"],
+            "claim_id": claim["claim_id"],
+        }
+        try:
+            result = await self._archive_execute(
+                target, change, record, merged, mirrors, reason=reason, author=author
+            )
+        except BaseException:
+            # 釋放租約（封存本身可續跑）；釋放失敗交給租約逾時自動回復
+            try:
+                await self.post("/v1/proposal_close", {**closing, "outcome": "release"})
+            except Exception:  # noqa: BLE001
+                pass
+            raise
+        via = "ui" if expect == "approved" else "token"
+        try:
+            await self.post("/v1/proposal_close", {**closing, "outcome": "applied"})
+            result["proposal"] = {
+                "id": proposal["id"],
+                "kind": "task_archive",
+                "state": "applied",
+                "resolved_via": via,
+            }
+        except (rs.RemoteError, rs.RemoteUnreachable) as exc:
+            # 封存已完成；提案稍後由租約逾時回復，doctor 會指出
+            result["proposal"] = {
+                "id": proposal["id"],
+                "kind": "task_archive",
+                "state": "executing",
+                "close_error": str(exc),
+            }
+        return result
 
     def _binding_key(self) -> str:
         try:
