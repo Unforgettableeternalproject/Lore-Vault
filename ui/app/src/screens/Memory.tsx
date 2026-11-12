@@ -208,7 +208,7 @@ function ConceptList() {
                 ))}
               </select>
             </label>
-            <ChipGroup label="SCOPE" groupLabel="scope 狀態" options={SCOPE_STATES} value={scopeState} onChange={setScopeState} />
+            <ChipGroup label="SCOPE 狀態" groupLabel="scope 狀態" options={SCOPE_STATES} value={scopeState} onChange={setScopeState} />
             {view === 'graph' ? (
               <ScopeSelect scopes={scopes} value={scope} onChange={setScope} />
             ) : (
@@ -273,7 +273,7 @@ function ScopeSelect({
   const missing = value && !named.some((s) => s.scope.toLowerCase() === value.toLowerCase());
   return (
     <label class="lv-filters__group">
-      <span class="lv-filters__label">scope</span>
+      <span class="lv-filters__label">SCOPE 名稱</span>
       <select class="lv-input lv-select" value={value} aria-label="scope 名稱" onChange={(e) => onChange((e.target as HTMLSelectElement).value)}>
         <option value="">全部</option>
         {missing && <option value={value}>{value}</option>}
