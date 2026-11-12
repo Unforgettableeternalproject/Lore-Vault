@@ -108,6 +108,8 @@ export interface NoteFull {
   review_reason?: string | null;
   /** 待審與待刪除項目另帶 unverified */
   review?: 'unverified' | null;
+  /** agent 提案：這則筆記目前開放中的提案（pending／approved／executing）；舊服務沒有此欄 */
+  open_proposals?: OpenProposalRef[];
 }
 
 export interface DocumentWarning {
@@ -642,4 +644,109 @@ export interface TaskSnapshot {
   /** CLI 產生快照的時間（ISO）；同步時間以側載 `updated` 為準 */
   generated_at?: string;
   changes: TaskChange[];
+}
+
+// ── 審核頁統一佇列（add-agent-review-proposals 的審核頁 API 契約） ──
+
+export type ProposalKind = 'note_delete' | 'document_delete' | 'note_update' | 'link_change' | 'task_archive';
+/** 佇列項目種類：提案五種，加上唯讀合併的 UEP 待審與任務層待授權 */
+export type QueueKind = ProposalKind | 'uep_review' | 'task_auth';
+export type ProposalState =
+  | 'pending'
+  | 'approved'
+  | 'executing'
+  | 'applied'
+  | 'rejected'
+  | 'superseded'
+  | 'expired'
+  | 'obsolete';
+
+export interface OpenProposalRef {
+  id: string;
+  kind: ProposalKind;
+  state: ProposalState;
+}
+
+export interface QueueItem {
+  /** source 為 proposal 時就是提案 id */
+  item_id: string;
+  source: 'proposal' | 'uep' | 'task_auth';
+  kind: QueueKind;
+  vault: string;
+  target: { type: string; id: string; title: string | null };
+  summary: string;
+  proposer: { principal: string; author: string | null };
+  created_at: string;
+  expires_at: string | null;
+  state: string;
+  rev: number;
+  /** note_update：核准前基準已變動（核准會得到 proposal_stale） */
+  stale: boolean;
+  deep_link: string | null;
+}
+
+export interface QueueResult {
+  items: QueueItem[];
+  next_cursor: string | null;
+  has_more: boolean;
+}
+
+export interface QueueCounts {
+  counts: Partial<Record<QueueKind, number>>;
+}
+
+/** note_update 被觸及欄位的值（base_snapshot、changes、三欄比對共用） */
+export interface NoteFields {
+  title?: string;
+  body?: string;
+  topics?: string[];
+  links?: string[];
+  supersedes?: string | null;
+}
+
+export interface ProposalRow {
+  id: string;
+  kind: ProposalKind;
+  state: ProposalState;
+  rev: number;
+  /** note_delete／document_delete：{reason, plan_summary}；note_update：{changes}；link_change：{remove, supersedes}；task_archive：{reason, allow_incomplete, plan_digest...} */
+  payload: Record<string, unknown>;
+  base_snapshot: NoteFields | null;
+  base_updated: string | null;
+  created_at: string;
+  expires_at: string;
+  // 後端 to_admin() 的其餘欄位（UI 目前不讀）
+  space?: string;
+  vault?: string;
+  target_type?: string;
+  target_id?: string;
+  proposer?: { principal: string; author: string | null };
+  updated_at?: string;
+  resolved_by?: string | null;
+  resolved_at?: string | null;
+  resolved_via?: string | null;
+  resolution_reason?: string | null;
+  superseded_by?: string | null;
+}
+
+export interface ProposalDetail {
+  proposal: ProposalRow;
+  target: { type: string; id: string; title: string | null };
+  /** 被觸及欄位的目前值（note_update 為被改的欄位；link_change 為 links 與 supersedes） */
+  current: NoteFields | null;
+  /** current 對應的目前版本 updated，rebase_to 用 */
+  current_updated: string | null;
+  /** link_change 移除對象的標題（id → 標題），查不到的 id 不在表內 */
+  link_titles?: Record<string, string>;
+}
+
+/** 409 proposal_stale 的 error 內容 */
+export interface ProposalStaleInfo {
+  base: NoteFields;
+  current: NoteFields;
+  proposed: NoteFields;
+  current_updated: string;
+  /** 後端附的訊息與已漂移的欄位名 */
+  message?: string;
+  fields?: string[];
 }

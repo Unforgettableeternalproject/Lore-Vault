@@ -371,9 +371,11 @@ def test_update_supersedes_can_be_cleared_explicitly(client, seeded):
             "supersedes": None,
         },
     )
-    assert resp.status_code == 200, resp.text
+    # 清除既有的更正關係屬於連結移除：一般 agent 送審（202），未核准前維持原狀
+    assert resp.status_code == 202, resp.text
+    assert resp.json()["proposal_pending"] is True
     got = client.post("/v1/get", json={"vault": A, "ids": [newer["id"]]}).json()
-    assert got["items"][0]["supersedes"] is None
+    assert got["items"][0]["supersedes"] == seeded["id"]
 
 
 def test_update_errors(client, seeded):

@@ -17,6 +17,7 @@ from lore_vault.confirm import ConfirmTokenExpired, ConfirmTokenInvalid
 from lore_vault.documents.service import UploadRejected
 from lore_vault.notes import InvalidCursor, NoChanges, VersionConflict
 from lore_vault.notes.review import ReviewStateConflict, UepForbidden
+from lore_vault.proposals.types import ProposalError
 from lore_vault.recall import UnsupportedKind
 from lore_vault.schema import InvalidCharacters
 from lore_vault.storage.admin import (
@@ -298,6 +299,13 @@ def install_error_handlers(app: FastAPI) -> None:
         extra = {} if exc.updated is None else {"updated": exc.updated}
         return _json(409, "review_state_conflict", exc, current=exc.current, **extra)
 
+    async def proposal_error(request: Request, exc: Exception) -> JSONResponse:
+        # 提案層錯誤：stale 附三份內容（base／current／proposed），其餘附狀態資訊；
+        # 一律不帶筆記以外的資料
+        assert isinstance(exc, ProposalError)
+        return _json(exc.status, exc.code, exc, **exc.extra)
+
+    app.add_exception_handler(ProposalError, proposal_error)
     app.add_exception_handler(UepForbidden, uep_forbidden)
     app.add_exception_handler(ReviewStateConflict, review_conflict)
     simple(AuthorizationWriteForbidden, 403, "authorization_write_forbidden")

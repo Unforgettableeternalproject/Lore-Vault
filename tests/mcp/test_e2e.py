@@ -116,9 +116,12 @@ async def test_local_full_flow(app, project):
             expected_updated=newer["updated"],
             supersedes="",
         )
+        # 清除更正關係屬連結移除：一般憑證送審，核准前維持原狀
+        assert cleared["applied"] is False and cleared["proposal_pending"] is True
         got = await s.ok("get", vault=vault, ids=[newer["id"]])
-        assert got["items"][0]["supersedes"] is None
-        assert got["items"][0]["updated"] == cleared["updated"]
+        assert got["items"][0]["supersedes"] == wrote["id"]
+        assert got["items"][0]["updated"] == newer["updated"]
+        assert got["items"][0]["open_proposals"][0]["kind"] == "link_change"
 
         status = await s.ok("status", vault=vault)
         assert status["vault"]["key"] == vault

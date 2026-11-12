@@ -545,7 +545,7 @@ def test_migration_v19_defaults_existing_notes_to_none(tmp_path):
             "updated_by_principal) VALUES ('n1', 'folder/a', 't', 'b', "
             "'2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', 'owner', 'owner')"
         )
-        assert migrate(raw) == SCHEMA_VERSION == 19
+        assert migrate(raw) == SCHEMA_VERSION == 20
         row = raw.execute("SELECT * FROM notes WHERE id = 'n1'").fetchone()
         assert row["review_state"] == "none"
         assert row["reviewed_by"] is row["review_prev_state"] is None

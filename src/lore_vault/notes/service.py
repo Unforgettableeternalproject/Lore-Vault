@@ -22,6 +22,20 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from lore_vault.documents import service as document_service
+from lore_vault.proposals import policy
+from lore_vault.proposals.types import (
+    ACTOR_APPROVED,
+    ACTOR_UI,
+    KIND_LINK_CHANGE,
+    KIND_NOTE_DELETE,
+    KIND_NOTE_UPDATE,
+    SUPERSEDED,
+    VIA_SYSTEM,
+    VIA_UI_DIRECT,
+    Actor,
+    Decision,
+    ProposalRow,
+)
 from lore_vault.recall.embedder import REASON_UNAVAILABLE, Embedder, embed_text
 from lore_vault.schema import (
     REVIEW_NONE,
@@ -34,8 +48,10 @@ from lore_vault.schema import (
 )
 from lore_vault.schema.chars import check_fields
 from lore_vault.storage import fts, vectors
+from lore_vault.storage import proposals as storage_proposals
 from lore_vault.storage.db import transaction
 from lore_vault.storage.documents import DOCUMENT_STATUSES
+from lore_vault.storage.errors import NotFound
 from lore_vault.storage.filters import filter_choices, filter_extensions, filter_text
 from lore_vault.storage.notes import (
     AUTHOR_STATES,
@@ -47,6 +63,7 @@ from lore_vault.storage.notes import (
     superseded_by,
     update_note_if,
 )
+from lore_vault.storage.proposals import Upserted
 from lore_vault.storage.timeutil import normalize_utc, utc_now
 from lore_vault.storage.vaults import resolve_read, resolve_write
 
@@ -129,12 +146,6 @@ def _jaccard(a: set[str], b: set[str]) -> float:
 
 def _norm_title(title: str) -> str:
     return _WHITESPACE.sub(" ", title).strip().casefold()
-
-
-def _check_principal(principal: object) -> None:
-    """principal 由服務依憑證決定；缺少代表呼叫路徑漏接認證結果，是程式錯誤。"""
-    if not isinstance(principal, str) or not principal.strip():
-        raise TypeError("principal 必填（由服務依憑證判定，不可由請求指定）")
 
 
 def _str_list(name: str, values: Sequence[str]) -> tuple[str, ...]:
@@ -281,8 +292,7 @@ def write(
     body: str,
     *,
     space: str,
-    principal: str,
-    author: str | None = None,
+    actor: Actor,
     topics: Sequence[str] = (),
     links: Sequence[str] = (),
     supersedes: str | None = None,
@@ -302,17 +312,19 @@ def write(
     - `supersedes` 必須是同一 vault 內存在的 note；它本身不列入疑似重複
     - 任一欄位含控制字元（tab、LF、CR 以外的 C0）或孤立 surrogate：拋
       `InvalidCharacters`，不寫入
-    - 作者（A22）：`principal` 由呼叫端依憑證決定（HTTP 層取自認證結果，不可來自
-      請求）；`author` 是寫入者自報名，未填存 None、不代填（規則見
+    - 作者（A22）：`actor.principal` 由呼叫端依憑證決定（HTTP 層取自認證結果，不可來自
+      請求）；`actor.author` 是寫入者自報名，未填存 None、不代填（規則見
       `schema.validate_author`）。建立時 `updated_by` 同 `author`
+    - 寫入來源：`actor.kind` 由認證方式決定（UI session → ui，其餘 → agent），
+      寫進 `write_origin`；新增 note 不送審
     - 連結：正文的 `[[標題]]` 在同一 vault 內依標題解析（`notes.links`），唯一命中的
       note id 併入 links（明確傳入的在前、去重）；解析不到或歧義的保留原文、不寫入，
       列在 `unresolved_links`
     - `dry_run=True`：驗證、範圍、supersedes 檢查、查重與連結解析都與正式寫入相同，
       只在寫入前停下（不建列、不動索引）
     """
-    _check_principal(principal)
-    author = validate_author(author)
+    principal = actor.principal
+    author = validate_author(actor.author)
     topics = _str_list("topics", topics)
     links = _str_list("links", links)
     # 查重會把 title／body 組成 FTS 查詢，禁用字元要在那之前擋下
@@ -374,6 +386,7 @@ def write(
         updated_by=author,
         updated_by_principal=principal,
         review_state=review_state,
+        write_origin=actor.write_origin,
     )
     stored = insert_note(conn, key, note, space=space)
     return WriteResult(
@@ -400,9 +413,41 @@ class UpdateResult:
     embedding_stale: bool
     # 這次有重新解析正文連結時，解析不到或歧義的 `[[標題]]`
     unresolved_links: tuple[dict[str, Any], ...] = ()
+    # False＝整筆被攔下送審（note 完全沒動，`note` 是目前版本）
+    applied: bool = True
+    # 這次建立或命中的提案（受保護操作）
+    proposal: ProposalRow | None = None
+    proposal_deduped: bool = False
+    superseded_proposal: ProposalRow | None = None
+    # 部分套用：被攔下的連結移除／supersedes 變更
+    partial: bool = False
+    held_links_removed: tuple[str, ...] = ()
+    held_supersedes: bool = False
+
+    def _proposal_dict(self) -> dict[str, Any]:
+        assert self.proposal is not None
+        info = {**self.proposal.brief(), "deduped": self.proposal_deduped}
+        if self.superseded_proposal is not None:
+            info["superseded"] = self.superseded_proposal.id
+        return info
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        if not self.applied:
+            # 整筆送審：不含 payload（含筆記原文）；bearer 只看得到提案的精簡形狀
+            human = self.proposal is not None and (
+                self.proposal.kind == KIND_NOTE_UPDATE
+            )
+            return {
+                "id": self.note.id,
+                "vault": self.note.vault,
+                "updated": self.note.updated,
+                "applied": False,
+                "proposal_pending": True,
+                "reason": "human_written_note" if human else "link_change_held",
+                "proposal": self._proposal_dict(),
+                "next_step": UPDATE_HELD_NEXT_STEP,
+            }
+        result = {
             "id": self.note.id,
             "vault": self.note.vault,
             "updated": self.note.updated,
@@ -415,9 +460,77 @@ class UpdateResult:
             "embedding_stale": self.embedding_stale,
             "review_state": self.note.review_state,
         }
+        if self.partial:
+            result.update(
+                applied=True,
+                partial=True,
+                proposal_pending=True,
+                proposal=self._proposal_dict(),
+                held={
+                    "links_removed": list(self.held_links_removed),
+                    "supersedes_changed": self.held_supersedes,
+                },
+                next_step=UPDATE_HELD_NEXT_STEP,
+            )
+        return result
 
+
+UPDATE_HELD_NEXT_STEP = (
+    "這次修改已送審、尚未生效：請使用者到審核頁核准（駁回則原文不變）；"
+    "之後可用 get 查看 open_proposals"
+)
 
 _UNSET: Any = object()
+_EXPLICIT_FIELDS = ("title", "body", "topics", "links", "supersedes")
+
+
+def _derive_links(
+    conn: sqlite3.Connection,
+    key: str,
+    note_id: str,
+    current: Note,
+    changes: dict[str, Any],
+    body_changed: bool,
+) -> tuple[tuple[str, ...] | None, tuple[dict[str, Any], ...]]:
+    """依 `changes` 算出寫入後的 links（None＝不動）與無法解析的 `[[標題]]`。"""
+    if "links" not in changes and not body_changed:
+        return None, ()
+    parsed = resolve_body_links(
+        conn,
+        key,
+        changes.get("body", current.body),
+        self_id=note_id,
+        self_title=changes.get("title", current.title),
+    )
+    if "links" in changes:
+        base = changes["links"]
+    else:
+        stale = resolve_body_links(
+            conn,
+            key,
+            current.body,
+            self_id=note_id,
+            self_title=current.title,
+        ).ids
+        base = tuple(i for i in current.links if i not in stale)
+    return merge_links(base, parsed.ids), parsed.unresolved
+
+
+def _touched_snapshot(current: Note, requested: dict[str, Any]) -> dict[str, Any]:
+    """提出當下，被觸及欄位的原值（核准時比對基準、UI 三欄 diff 用）。"""
+    snap: dict[str, Any] = {}
+    for name in requested:
+        value = getattr(current, name)
+        snap[name] = list(value) if isinstance(value, tuple) else value
+    return snap
+
+
+def _plain_value(value: Any) -> Any:
+    return list(value) if isinstance(value, tuple) else value
+
+
+def _plain_changes(requested: dict[str, Any]) -> dict[str, Any]:
+    return {k: (list(v) if isinstance(v, tuple) else v) for k, v in requested.items()}
 
 
 def update(
@@ -427,8 +540,7 @@ def update(
     expected_updated: str,
     *,
     space: str,
-    principal: str,
-    author: str | None = None,
+    actor: Actor,
     title: str | None = None,
     body: str | None = None,
     topics: Sequence[str] | None = None,
@@ -441,8 +553,10 @@ def update(
     （附目前版本），不寫入任何東西。
 
     版本比對只在 `storage.notes.update_note_if` 一處（同一交易內）。
-    `author` 是這次修改者的自報名：寫進 `updated_by`（未填存 None，不沿用上一位），
-    `principal` 寫進 `updated_by_principal`；原作者 `author` 不變。
+    `actor.author` 是這次修改者的自報名：寫進 `updated_by`（未填存 None，不沿用
+    上一位），
+    `actor.principal` 寫進 `updated_by_principal`；原作者 `author` 不變。
+    `actor.kind` 由 HTTP 層依認證方式決定，決定 `write_origin` 與是否送審。
 
     連結（與 write 同一套 `[[標題]]` 解析，同一交易內讀目前版本計算）：
     - 有傳 `links`：links = 傳入值 ∪ 正文（新 body，未傳則目前 body）解析出的 id
@@ -451,6 +565,14 @@ def update(
       也寫在舊 body 的 `[[ ]]` 裡，視為自動連結一併移除）
     - 兩者都沒有：links 不動、不重新解析（`unresolved_links` 為空）
 
+    送審（add-agent-review-proposals，政策見 `proposals.policy`）：bearer 一般 agent
+    - 改 write_origin 為 ui 的 note → 整筆建立 `note_update` 提案，note 完全不動，
+      回 `applied=False`
+    - 否則明確的連結移除、supersedes 變更建立 `link_change` 提案，其餘照常套用
+      （`partial=True`）；只剩被攔下的部分時同樣 `applied=False`
+    送審以回傳值表示（不用例外）：例外會讓同一交易內剛建立的提案一起 rollback。
+    UI session／已核准的套用寫入後，目標上其他開放提案轉 superseded。
+
     審核（uep 寫入契約）：
     - uep 在 lore 只能改自己寫的 note（否則 `UepForbidden`），改完 `review_state`
       一律回 pending（包含 verified／rejected／pending_delete），並清空審核欄位
@@ -458,8 +580,8 @@ def update(
       note，視同核准：`review_state` 改為 verified，記 `reviewed_by`／`reviewed_at`
     - 其他情況審核欄位不動
     """
-    _check_principal(principal)
-    author = validate_author(author)
+    principal = actor.principal
+    author = validate_author(actor.author)
     if not isinstance(expected_updated, str) or not expected_updated:
         raise ValueError("expected_updated 必填（取自 get／write 回傳的 updated）")
     changes: dict[str, Any] = {}
@@ -476,14 +598,95 @@ def update(
     if not changes:
         raise NoChanges("沒有指定要更新的欄位")
     check_fields(changes)
+    requested = {k: changes[k] for k in _EXPLICIT_FIELDS if k in changes}
 
+    held: Decision | None = None
+    upserted: Upserted | None = None
     with transaction(conn):
         key = resolve_write(conn, vault, space=space)
         current = get_note(conn, key, note_id, space=space)  # 不存在拋 NotFound
+        if current.vault != key:  # 範圍防線：不信任上一層的過濾
+            raise NotFound(f"vault {key!r} 內找不到 note {note_id!r}")
         if changes.get("supersedes") is not None:
             get_note(conn, key, changes["supersedes"], space=space)
+        governed = policy.is_governed(actor, space)
+        if governed and current.updated != expected_updated:
+            # 提出時就要是最新版本：衝突照舊回 version_conflict，不產生提案
+            raise VersionConflict(current, expected_updated)
+        if (
+            governed
+            and current.write_origin == "ui"
+            and all(
+                _plain_value(getattr(current, k)) == _plain_value(v)
+                for k, v in requested.items()
+            )
+        ):
+            # 受保護筆記的無變更 update：不建提案，也不寫入（寫入會把 write_origin
+            # 改成 agent、洗掉保護）；照一般 no-op 回傳目前版本
+            return UpdateResult(current, False, False)
         body_changed = "body" in changes and changes["body"] != current.body
         title_changed = "title" in changes and changes["title"] != current.title
+        derived, unresolved = _derive_links(
+            conn, key, note_id, current, changes, body_changed
+        )
+        if governed:
+            removed: tuple[str, ...] = ()
+            if "links" in changes and derived is not None:
+                old_auto = resolve_body_links(
+                    conn,
+                    key,
+                    current.body,
+                    self_id=note_id,
+                    self_title=current.title,
+                ).ids
+                removed = tuple(
+                    i
+                    for i in current.links
+                    if i not in derived and i not in old_auto
+                )
+            held = policy.decide_update(
+                actor, space, current, requested, removed_links=removed
+            )
+            if held.hold:
+                assert held.kind is not None and held.payload is not None
+                if held.kind == KIND_NOTE_UPDATE:
+                    payload = {"changes": _plain_changes(requested)}
+                    snapshot = _touched_snapshot(current, requested)
+                else:
+                    payload = held.payload
+                    snapshot = {
+                        "links": list(current.links),
+                        "supersedes": current.supersedes,
+                    }
+                upserted = storage_proposals.upsert_open(
+                    conn,
+                    space=space,
+                    vault=key,
+                    kind=held.kind,
+                    target_id=note_id,
+                    payload=payload,
+                    proposer_principal=principal,
+                    proposer_author=author,
+                    base_updated=current.updated,
+                    base_snapshot=snapshot,
+                )
+                if not held.partial:
+                    return UpdateResult(
+                        current,
+                        False,
+                        False,
+                        applied=False,
+                        proposal=upserted.proposal,
+                        proposal_deduped=upserted.deduped,
+                        superseded_proposal=upserted.superseded,
+                    )
+                # 部分套用：去掉被攔下的部分後重新計算連結
+                changes = dict(held.remaining or {})
+                body_changed = "body" in changes and changes["body"] != current.body
+                title_changed = "title" in changes and changes["title"] != current.title
+                derived, unresolved = _derive_links(
+                    conn, key, note_id, current, changes, body_changed
+                )
         if is_review_space(principal, space):
             check_uep_owns(principal, current)
             changes.update(
@@ -500,28 +703,8 @@ def update(
                 reviewed_at=utc_now(),
                 review_reason=None,
             )
-        unresolved: tuple[dict[str, Any], ...] = ()
-        if "links" in changes or body_changed:
-            parsed = resolve_body_links(
-                conn,
-                key,
-                changes.get("body", current.body),
-                self_id=note_id,
-                self_title=changes.get("title", current.title),
-            )
-            if "links" in changes:
-                base = changes["links"]
-            else:
-                stale = resolve_body_links(
-                    conn,
-                    key,
-                    current.body,
-                    self_id=note_id,
-                    self_title=current.title,
-                ).ids
-                base = tuple(i for i in current.links if i not in stale)
-            changes["links"] = merge_links(base, parsed.ids)
-            unresolved = parsed.unresolved
+        if derived is not None:
+            changes["links"] = derived
         if body_changed:
             changes["summary"] = None
         updated = update_note_if(
@@ -533,13 +716,36 @@ def update(
             space=space,
             now=now,
             editor=(author, principal),
+            write_origin=actor.write_origin,
         )
         if updated is None:
             raise VersionConflict(
                 get_note(conn, key, note_id, space=space), expected_updated
             )
+        if actor.kind in (ACTOR_UI, ACTOR_APPROVED):
+            # 使用者（或使用者核准的內容）已寫入：目標上其他開放提案已過時
+            storage_proposals.close_for_target(
+                conn,
+                key,
+                note_id,
+                to_state=SUPERSEDED,
+                via=VIA_UI_DIRECT if actor.kind == ACTOR_UI else VIA_SYSTEM,
+                reason="target edited",
+                kinds=(KIND_NOTE_UPDATE, KIND_LINK_CHANGE, KIND_NOTE_DELETE),
+            )
+    partial = held is not None and held.hold
+    payload_held = (held.payload or {}) if held is not None else {}
     return UpdateResult(
-        updated, body_changed, body_changed or title_changed, unresolved
+        updated,
+        body_changed,
+        body_changed or title_changed,
+        unresolved,
+        proposal=upserted.proposal if upserted else None,
+        proposal_deduped=upserted.deduped if upserted else False,
+        superseded_proposal=upserted.superseded if upserted else None,
+        partial=partial,
+        held_links_removed=tuple(payload_held.get("remove", ())) if partial else (),
+        held_supersedes=bool(partial and payload_held.get("supersedes")),
     )
 
 

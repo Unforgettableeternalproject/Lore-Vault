@@ -360,12 +360,65 @@ def guard_task_write(
     return version
 
 
+# ── 審核頁：待核准的 change（唯讀、衍生，不入提案表）──────────────────
+
+
+def pending_authorizations(conn: Any, vault: str | None = None) -> list[dict[str, Any]]:
+    """active、`requires_authorization` 且沒有有效 UI 核准紀錄（內容雜湊相符）的
+    change，每項 {vault, change, version, updated}。
+
+    `task-index` 只有各 change 的 state，沒有 requires_authorization，所以讀
+    `task-change:` 內容本身。停用中的 vault 略過。核准紀錄一旦有效，項目自然消失，
+    不會有重複決策。`vault` 給定時只看該 vault（正式 key）。"""
+    found: list[dict[str, Any]] = []
+    disabled: dict[str, bool] = {}
+    for blob in storage_sidecar.list_by_prefix(conn, CHANGE_PREFIX, space=TASK_SPACE):
+        if vault is not None and blob.vault != vault:
+            continue
+        name = blob.key[len(CHANGE_PREFIX) :]
+        doc = _json_dict(blob.content)
+        if (
+            doc is None
+            or doc.get("name") != name
+            or doc.get("state") != STATE_ACTIVE
+            or not tf.requires_authorization(doc)
+        ):
+            continue
+        if blob.vault not in disabled:
+            index, _, _ = _index(conn, blob.vault)
+            disabled[blob.vault] = index is not None and tf.is_disabled(index)
+        if disabled[blob.vault]:
+            continue
+        record = _record(conn, blob.vault, name)
+        if record is not None and record[0].get(
+            "content_digest"
+        ) == tf.authorization_digest(doc):
+            continue
+        found.append(
+            {
+                "vault": blob.vault,
+                "change": name,
+                "version": blob.version,
+                "updated": blob.updated,
+            }
+        )
+    return found
+
+
 # ── 端點 ─────────────────────────────────────────────────────────────
 
 
 def _read_change(conn: Any, vault: str, name: str) -> tuple[dict[str, Any], int]:
     blob = storage_sidecar.get(conn, vault, CHANGE_PREFIX + name, space=TASK_SPACE)
     return _change_doc(blob.content, name), blob.version
+
+
+def check_change_name(name: str) -> None:
+    _check_name(name)
+
+
+def read_change(conn: Any, vault: str, name: str) -> tuple[dict[str, Any], int]:
+    return _read_change(conn, vault, name)
 
 
 def _check_name(name: str) -> None:

@@ -18,17 +18,18 @@ from pydantic import BaseModel, ConfigDict
 
 from lore_vault.notes import review as review_service
 
-from .errors import UiSessionRequired
-from .principals import AUTH_UI, auth_method_of, principal_of
+from .guards import ui_only_route, ui_session_only
+from .principals import principal_of
 from .state import AppState
 
-
-def _require_ui(request: Request) -> None:
-    if auth_method_of(request) != AUTH_UI:
-        raise UiSessionRequired("審核只能由登入 UI 的使用者本人操作")
+_require_ui = ui_session_only()
 
 
-router = APIRouter(prefix="/v1/review", dependencies=[Depends(_require_ui)])
+router = APIRouter(
+    prefix="/v1/review",
+    dependencies=[Depends(_require_ui)],
+    route_class=ui_only_route(),
+)
 
 
 def _state(request: Request) -> AppState:

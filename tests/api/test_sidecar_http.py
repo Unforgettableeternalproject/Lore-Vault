@@ -243,30 +243,30 @@ def _confirm(client, path: str, **body) -> dict:
     return {"planned": planned, "done": done.json()}
 
 
-def test_vault_delete_removes_sidecar_and_doctor_stays_green(client):
-    create_vault(client, DEV)
-    put(client)
-    result = _confirm(client, "/v1/vault_delete", space="dev", key=DEV)
+def test_vault_delete_removes_sidecar_and_doctor_stays_green(ui_client):
+    create_vault(ui_client, DEV)
+    put(ui_client)
+    result = _confirm(ui_client, "/v1/vault_delete", space="dev", key=DEV)
     assert result["planned"]["plan"]["counts"]["sidecar_blobs"] == 1
-    assert _doctor_status(client, "sidecar.orphans") == "pass"
-    assert get(client, vault=None).json() == {"items": []}
+    assert _doctor_status(ui_client, "sidecar.orphans") == "pass"
+    assert get(ui_client, vault=None).json() == {"items": []}
     # 同 key 重建後不會讀到舊內容
-    create_vault(client, DEV)
-    assert code(get(client)) == "not_found"
+    create_vault(ui_client, DEV)
+    assert code(get(ui_client)) == "not_found"
 
 
-def test_vault_move_space_moves_sidecar(client):
-    create_vault(client, LORE, space="lore")
-    put(client, vault=LORE, space="lore")
+def test_vault_move_space_moves_sidecar(ui_client):
+    create_vault(ui_client, LORE, space="lore")
+    put(ui_client, vault=LORE, space="lore")
     result = _confirm(
-        client, "/v1/vault_move_space", space="lore", key=LORE, to_space="personal"
+        ui_client, "/v1/vault_move_space", space="lore", key=LORE, to_space="personal"
     )
     counts = result["planned"]["plan"]["counts"]
     assert counts["sidecar_blobs.vault"] == 1 and counts["sidecar_blobs.space"] == 1
-    assert get(client, vault=None, space="lore").json() == {"items": []}
-    moved = get(client, vault="personal/arc", space="personal").json()
+    assert get(ui_client, vault=None, space="lore").json() == {"items": []}
+    moved = get(ui_client, vault="personal/arc", space="personal").json()
     assert base64.b64decode(moved["content_base64"]) == PAYLOAD
-    assert _doctor_status(client, "sidecar.orphans") == "pass"
+    assert _doctor_status(ui_client, "sidecar.orphans") == "pass"
 
 
 def test_requires_auth(db_path):

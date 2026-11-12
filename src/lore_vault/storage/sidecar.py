@@ -268,6 +268,24 @@ def list_for_key(
     return [_row(r) for r in rows]
 
 
+def list_by_prefix(
+    conn: sqlite3.Connection, prefix: str, *, space: object
+) -> list[SidecarBlob]:
+    """本 space 內 key 以 `prefix` 開頭的全部列（依 vault、key 排序；孤兒列不回傳）。
+    `prefix` 是字面前綴（`%`、`_` 不當萬用字元）。"""
+    checked = validate_space(space)
+    escaped = prefix.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+    rows = conn.execute(
+        f"""
+        SELECT s.* FROM {TABLE} s JOIN vaults v ON v.key = s.vault
+        WHERE s.key LIKE ? ESCAPE '!' AND s.space = ? AND v.space = s.space
+        ORDER BY s.vault, s.key
+        """,
+        (escaped + "%", checked),
+    ).fetchall()
+    return [_row(r) for r in rows]
+
+
 def is_all(vault: str | None) -> bool:
     return vault is None or vault.strip() == ALL_VAULTS
 

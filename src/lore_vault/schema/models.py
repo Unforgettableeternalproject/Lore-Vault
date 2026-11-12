@@ -139,6 +139,12 @@ REVIEW_STATES = (
 )
 # 對讀者標示「尚未審核」的狀態
 REVIEW_UNVERIFIED_STATES = (REVIEW_PENDING, REVIEW_PENDING_DELETE)
+
+# 寫入來源（add-agent-review-proposals）：最後一次內容寫入是 UI session（ui）還是
+# bearer／系統流程（agent）；由認證方式決定，不看 principal
+WRITE_ORIGIN_UI = "ui"
+WRITE_ORIGIN_AGENT = "agent"
+WRITE_ORIGINS = (WRITE_ORIGIN_UI, WRITE_ORIGIN_AGENT)
 AUTHOR_MAX_CHARS = 64
 _AUTHOR_FORBIDDEN_WS = frozenset(chr(c) for c in (9, 10, 13))  # tab, LF, CR
 
@@ -194,6 +200,8 @@ class Note(Record):
     reviewed_at: str | None = None
     review_reason: str | None = None
     review_prev_state: str | None = None
+    # 最後一次內容寫入的來源；舊資料與舊墓碑快照缺此欄時視為 agent
+    write_origin: str = WRITE_ORIGIN_AGENT
 
     REQUIRED: ClassVar[frozenset[str]] = frozenset(
         {"id", "vault", "title", "body", "created", "updated"}
@@ -229,6 +237,12 @@ class Note(Record):
         ):
             raise fail(
                 "Note", "review_prev_state", f"不合法：{self.review_prev_state!r}"
+            )
+        if self.write_origin not in WRITE_ORIGINS:
+            raise fail(
+                "Note",
+                "write_origin",
+                f"必須是 {list(WRITE_ORIGINS)}，得到 {self.write_origin!r}",
             )
         for name in ("reviewed_by", "review_reason"):
             opt_str("Note", name, getattr(self, name))

@@ -172,6 +172,13 @@ DELETE_NEXT_STEP = (
     "加上 confirm_token 再呼叫一次 delete；不要自動連打兩步。token 5 分鐘內有效，"
     "期間不要切換 space"
 )
+# 刪除第一步附提案時的下一步（使用者也可以直接到審核頁核准）
+DELETE_PROPOSAL_NEXT_STEP = (
+    "尚未刪除。這次刪除已登記為待審提案（proposal）：把 plan 給使用者看，使用者可"
+    "(a) 在對話中明確同意，你再以相同參數加 confirm_token 呼叫一次 delete；或"
+    "(b) 到 UI 審核頁核准（核准後不要再送舊 token）。不要自動連打兩步；"
+    "token 5 分鐘內有效，期間不要切換 space"
+)
 
 # 目前這次工具呼叫所屬的 MCP session 與要轉發的 header（`Shell.request_scope` 設定）
 _session_var: ContextVar[str | None] = ContextVar("lore_mcp_session", default=None)
@@ -301,6 +308,21 @@ _HINTS = {
         "服務端原始檔雜湊不符；請使用者執行 doctor 檢查 documents.blob_exists"
     ),
     "hash_mismatch": "收到的內容與服務宣告的 sha256 不符，未寫入；重試一次",
+    "proposal_state_conflict": (
+        "提案已被處理或有更新：用 get 的 open_proposals 確認目前狀態，不要重送"
+    ),
+    "proposal_resolved": (
+        "這份同意已被另一個通道（UI 核准或對話確認）處理過；用 get 或 "
+        "tasks(action='list') 確認結果，不要重送舊 token"
+    ),
+    "proposal_executing": "提案正在由另一個呼叫執行中；稍後再試，不要重送",
+    "proposal_not_found": "提案不存在或不屬於這個 vault／space",
+    "proposal_queue_full": (
+        "這個 vault 的待審提案已達上限（200 筆）：請使用者先到審核頁處理既有提案"
+    ),
+    "proposal_kind_forbidden": (
+        "這個端點只處理任務封存提案；其他提案只能由使用者在 UI 審核"
+    ),
 }
 
 DOWNLOAD_TOO_LARGE_HINTS = {
@@ -1201,7 +1223,11 @@ class Shell:
             raise self._write_unreachable(exc) from None
         result["kind"] = kind
         if not result.get("executed"):
-            result["next_step"] = DELETE_NEXT_STEP
+            result["next_step"] = (
+                DELETE_PROPOSAL_NEXT_STEP
+                if result.get("proposal_pending")
+                else DELETE_NEXT_STEP
+            )
         else:
             result["undelete_hint"] = "墓碑已寫入；需要還原時用 undelete(id=...)"
         return result
@@ -1788,6 +1814,8 @@ def build_server(shell: Shell) -> MCPServer:
             "note 另帶 review_state（none／pending／verified／rejected／"
             "pending_delete）、reviewed_by、reviewed_at、review_reason；"
             '未審核的另有 review="unverified"。'
+            "每項另帶 open_proposals（[{id, kind, state}]）：該項目上等使用者審核的"
+            "提案，送審後用它輪詢結果（不含提案內容）。"
         ),
         "list": (
             "列出 vault 的 note 標題與文件（新到舊，分頁；文件含 status、error_code、"
@@ -1812,6 +1840,10 @@ def build_server(shell: Shell) -> MCPServer:
             "角色名（記為最後修改者，原作者不變）。服務不可達時直接失敗。"
             "U.E.P 憑證在 lore space 只能修改自己寫的 note，改完一律回到待審核"
             "（review_state=pending，即使原本已核准）。"
+            "一般憑證修改「使用者本人寫的 note」不會生效：回 applied=false、"
+            "proposal_pending=true 與 proposal（HTTP 202），內容等使用者在審核頁核准，"
+            "駁回則原文不變；明確移除連結或變更 supersedes 也要送審（其餘欄位照常套用，"
+            "回 partial=true）。送審後不要重送，用 get 的 open_proposals 輪詢。"
         ),
         "upload": (
             "上傳本機文件（md、txt、程式碼、json、yaml、toml、pdf、docx、pptx；單檔 "
@@ -1842,6 +1874,9 @@ def build_server(shell: Shell) -> MCPServer:
             "U.E.P 憑證在 lore space 的第二步不會真的刪除：只記下刪除請求"
             "（回傳 review_state=pending_delete，note 照常可見），"
             "要使用者在 UI 核准才刪。"
+            "一般憑證的刪除第一步會回 proposal（待審提案）與 proposal_pending=true："
+            "使用者可在對話中同意（再帶 confirm_token），也可到 UI 審核頁核准；"
+            "兩個通道只有一個會生效，核准後舊 token 不能再用。"
         ),
         "undelete": (
             "從墓碑還原先前刪除的 note 或文件（同一個 id，範圍為目前 space）。"

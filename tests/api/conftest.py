@@ -196,3 +196,20 @@ def embed_all(db_path: Path) -> None:
             )
     finally:
         conn.close()
+
+
+def make_ui_client(app, db_path: Path) -> SpaceClient:
+    """與 bearer client 同一個 app 的 UI session client（不重跑 lifespan）。
+    整個 vault 的刪除與換 space 在 dev／lore 只收 UI session。"""
+    seed_ui_account(db_path)
+    ui = SpaceClient(app, base_url="https://testserver")
+    ui_headers = {"X-Lore-Vault-UI": "1"}
+    resp = ui.post("/ui/api/login", json=UI_LOGIN, headers=ui_headers)
+    assert resp.status_code == 204, resp.text
+    ui.headers.update(ui_headers)
+    return ui
+
+
+@pytest.fixture
+def ui_client(client, db_path):
+    return make_ui_client(client.app, db_path)

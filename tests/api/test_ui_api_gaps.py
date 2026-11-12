@@ -276,10 +276,16 @@ def test_update_link_merge_rules(client):
     # 只改 title：links 不動、不重新解析
     data = update(title="本體（改名）")
     assert data["links"] == ["manual", t2["id"]] and data["unresolved_links"] == []
-    # 明傳 links：傳入值 ∪ 目前正文解析結果
+    # 明傳 links：傳入值 ∪ 目前正文解析結果；明確拿掉的 "manual" 屬連結移除，
+    # 一般 agent 送審：新增的 "other" 照套，"manual" 留著等核准（partial）
     data = update(links=["other"])
-    assert data["links"] == ["other", t2["id"]]
-    assert _get_note(client, DEV, note["id"])["links"] == ["other", t2["id"]]
+    assert data["links"] == ["other", "manual", t2["id"]]
+    assert data["partial"] is True and data["held"]["links_removed"] == ["manual"]
+    assert _get_note(client, DEV, note["id"])["links"] == [
+        "other",
+        "manual",
+        t2["id"],
+    ]
 
 
 def test_dry_run_previews_links(client, db_path):
@@ -453,14 +459,14 @@ def test_topics_counts_and_space_scope(client):
 # ── 9. plan_changed 附新 token ──
 
 
-def test_plan_changed_returns_new_token_and_old_one_stays_refused(client):
-    create_vault(client, DEV)
-    write_note(client, DEV, "一", "內容")
+def test_plan_changed_returns_new_token_and_old_one_stays_refused(ui_client):
+    create_vault(ui_client, DEV)
+    write_note(ui_client, DEV, "一", "內容")
     body = {"space": "dev", "key": DEV}
-    planned = ok(post(client, "/v1/vault_delete", **body))
-    write_note(client, DEV, "二", "規劃後新增")
+    planned = ok(post(ui_client, "/v1/vault_delete", **body))
+    write_note(ui_client, DEV, "二", "規劃後新增")
     resp = post(
-        client, "/v1/vault_delete", **body, confirm_token=planned["confirm_token"]
+        ui_client, "/v1/vault_delete", **body, confirm_token=planned["confirm_token"]
     )
     assert resp.status_code == 409 and code(resp) == "plan_changed"
     err = resp.json()["error"]
@@ -468,19 +474,19 @@ def test_plan_changed_returns_new_token_and_old_one_stays_refused(client):
     assert err["confirm_token"] and err["confirm_token"] != planned["confirm_token"]
     assert err["expires_at"].endswith("Z")
     # 沒有自動執行
-    assert ok(post(client, "/v1/vault_resolve", key=DEV))["note_count"] == 2
+    assert ok(post(ui_client, "/v1/vault_resolve", key=DEV))["note_count"] == 2
     # 舊 token 仍被拒、仍不執行
     resp = post(
-        client, "/v1/vault_delete", **body, confirm_token=planned["confirm_token"]
+        ui_client, "/v1/vault_delete", **body, confirm_token=planned["confirm_token"]
     )
     assert resp.status_code == 409 and code(resp) == "plan_changed"
-    assert ok(post(client, "/v1/vault_resolve", key=DEV))["note_count"] == 2
+    assert ok(post(ui_client, "/v1/vault_resolve", key=DEV))["note_count"] == 2
     # 新 token：使用者確認後執行
     done = ok(
-        post(client, "/v1/vault_delete", **body, confirm_token=err["confirm_token"])
+        post(ui_client, "/v1/vault_delete", **body, confirm_token=err["confirm_token"])
     )
     assert done["executed"] is True and done["plan"]["counts"]["notes"] == 2
-    resp = post(client, "/v1/vault_resolve", key=DEV)
+    resp = post(ui_client, "/v1/vault_resolve", key=DEV)
     assert resp.status_code == 404
 
 

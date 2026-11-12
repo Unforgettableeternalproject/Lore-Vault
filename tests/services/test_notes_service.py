@@ -14,12 +14,14 @@ from lore_vault.notes import (
     write,
 )
 from lore_vault.notes import service as notes_service
+from lore_vault.proposals.types import Actor
 from lore_vault.storage import notes as storage_notes
 from lore_vault.storage import vectors
 from lore_vault.storage.errors import NotFound, VaultRequired
 
 from .conftest import DIM, TS, RaisingEmbedder
 
+ACTOR = Actor.system("xavier")
 A = "folder/a"
 B = "folder/b"
 NOW = "2026-09-02T00:00:00.000Z"
@@ -42,7 +44,7 @@ def test_write_stores_note_without_waiting_for_summary_or_embedding(vaults, embe
         "新筆記",
         "正文內容",
         space="dev",
-        principal="xavier",
+        actor=ACTOR,
         topics=["t"],
         now=NOW,
     )
@@ -85,7 +87,7 @@ def test_write_flags_known_similar_note(vaults, add_note, embedder):
         "FTS5 中文檢索",
         "trigram 對兩字詞「記憶」會靜默回 0 筆，所以改用 CJK bigram 索引。",
         space="dev",
-        principal="xavier",
+        actor=ACTOR,
         embedder=embedder,
         dim=DIM,
     )
@@ -105,7 +107,7 @@ def test_write_vector_only_duplicate_is_found(vaults, add_note, embedder):
         "chinese full text search",
         "memory search",
         space="dev",
-        principal="xavier",
+        actor=ACTOR,
         embedder=embedder,
         dim=DIM,
     )
@@ -121,7 +123,7 @@ def test_write_dedup_degrades_to_lexical_when_embedder_fails(vaults, add_note):
         "FTS5 中文檢索",
         "改用 CJK bigram 索引",
         space="dev",
-        principal="xavier",
+        actor=ACTOR,
         embedder=RaisingEmbedder(TimeoutError("timed out")),
         dim=DIM,
     )
@@ -139,7 +141,7 @@ def test_write_dissimilar_note_has_no_duplicates(vaults, add_note, embedder):
         "Docker volume",
         "named volume 預設",
         space="dev",
-        principal="xavier",
+        actor=ACTOR,
         embedder=embedder,
         dim=DIM,
     )
@@ -150,17 +152,17 @@ def test_write_supersedes_must_exist_and_is_not_a_duplicate(vaults, add_note, em
     add_note(A, "old", "FTS5 中文檢索", "改用 CJK bigram 索引")
     with pytest.raises(NotFound):
         write(
-            vaults, A, "t", "b", space="dev", principal="xavier", supersedes="missing"
+            vaults, A, "t", "b", space="dev", actor=ACTOR, supersedes="missing"
         )
     with pytest.raises(NotFound):  # 其他 vault 的 note 不可被取代
-        write(vaults, B, "t", "b", space="dev", principal="xavier", supersedes="old")
+        write(vaults, B, "t", "b", space="dev", actor=ACTOR, supersedes="old")
     result = write(
         vaults,
         A,
         "FTS5 中文檢索",
         "改用 CJK bigram 索引",
         space="dev",
-        principal="xavier",
+        actor=ACTOR,
         supersedes="old",
         embedder=embedder,
         dim=DIM,
@@ -171,7 +173,7 @@ def test_write_supersedes_must_exist_and_is_not_a_duplicate(vaults, add_note, em
 
 def test_write_rejects_wildcard_vault(vaults):
     with pytest.raises(VaultRequired):
-        write(vaults, "*", "t", "b", space="dev", principal="xavier")
+        write(vaults, "*", "t", "b", space="dev", actor=ACTOR)
 
 
 def test_embedding_text_has_single_source():
@@ -194,7 +196,7 @@ def test_dedup_embeds_title_and_body(vaults, add_note, embedder):
         "新標題",
         "新內容",
         space="dev",
-        principal="xavier",
+        actor=ACTOR,
         embedder=embedder,
         dim=DIM,
     )
@@ -208,11 +210,11 @@ def _conflict_detected(conn, add_note) -> bool:
     """以過期版本更新：有衝突錯誤且沒寫入 → True。"""
     add_note(A, "n", "標題", "原文", summary="摘要", embed=False)
     first = update(
-        conn, A, "n", TS, space="dev", principal="xavier", body="第一次修改", now=NOW
+        conn, A, "n", TS, space="dev", actor=ACTOR, body="第一次修改", now=NOW
     )
     try:
         update(
-            conn, A, "n", TS, space="dev", principal="xavier", body="拿舊版本覆蓋"
+            conn, A, "n", TS, space="dev", actor=ACTOR, body="拿舊版本覆蓋"
         )  # TS 已過期
     except VersionConflict as exc:
         assert exc.current.updated == first.note.updated
@@ -246,7 +248,7 @@ def test_update_body_clears_summary_and_embedding(vaults, add_note):
         "n",
         note.updated,
         space="dev",
-        principal="xavier",
+        actor=ACTOR,
         body="新正文",
         now=NOW,
     )
@@ -272,7 +274,7 @@ def test_update_body_clears_summary_and_embedding(vaults, add_note):
 def test_update_title_only_keeps_summary(vaults, add_note):
     note = add_note(A, "n", "標題", "原文", summary="舊摘要")
     result = update(
-        vaults, A, "n", note.updated, space="dev", principal="xavier", title="新標題"
+        vaults, A, "n", note.updated, space="dev", actor=ACTOR, title="新標題"
     )
     assert (result.summary_stale, result.embedding_stale) == (False, True)
     assert storage_notes.get_note(vaults, A, "n", space="dev").summary == "舊摘要"
@@ -286,7 +288,7 @@ def test_update_topics_or_identical_body_keeps_everything(vaults, add_note):
         "n",
         note.updated,
         space="dev",
-        principal="xavier",
+        actor=ACTOR,
         topics=["x"],
         body="原文",
     )
@@ -300,12 +302,12 @@ def test_update_topics_or_identical_body_keeps_everything(vaults, add_note):
 def test_update_argument_errors(vaults, add_note):
     note = add_note(A, "n", "標題", "原文", embed=False)
     with pytest.raises(NoChanges):
-        update(vaults, A, "n", note.updated, space="dev", principal="xavier")
+        update(vaults, A, "n", note.updated, space="dev", actor=ACTOR)
     with pytest.raises(ValueError):
-        update(vaults, A, "n", "", space="dev", principal="xavier", body="x")
+        update(vaults, A, "n", "", space="dev", actor=ACTOR, body="x")
     with pytest.raises(NotFound):
         update(
-            vaults, B, "n", note.updated, space="dev", principal="xavier", body="x"
+            vaults, B, "n", note.updated, space="dev", actor=ACTOR, body="x"
         )  # 其他 vault
     with pytest.raises(NotFound):
         update(
@@ -314,7 +316,7 @@ def test_update_argument_errors(vaults, add_note):
             "n",
             note.updated,
             space="dev",
-            principal="xavier",
+            actor=ACTOR,
             supersedes="missing",
         )
 

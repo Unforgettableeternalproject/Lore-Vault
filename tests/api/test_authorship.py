@@ -292,25 +292,27 @@ def test_old_tombstone_without_snapshot_keeps_old_behavior(client, db_path):
     )
 
 
-def test_undelete_refuses_when_vault_was_deleted(client):
-    create_vault(client, A)
-    note = write_note(client, A, "標題", "內容")
-    planned = ok(client.post("/v1/vault_delete", json={"space": "dev", "key": A}))
+def test_undelete_refuses_when_vault_was_deleted(ui_client):
+    create_vault(ui_client, A)
+    note = write_note(ui_client, A, "標題", "內容")
+    planned = ok(ui_client.post("/v1/vault_delete", json={"space": "dev", "key": A}))
     ok(
-        client.post(
+        ui_client.post(
             "/v1/vault_delete",
             json={"space": "dev", "key": A, "confirm_token": planned["confirm_token"]},
         )
     )
-    resp = client.post("/v1/note_undelete", json={"space": "dev", "id": note["id"]})
+    resp = ui_client.post("/v1/note_undelete", json={"space": "dev", "id": note["id"]})
     assert resp.status_code == 409 and code(resp) == "not_restorable"
     assert resp.json()["error"]["reason"] == "vault_deleted"
     # 墓碑保留：重建 vault 後即可還原
-    create_vault(client, A)
-    data = ok(client.post("/v1/note_undelete", json={"space": "dev", "id": note["id"]}))
+    create_vault(ui_client, A)
+    data = ok(
+        ui_client.post("/v1/note_undelete", json={"space": "dev", "id": note["id"]})
+    )
     assert data["restored"] is True
-    assert get_item(client, note["id"])["title"] == "標題"
-    assert doctor_fails(client) == []
+    assert get_item(ui_client, note["id"])["title"] == "標題"
+    assert doctor_fails(ui_client) == []
 
 
 def test_undelete_other_space_is_not_found(client):

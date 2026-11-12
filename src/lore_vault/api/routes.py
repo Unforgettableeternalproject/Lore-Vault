@@ -75,6 +75,7 @@ from lore_vault.schema import UEP_PRINCIPAL, Vault, canonical_key
 from lore_vault.storage import document_index as storage_document_index
 from lore_vault.storage import documents as storage_documents
 from lore_vault.storage import enrichment as storage_enrichment
+from lore_vault.storage import proposals as storage_proposals
 from lore_vault.storage import sidecar as storage_sidecar
 from lore_vault.storage import snapshot as storage_snapshot
 from lore_vault.storage.blobs import BlobCorrupt, BlobNotFound
@@ -82,7 +83,7 @@ from lore_vault.storage.db import transaction
 from lore_vault.storage.errors import ReservedVault, UnknownVault, VaultRequired
 from lore_vault.storage.migrate import SCHEMA_VERSION, current_version
 from lore_vault.storage.notes import count_notes, list_notes
-from lore_vault.storage.timeutil import format_utc
+from lore_vault.storage.timeutil import format_utc, utc_now
 from lore_vault.storage.vaults import (
     ALL_VAULTS,
     KIND_MISC,
@@ -100,7 +101,7 @@ from .errors import (
     VaultExists,
     error_body,
 )
-from .principals import AUTH_UI, auth_method_of, principal_of
+from .principals import AUTH_UI, actor_of, auth_method_of, principal_of
 from .state import AppState
 from .tasks_admin import AUTHORIZATION_PREFIX as AUTHORIZATION_KEY_PREFIX
 from .tasks_admin import CHANGE_PREFIX as CHANGE_KEY_PREFIX
@@ -346,6 +347,29 @@ def ask(request: Request, req: AskRequest) -> dict[str, Any]:
     return ask_service.generate(context, state.answerer).to_dict()
 
 
+def _attach_open_proposals(
+    conn: sqlite3.Connection, items: list[dict[str, Any]], space: str | None
+) -> None:
+    """每個項目附 `open_proposals: [{id, kind, state}]`（輪詢通道；不含 payload）。
+    只在 dev／lore 附加（personal 不納入提案）；已過期但尚未被掃到的提案不算。"""
+    if space not in ("dev", "lore"):
+        return
+    now = utc_now()
+    by_vault: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        by_vault.setdefault(str(item.get("vault")), []).append(item)
+    for vault, group in by_vault.items():
+        found = storage_proposals.open_for_targets(
+            conn, vault, [str(i["id"]) for i in group]
+        )
+        for item in group:
+            item["open_proposals"] = [
+                {"id": p.id, "kind": p.kind, "state": p.state}
+                for p in found.get(str(item["id"]), [])
+                if p.state == "executing" or p.expires_at > now
+            ]
+
+
 @router.post("/get")
 def get(request: Request, req: GetRequest) -> dict[str, Any]:
     check_uep_space(principal_of(request), req.space)
@@ -358,7 +382,9 @@ def get(request: Request, req: GetRequest) -> dict[str, Any]:
             budget=req.budget,
             fields=req.fields,
         )
-    return result.to_dict()
+        payload = result.to_dict()
+        _attach_open_proposals(conn, payload["items"], req.space)
+    return payload
 
 
 @router.post("/list")
@@ -401,8 +427,7 @@ def write(request: Request, req: WriteRequest, response: Response) -> dict[str, 
             req.title,
             req.body,
             space=req.space,  # type: ignore[arg-type]
-            principal=principal_of(request),
-            author=req.author,
+            actor=actor_of(request, req.author),
             topics=req.topics,
             links=req.links,
             supersedes=req.supersedes,
@@ -418,7 +443,10 @@ def write(request: Request, req: WriteRequest, response: Response) -> dict[str, 
 
 
 @router.post("/update")
-def update(request: Request, req: UpdateRequest) -> dict[str, Any]:
+def update(request: Request, req: UpdateRequest, response: Response) -> dict[str, Any]:
+    """修改 note（200）。bearer 對人類寫的 note 的修改不生效、建立 `note_update`
+    提案並回 202（`applied: false`）；連結移除只送審被攔下的部分（200，
+    `partial: true`）。"""
     check_uep_space(principal_of(request), req.space)
     state = _state(request)
     extra: dict[str, Any] = {}
@@ -431,8 +459,7 @@ def update(request: Request, req: UpdateRequest) -> dict[str, Any]:
             req.id,
             req.expected_updated,
             space=req.space,  # type: ignore[arg-type]
-            principal=principal_of(request),
-            author=req.author,
+            actor=actor_of(request, req.author),
             title=req.title,
             body=req.body,
             topics=req.topics,
@@ -443,7 +470,9 @@ def update(request: Request, req: UpdateRequest) -> dict[str, Any]:
             ),
             **extra,
         )
-    if result.summary_stale or result.embedding_stale:
+    if not result.applied:
+        response.status_code = status.HTTP_202_ACCEPTED
+    elif result.summary_stale or result.embedding_stale:
         state.wake_worker()
     return result.to_dict()
 

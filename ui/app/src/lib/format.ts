@@ -35,6 +35,13 @@ const ERROR_TEXT: Record<string, string> = {
   space_change_refused: '只允許 lore 與 personal 互換；dev 不與其他 space 轉換',
   vault_conflict: '目標 space 已有相同 key 的 vault',
   not_restorable: '無法復原',
+  proposal_stale: '提案的基準已經改變：目標內容在提案之後被修改過',
+  proposal_state_conflict: '提案的狀態已經改變（可能已在別處處理），請重新檢視',
+  proposal_resolved: '這則提案已被另一個管道處理完成',
+  proposal_executing: '這則提案正在執行中，暫時不能核准或駁回',
+  proposal_not_found: '找不到這則提案（可能已過期或已被清理）',
+  proposal_queue_full: '這個 vault 的待審提案已達上限，請先處理現有項目',
+  proposal_kind_forbidden: '這種提案不能由此管道處理',
 };
 
 const RESTORE_REASON: Record<string, string> = {
