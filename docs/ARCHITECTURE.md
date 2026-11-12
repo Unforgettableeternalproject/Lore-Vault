@@ -70,6 +70,7 @@
 | `author` | 寫入者自報的身分名（A22，schema v12）：agent 用自己的角色名、UI 登入寫入帶 `Xavier (Bernie)`；未填存 null（對外顯示為未具名），服務**不代填**。單行、去前後空白後 1–64 字、控制字元規則同其他欄位；`legacy` 保留給舊 PM 匯入（API／MCP 自稱會被拒） |
 | `principal` | 服務依憑證判定的主體（A22）：**不可由請求指定**（body 帶了 422）。Bearer 依 `api.principals` 的「憑證 → principal」對照，目前唯一的 token 對應 `LORE_VAULT_PRINCIPAL`（D12，預設 `owner`；本機現行部署設 `UEPBernie` 與 Eternity 帳號及 v13 遷移結果一致），日後一 token 一 principal；UI session 的 principal 是登入帳號的 username（A23；首次啟動建立的管理員預設同 principal）。doctor `notes.principal_agreement` 在既有 note 的 principal 不含設定值時 warn（漏設 env 的提醒）。DB 欄位可為 NULL、無 DEFAULT，儲存層 `insert_note` 拒收缺 principal，doctor `notes.attribution` 對帳 |
 | `updated_by`, `updated_by_principal` | 最後一次寫入（建立或修改）者的自報名與 principal；建立時同 `author`／`principal`。`update` 的 `author` 參數寫進這裡（未填也記 null，不沿用上一位），原 `author` 不變 |
+| `write_origin` | 最後一次**內容**寫入（title、body、topics、links、supersedes）的來源：`ui`（UI session）或 `agent`（bearer、CLI、匯入、系統流程）。schema v20，既有筆記一律 `agent`、不追溯。**由認證方式決定，絕不看 principal**（UI 帳號與 bearer 可能是同一個 principal）。審核動作、摘要與 embedding 補算不改它；UI 編輯、核准 agent 提案後為 `ui`（`updated_by` 仍記提案者）。`ui` 的 note 受保護：bearer 的修改進提案。doctor `notes.write_origin` 對帳 |
 | `created`, `updated` | |
 | `enqueued` | 內部欄位（schema v14，不對外回傳）：服務寫入目前版本的牆鐘時間（新增、更新、取消刪除都重設），當作背景補算的入列時間。不用 `updated`——舊 PM 匯入與還原保留原始 `updated`，doctor `enrich.backlog` 會算出極大的等待時間。v14 遷移回填：當下待補算的 note 為遷移時間（真正的入列時間已無從得知；原生 note 若真的卡住，等待時間在升級當下歸零一次），其餘沿用 `updated`。doctor `enrich.queue_time`：有 note 缺值為 fail |
 
@@ -128,6 +129,24 @@ side-car 紀錄：`{session_id, prompt_id, injected: [concept_id]}`，不含原�
 ### 側載（sidecar，schema v17／v18）
 
 不屬於知識內容的小型機器狀態（例如任務層推送的進行中 change 快照、change 全文），`(vault, key)` 單列覆寫、每次寫入版本遞增（v18），可選樂觀鎖；上限依 key 前綴（預設 64KB，`task-` 開頭 1MB），不檢索、不進快照、隨 vault 刪除與換 space 一併處理。端點與對帳見下方「側載小型機器狀態」。目前 schema 版本為 v18（`storage.migrate.SCHEMA_VERSION`）。
+
+## 待審提案（add-agent-review-proposals，schema v20）
+
+一般 agent（bearer、非 uep）在 dev／lore space 的受保護操作不直接生效，先進 `review_proposals`，經 UI session 核准才套用（`proposals/policy.py` 是唯一的政策出口，純函式）：
+
+| 操作 | 條件 | 提案種類 |
+|---|---|---|
+| 刪除 note／文件 | 一律（兩步式 `note_delete`／`document_delete` 的第一步 upsert 提案） | `note_delete`／`document_delete` |
+| `update` | 目標 `write_origin=ui`，整筆不生效、回 202 | `note_update` |
+| `update` | 明確移除連結、supersedes 由非空改值或清空；其餘欄位照常套用（`partial`），只剩被攔下的部分時回 202 | `link_change` |
+| 任務封存 | 殼的 `archive` 規劃後向服務端登記，UI 核准＝同意、由殼執行 | `task_archive` |
+
+- **狀態機**：`pending → applied／rejected／superseded／expired／obsolete`；`task_archive` 另有 `approved → executing`（殼 claim 的 5 分鐘租約，逾時回 claim 前的狀態，`claim_prev_state` 記錄）。所有轉移都是條件式 UPDATE（`state` 與 `rev`），同 (vault, kind, target) 至多一筆開放提案由 partial unique index 保證，去重命中是 no-op（不動 rev）。
+- **雙通道**：對話 token 路徑與 UI 核准路徑互斥。token 的指紋含目標上開放提案的 id／rev，執行時在同一交易內「提案 pending→applied(via=token) → 刪除」；UI 核准在同一交易內「提案結案 → 套用」。UI 核准後舊 token 必然 404 或 `plan_changed`（附新提案與新 token，仍須使用者再同意）。
+- **核准套用**：`proposals/service.py` 以 `Actor.system_apply` 呼叫 `notes.service`（`storage.db.transaction` 可巢狀，沿用外層交易）；`note_update` 核准時比對被觸及欄位與提出時的 `base_snapshot`，不同回 409 `proposal_stale`（附 base／current／proposed／current_updated），`rebase_to=<current_updated>` 明確選擇以目前版本為基準覆寫。駁回、過期、superseded 不碰 note 列。
+- **端點**：UI only（bearer 403 `ui_session_required`，在 body 驗證前）`POST /v1/review/{queue,counts,proposal_get,proposal_approve,proposal_reject}`，佇列合併提案、uep 既有 pending（唯讀衍生）與任務層待核准的 change（衍生、不入表）；bearer `POST /v1/proposal_{register,claim,close,status}` 只處理 `task_archive`，其他類型 403 `proposal_kind_forbidden`。bearer 看到的提案一律是精簡形狀（不含 payload）。`get` 每項附 `open_proposals`（輪詢通道，不推送）。
+- **資料邊界**：payload 含筆記原文，**不進快照**（`SNAPSHOT_EXCLUDED_TABLES`）、日誌與 doctor 輸出（只輸出計數與 id）；備份是整庫 `VACUUM INTO`，含提案表。vault 刪除、換 space 與目標刪除會在同交易把開放提案轉 obsolete。
+- doctor：`proposals.integrity`（目標存在、開放提案唯一、space 一致、applied 的改動來源為 ui、租約未逾時）、`proposals.expiry`（逾期未轉換、久未處理，warn）、`notes.write_origin`。
 
 ## MCP 介面（草案）
 

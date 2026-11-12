@@ -438,9 +438,7 @@ def write(request: Request, req: WriteRequest, response: Response) -> dict[str, 
 
 
 @router.post("/update")
-def update(
-    request: Request, req: UpdateRequest, response: Response
-) -> dict[str, Any]:
+def update(request: Request, req: UpdateRequest, response: Response) -> dict[str, Any]:
     """修改 note（200）。bearer 對人類寫的 note 的修改不生效、建立 `note_update`
     提案並回 202（`applied: false`）；連結移除只送審被攔下的部分（200，
     `partial: true`）。"""

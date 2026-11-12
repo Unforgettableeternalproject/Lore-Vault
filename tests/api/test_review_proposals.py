@@ -1113,3 +1113,113 @@ def test_every_note_service_write_or_update_call_passes_actor():
                 keys = {k.arg for k in node.keywords}
                 assert "actor" in keys, f"{path}:{node.lineno} 沒有傳 actor"
     assert found >= 3  # routes write/update、proposals.service 套用
+
+
+# ── 重啟、並行、文件 ──
+
+
+def test_restart_invalidates_old_token_and_replan_reuses_the_proposal(rig, db_path):
+    note, plan = _delete_flow(rig)
+    # 模擬服務重啟：同一個資料庫、新的 app（新的 ConfirmSigner 祕密）
+    app2 = create_app(make_settings(db_path))
+    with SpaceClient(app2) as owner2:
+        owner2.headers.update(AUTH)
+        stale = owner2.post(
+            "/v1/note_delete",
+            json={
+                "space": "dev",
+                "vault": DEV,
+                "id": note["id"],
+                "confirm_token": plan["confirm_token"],
+            },
+        )
+        _code(stale, 400, "invalid_confirm_token")
+        assert rig.row(note["id"])["id"] == note["id"]
+        replan = owner2.post(
+            "/v1/note_delete", json={"space": "dev", "vault": DEV, "id": note["id"]}
+        ).json()
+        assert replan["proposal"]["id"] == plan["proposal"]["id"]
+        assert replan["proposal"]["deduped"] is True
+
+
+def test_concurrent_claims_have_exactly_one_winner(rig):
+    import threading
+
+    create_vault(rig.owner, TASK_VAULT)
+    reg = _archive_register(rig).json()["proposal"]
+    rig.approve(reg["id"], vault=TASK_VAULT)
+    results: list[str] = []
+    barrier = threading.Barrier(4)
+
+    def attempt():
+        conn = connect(rig.db_path)
+        try:
+            barrier.wait()
+            try:
+                proposals_service.claim(
+                    conn, reg["id"], expect="approved", plan_digest="d1"
+                )
+                results.append("won")
+            except t.ProposalResolved:
+                results.append("lost")
+        finally:
+            conn.close()
+
+    threads = [threading.Thread(target=attempt) for _ in range(4)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    assert sorted(results) == ["lost", "lost", "lost", "won"]
+    assert rig.proposals(id=reg["id"])[0]["state"] == "executing"
+
+
+def test_document_delete_ui_approval_deletes_and_old_token_is_dead(db_path, tmp_path):
+    from lore_vault.config import Config, DocumentsConfig, EmbeddingConfig
+
+    from .conftest import DIM
+
+    seed_ui_account(db_path, username=SAME_PRINCIPAL)
+    cfg = Config(
+        embedding=EmbeddingConfig(dim=DIM),
+        documents=DocumentsConfig(
+            blob_dir=str(tmp_path / "blobs"), max_file_bytes=200_000
+        ),
+    )
+    app = create_app(make_settings(db_path, config=cfg, document_worker=False))
+    with (
+        SpaceClient(app) as owner,
+        TestClient(app, base_url="https://testserver") as ui,
+    ):
+        owner.headers.update(AUTH)
+        ui.post(
+            "/ui/api/login",
+            json={"username": SAME_PRINCIPAL, "password": UI_PASSWORD},
+            headers=UI,
+        )
+        ui.headers.update(UI)
+        create_vault(owner, DEV)
+        up = owner.post(
+            "/v1/documents",
+            files={"file": ("a.md", b"# title\n\nbody", "text/plain")},
+            data={"vault": DEV, "space": "dev"},
+        ).json()
+        body = {"space": "dev", "vault": DEV, "id": up["document_id"]}
+        plan = owner.post("/v1/document_delete", json=body).json()
+        prop = plan["proposal"]
+        assert prop["kind"] == "document_delete"
+        resp = ui.post(
+            "/v1/review/proposal_approve",
+            json={**body, "expected_rev": 1, "id": prop["id"]},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["proposal"]["state"] == "applied"
+        dead = owner.post(
+            "/v1/document_delete",
+            json={**body, "confirm_token": plan["confirm_token"]},
+        )
+        assert dead.status_code in (404, 409), dead.text
+        listed = owner.post(
+            "/v1/list", json={"vault": DEV, "kinds": ["document"]}
+        ).json()
+        assert listed["items"] == []

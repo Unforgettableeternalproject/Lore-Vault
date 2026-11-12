@@ -40,6 +40,7 @@ from .documents_check import (
 from .episode_pull_check import episode_pull_status
 from .framework import Check, CheckResult, CheckSkipped, DoctorContext, Registry
 from .hook_imports import DEFAULT_HOOKS_DIR, DEFAULT_SPIKE_DIR, check_hook_imports
+from .proposals_check import notes_write_origin, proposals_expiry, proposals_integrity
 from .snapshot_check import snapshot_age, snapshot_schema
 from .spool_check import spool_conflicts, spool_pending
 
@@ -612,6 +613,28 @@ def default_registry() -> Registry:
             "uep 審核欄位一致（狀態值、pending 只在 lore、審核人與還原狀態齊全）",
         )
     )
+    registry.add(
+        Check(
+            "notes.write_origin",
+            "notes",
+            notes_write_origin,
+            "write_origin 在白名單內，ui 來源的 note 有最後修改者",
+        )
+    )
+    for name, func, description in (
+        (
+            "proposals.integrity",
+            proposals_integrity,
+            "開放提案的目標存在且唯一、space 一致；applied 的改動來源為 ui；"
+            "executing 租約未逾時（fail；不輸出提案內容）",
+        ),
+        (
+            "proposals.expiry",
+            proposals_expiry,
+            "沒有逾期未轉 expired、或開放太久沒人處理的提案（warn）",
+        ),
+    ):
+        registry.add(Check(name, "proposals", func, description))
     registry.add(
         Check(
             "notes.principal_agreement",

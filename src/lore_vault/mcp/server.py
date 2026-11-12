@@ -320,7 +320,9 @@ _HINTS = {
     "proposal_queue_full": (
         "這個 vault 的待審提案已達上限（200 筆）：請使用者先到審核頁處理既有提案"
     ),
-    "proposal_kind_forbidden": "這個端點只處理任務封存提案；其他提案只能由使用者在 UI 審核",
+    "proposal_kind_forbidden": (
+        "這個端點只處理任務封存提案；其他提案只能由使用者在 UI 審核"
+    ),
 }
 
 DOWNLOAD_TOO_LARGE_HINTS = {

@@ -191,14 +191,18 @@ def _two_phase(
                 fingerprint, prop, _ = bind(conn, raw, upsert=True)
                 changed = (shown, fingerprint)
             else:
-                if governed and prop is not None and not storage_proposals.transition(
-                    conn,
-                    prop.id,
-                    expect_state=proposal_types.PENDING,
-                    expect_rev=prop.rev,
-                    to_state=proposal_types.APPLIED,
-                    via=proposal_types.VIA_TOKEN,
-                    by=actor.principal,
+                if (
+                    governed
+                    and prop is not None
+                    and not storage_proposals.transition(
+                        conn,
+                        prop.id,
+                        expect_state=proposal_types.PENDING,
+                        expect_rev=prop.rev,
+                        to_state=proposal_types.APPLIED,
+                        via=proposal_types.VIA_TOKEN,
+                        by=actor.principal,
+                    )
                 ):
                     raise proposal_types.ProposalResolved(
                         f"提案 {prop.id} 已被另一個通道處理"
