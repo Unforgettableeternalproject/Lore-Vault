@@ -81,6 +81,18 @@ describe('任務層：守門', () => {
   });
 });
 
+describe('任務層：篩選分組', () => {
+  it('分成範圍（vault）與狀態（change 狀態）兩組', async () => {
+    const { api } = makeApi({ '/v1/blob_get': () => json({ items: [{ vault: VAULT, ...blob(MIXED) }] }) });
+    renderWithApp(<Tasks />, api);
+    await screen.findByTestId('tasks');
+    const g = (id: string) => screen.getByTestId(id);
+    expect(g('filter-groups').classList.contains('lv-filter-panel__grid')).toBe(true);
+    expect(within(g('filter-group-scope')).getByTestId('vault-picker')).toBeTruthy();
+    expect(within(g('filter-group-state')).getByRole('group', { name: 'change 狀態' })).toBeTruthy();
+  });
+});
+
 describe('任務層：列表', () => {
   it('預設「未完成」；狀態 chip 單選（含「全部」）；「無法判定」併入被擋住且標錯誤色；篩選寫回網址', async () => {
     const { api } = makeApi({ '/v1/blob_get': () => json({ items: [{ vault: VAULT, ...blob(MIXED) }] }) });

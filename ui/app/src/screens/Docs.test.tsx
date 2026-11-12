@@ -46,6 +46,21 @@ function listOf(items: DocumentMeta[]): Handler {
   return () => json({ items, next_cursor: null, has_more: false, unsupported_kinds: [] });
 }
 
+describe('文件篩選分組', () => {
+  it('分成範圍／文件條件／狀態三組，控制項各歸其組', async () => {
+    const { api } = makeApi({ '/v1/list': listOf([doc()]) });
+    renderWithApp(<Docs />, api);
+    await screen.findByTestId('filter-panel');
+    const g = (id: string) => screen.getByTestId(id);
+    expect(g('filter-groups').classList.contains('lv-filter-panel__grid')).toBe(true);
+    expect(within(g('filter-group-scope')).getByTestId('vault-picker')).toBeTruthy();
+    expect(within(g('filter-group-scope')).getByTestId('date-range')).toBeTruthy();
+    expect(within(g('filter-group-file')).getByRole('combobox', { name: '文件類型' })).toBeTruthy();
+    expect(within(g('filter-group-file')).getByRole('textbox', { name: '檔名關鍵字' })).toBeTruthy();
+    expect(within(g('filter-group-state')).getByRole('group', { name: '抽取狀態' })).toBeTruthy();
+  });
+});
+
 describe('文件列表狀態', () => {
   it('失敗顯示錯誤碼文案與細節並可重試；警示、已被取代、處理中都看得到', async () => {
     const { api, callsTo } = makeApi({

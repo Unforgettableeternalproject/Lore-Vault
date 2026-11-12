@@ -7,6 +7,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { Banner, EmptyState, ErrorState, Loading, TwoPhaseDelete } from '../components/ui';
 import {
   ChipGroup,
+  FilterGroup,
   FilterPanel,
   queryChoice,
   queryDate,
@@ -275,23 +276,27 @@ export function Docs() {
           </>
         }
       >
-        <div class="lv-filter-panel__row">
-          <VaultPicker />
-          <label class="lv-filters__group">
-            <span class="lv-filters__label">類型</span>
-            <select class="lv-input lv-select" value={fileType} aria-label="文件類型" onChange={(e) => setFileType((e.target as HTMLSelectElement).value as FileType)}>
-              {FILE_TYPES.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <DateRange value={range} onChange={setRange} />
-        </div>
-        <div class="lv-filter-panel__row">
-          <ChipGroup label="狀態" groupLabel="抽取狀態" options={STATUS_FILTERS} value={status} onChange={setStatus} mono={false} />
-          <TextFilter value={title} onApply={setTitle} inputLabel="檔名關鍵字" placeholder="檔名含…（不分大小寫）" submitLabel="套用檔名" testId="filter-title" />
+        <div class="lv-filter-panel__grid" data-testid="filter-groups">
+          <FilterGroup title="範圍" testId="filter-group-scope">
+            <VaultPicker />
+            <DateRange value={range} onChange={setRange} />
+          </FilterGroup>
+          <FilterGroup title="文件條件" testId="filter-group-file">
+            <label class="lv-filters__group">
+              <span class="lv-filters__label">類型</span>
+              <select class="lv-input lv-select" value={fileType} aria-label="文件類型" onChange={(e) => setFileType((e.target as HTMLSelectElement).value as FileType)}>
+                {FILE_TYPES.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <TextFilter label="檔名" value={title} onApply={setTitle} inputLabel="檔名關鍵字" placeholder="檔名含…（不分大小寫）" submitLabel="套用檔名" testId="filter-title" />
+          </FilterGroup>
+          <FilterGroup title="狀態" testId="filter-group-state">
+            <ChipGroup label="狀態" groupLabel="抽取狀態" options={STATUS_FILTERS} value={status} onChange={setStatus} mono={false} />
+          </FilterGroup>
         </div>
       </FilterPanel>
 

@@ -65,6 +65,26 @@ async function pickScope(scope: string) {
   fireEvent.change(select, { target: { value: scope } });
 }
 
+describe('Memory 篩選分組', () => {
+  it('依語意分成檢視／範圍／分類三組，控制項各歸其組；圖譜檢視時 scope 下拉仍在分類組', async () => {
+    const { api } = makeApi(handlers());
+    renderWithApp(<Memory />, api);
+    await screen.findByTestId('concepts');
+    const g = (id: string) => screen.getByTestId(id);
+    expect(g('filter-groups').classList.contains('lv-filter-panel__grid')).toBe(true);
+    expect(within(g('filter-group-view')).getByRole('group', { name: '檢視方式' })).toBeTruthy();
+    expect(within(g('filter-group-scope')).getByTestId('vault-picker')).toBeTruthy();
+    expect(within(g('filter-group-scope')).getByTestId('date-range')).toBeTruthy();
+    expect(within(g('filter-group-category')).getByRole('combobox', { name: 'concept 類型' })).toBeTruthy();
+    expect(within(g('filter-group-category')).getByRole('group', { name: 'scope 狀態' })).toBeTruthy();
+    expect(within(g('filter-group-category')).getByRole('textbox', { name: 'scope 名稱' })).toBeTruthy();
+    // 摘要列仍在篩選區塊最底
+    expect(g('filter-panel').lastElementChild?.textContent).toContain('範圍：');
+    fireEvent.click(screen.getByRole('button', { name: '圖譜' }));
+    expect(await within(g('filter-group-category')).findByRole('combobox', { name: 'scope 名稱' })).toBeTruthy();
+  });
+});
+
 describe('Memory 視圖切換', () => {
   it('預設列表；切到圖譜且 scope 為「全部」時只顯示提示、不查 concept_graph', async () => {
     const { api, callsTo } = makeApi(handlers());

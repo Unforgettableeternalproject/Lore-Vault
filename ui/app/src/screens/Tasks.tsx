@@ -6,7 +6,7 @@
 // 停用中的 vault（`/v1/tasks_status`）顯示停用橫幅、不顯示核准按鈕；狀態讀不到時照常顯示（服務端仍強制）。
 import { useEffect, useState } from 'preact/hooks';
 
-import { ChipGroup, FilterPanel, queryChoice, screenQuery, useQuerySync } from '../components/Filters';
+import { ChipGroup, FilterGroup, FilterPanel, queryChoice, screenQuery, useQuerySync } from '../components/Filters';
 import { Badge, Banner, Dialog, EmptyState, ErrorState, Loading } from '../components/ui';
 import { VaultPicker } from '../components/VaultPicker';
 import { ALL, useApp, vaultName } from '../lib/context';
@@ -151,9 +151,13 @@ function TaskList() {
           </>
         }
       >
-        <div class="lv-filter-panel__row">
-          <VaultPicker />
-          <ChipGroup label="狀態" groupLabel="change 狀態" options={TASK_FILTERS} value={filter} onChange={setFilter} mono={false} />
+        <div class="lv-filter-panel__grid" data-testid="filter-groups">
+          <FilterGroup title="範圍" testId="filter-group-scope">
+            <VaultPicker />
+          </FilterGroup>
+          <FilterGroup title="狀態" testId="filter-group-state">
+            <ChipGroup label="狀態" groupLabel="change 狀態" options={TASK_FILTERS} value={filter} onChange={setFilter} mono={false} />
+          </FilterGroup>
         </div>
       </FilterPanel>
 

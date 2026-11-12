@@ -3,7 +3,7 @@
 import type { ComponentType } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 
-import { ChipGroup, FilterPanel, TextFilter } from '../components/Filters';
+import { ChipGroup, FilterGroup, FilterPanel, TextFilter } from '../components/Filters';
 import { DateRange, DEFAULT_PAGE_SIZE, Pager, rangeParams, type DateRangeValue } from '../components/Pager';
 import { Badge, EmptyState, ErrorState, Loading } from '../components/ui';
 import { VaultPicker } from '../components/VaultPicker';
@@ -189,30 +189,32 @@ function ConceptList() {
           </>
         }
       >
-        <div class="lv-filter-panel__row">
-          <ChipGroup label="檢視" groupLabel="檢視方式" options={VIEWS} value={view} onChange={setView} />
-        </div>
-        <div class="lv-filter-panel__row">
-          <VaultPicker />
-          <label class="lv-filters__group">
-            <span class="lv-filters__label">類型</span>
-            <select class="lv-input lv-select" value={kind} aria-label="concept 類型" onChange={(e) => setKind((e.target as HTMLSelectElement).value)}>
-              {KINDS.map((k) => (
-                <option key={k.id} value={k.id}>
-                  {k.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <DateRange value={range} onChange={setRange} />
-        </div>
-        <div class="lv-filter-panel__row">
-          <ChipGroup label="SCOPE" groupLabel="scope 狀態" options={SCOPE_STATES} value={scopeState} onChange={setScopeState} />
-          {view === 'graph' ? (
-            <ScopeSelect scopes={scopes} value={scope} onChange={setScope} />
-          ) : (
-            <TextFilter value={scope} onApply={setScope} inputLabel="scope 名稱" placeholder="repo scope（不分大小寫）" submitLabel="套用 scope" />
-          )}
+        <div class="lv-filter-panel__grid" data-testid="filter-groups">
+          <FilterGroup title="檢視" testId="filter-group-view">
+            <ChipGroup label="檢視" groupLabel="檢視方式" options={VIEWS} value={view} onChange={setView} />
+          </FilterGroup>
+          <FilterGroup title="範圍" testId="filter-group-scope">
+            <VaultPicker />
+            <DateRange value={range} onChange={setRange} />
+          </FilterGroup>
+          <FilterGroup title="分類" testId="filter-group-category">
+            <label class="lv-filters__group">
+              <span class="lv-filters__label">類型</span>
+              <select class="lv-input lv-select" value={kind} aria-label="concept 類型" onChange={(e) => setKind((e.target as HTMLSelectElement).value)}>
+                {KINDS.map((k) => (
+                  <option key={k.id} value={k.id}>
+                    {k.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <ChipGroup label="SCOPE" groupLabel="scope 狀態" options={SCOPE_STATES} value={scopeState} onChange={setScopeState} />
+            {view === 'graph' ? (
+              <ScopeSelect scopes={scopes} value={scope} onChange={setScope} />
+            ) : (
+              <TextFilter value={scope} onApply={setScope} inputLabel="scope 名稱" placeholder="repo scope（不分大小寫）" submitLabel="套用 scope" />
+            )}
+          </FilterGroup>
         </div>
       </FilterPanel>
 
