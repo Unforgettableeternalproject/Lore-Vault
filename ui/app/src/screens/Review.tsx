@@ -63,7 +63,7 @@ export function Review() {
           重新整理
         </button>
       </div>
-      <div class="lv-filter-panel__row">
+      <div class="lv-filters">
         <VaultPicker />
       </div>
 

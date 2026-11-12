@@ -639,8 +639,24 @@ a.lv-table__title:hover { color: var(--lv-zone-text); }
 .lv-filter-panel__scope { display: flex; gap: 8px; align-items: center; flex: 1 1 280px; min-width: 0; }
 .lv-filter-panel__scope .lv-input { flex: 1 1 200px; min-width: 0; }
 .lv-filter-panel__summary { margin: 0; }
+/* 分組網格：寬螢幕多欄（每欄至少 300px）、窄螢幕自動單欄；wide 的組別（Tags）佔滿一列 */
+.lv-filter-panel__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 18px 28px; }
+.lv-filter-group { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.lv-filter-group--wide { grid-column: 1 / -1; }
+.lv-filter-group__title {
+  font-family: var(--font-mono); font-size: var(--lv-fs-meta); letter-spacing: .16em; color: var(--ink-mute);
+  padding-bottom: 4px; border-bottom: 1px solid var(--line);
+}
+/* 組內欄名統一寬度，輸入框與按鈕同高並對齊 */
+.lv-filter-group > .lv-filters__label, .lv-filter-group .lv-filters__label { min-width: 3.5em; }
+.lv-filter-group .lv-filter-panel__scope { flex: 0 0 auto; align-items: stretch; }
+.lv-filter-group .lv-filter-panel__scope .lv-filters__label { align-self: center; }
+.lv-filter-group .lv-filter-panel__scope .btn-outline { white-space: nowrap; }
+.lv-filter-group .lv-vpick, .lv-filter-group .lv-daterange { flex: 0 0 auto; }
+.lv-filter-group .lv-vpick__box { width: 100%; }
+.lv-filter-group .lv-daterange { flex-wrap: wrap; }
 /* 摘要＋「清除篩選」同列；摘要可能含長 vault key，允許斷行 */
-.lv-filter-panel__foot { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; justify-content: space-between; }
+.lv-filter-panel__foot { padding-top: 12px; border-top: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; justify-content: space-between; }
 .lv-filter-panel__foot .lv-filter-panel__summary { flex: 1 1 240px; min-width: 0; overflow-wrap: anywhere; }
 .lv-daterange { border: none; margin: 0; padding: 0; display: flex; align-items: center; gap: 8px; min-width: 0; }
 .lv-daterange legend { float: left; margin-right: 8px; padding: 0; }

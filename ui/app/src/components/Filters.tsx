@@ -40,6 +40,18 @@ export function FilterPanel({
   );
 }
 
+/** 篩選分組：小標籤＋一組相關控制項；放在 .lv-filter-panel__grid 內自動對齊欄位，wide 讓整組佔滿一列。 */
+export function FilterGroup({ title, children, wide = false, testId }: { title: string; children: ComponentChildren; wide?: boolean; testId?: string }) {
+  return (
+    <div class={'lv-filter-group' + (wide ? ' lv-filter-group--wide' : '')} role="group" aria-label={title} data-testid={testId}>
+      <span class="lv-filter-group__title" aria-hidden="true">
+        {title}
+      </span>
+      {children}
+    </div>
+  );
+}
+
 export interface ChipOption<T extends string> {
   id: T;
   label: string;
@@ -86,6 +98,7 @@ export function TextFilter({
   inputLabel,
   placeholder,
   submitLabel,
+  label,
   testId,
 }: {
   value: string;
@@ -93,6 +106,8 @@ export function TextFilter({
   inputLabel: string;
   placeholder: string;
   submitLabel: string;
+  /** 可見的欄名（分組內用來區分多個文字條件） */
+  label?: string;
   testId?: string;
 }) {
   const [draft, setDraft] = useState(value);
@@ -106,6 +121,7 @@ export function TextFilter({
         onApply(draft.trim().slice(0, MAX_FILTER_TEXT));
       }}
     >
+      {label && <span class="lv-filters__label">{label}</span>}
       <input
         class="lv-input"
         aria-label={inputLabel}
