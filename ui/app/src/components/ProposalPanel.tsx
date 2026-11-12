@@ -66,7 +66,7 @@ function ProposalBody({ detail, stale, itemStale }: { detail: ProposalDetail; st
           </ul>
           {sup && (
             <p class="lv-small">
-              取代關係：{sup.from ?? '（無）'} → {sup.to ?? '（無）'}
+              取代關係：{sup.from ? (detail.link_titles?.[sup.from] ?? sup.from) : '（無）'} → {sup.to ? (detail.link_titles?.[sup.to] ?? sup.to) : '（無）'}
             </p>
           )}
         </>

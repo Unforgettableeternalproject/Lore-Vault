@@ -715,12 +715,24 @@ export interface ProposalRow {
   base_updated: string | null;
   created_at: string;
   expires_at: string;
+  // 後端 to_admin() 的其餘欄位（UI 目前不讀）
+  space?: string;
+  vault?: string;
+  target_type?: string;
+  target_id?: string;
+  proposer?: { principal: string; author: string | null };
+  updated_at?: string;
+  resolved_by?: string | null;
+  resolved_at?: string | null;
+  resolved_via?: string | null;
+  resolution_reason?: string | null;
+  superseded_by?: string | null;
 }
 
 export interface ProposalDetail {
   proposal: ProposalRow;
   target: { type: string; id: string; title: string | null };
-  /** 被觸及欄位的目前值（note_update 才有） */
+  /** 被觸及欄位的目前值（note_update 為被改的欄位；link_change 為 links 與 supersedes） */
   current: NoteFields | null;
   /** current 對應的目前版本 updated，rebase_to 用 */
   current_updated: string | null;
@@ -734,4 +746,7 @@ export interface ProposalStaleInfo {
   current: NoteFields;
   proposed: NoteFields;
   current_updated: string;
+  /** 後端附的訊息與已漂移的欄位名 */
+  message?: string;
+  fields?: string[];
 }
