@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -219,7 +220,9 @@ async def test_old_service_without_register_endpoint_is_an_explicit_error(
         assert notes(db) == []
 
 
-async def test_plan_change_supersedes_the_old_proposal(db, spec_project):
+async def test_same_plan_digest_updates_payload_in_place(db, spec_project):
+    """同意綁 plan_digest：規劃相同、只有 allow_incomplete 等欄位不同時，
+    就地更新提案（保留狀態），不是另開一筆。"""
     app = make_app(db)
     async with (
         client_for(make_shell(app, spec_project)) as sc,
@@ -229,15 +232,12 @@ async def test_plan_change_supersedes_the_old_proposal(db, spec_project):
         await stdio.ok(action="init")
         await setup_change(stdio, http, "move-root", goal="搬資料根")
         first = await http.ok(action="archive", vault=VAULT, name="move-root")
-        # 規劃參數不同（allow_incomplete）→ 不同的規劃雜湊 → 新提案取代舊提案
         second = await http.ok(
             action="archive", vault=VAULT, name="move-root", allow_incomplete=True
         )
-        assert second["proposal"]["id"] != first["proposal"]["id"]
-        assert second["proposal"]["superseded"] == first["proposal"]["id"]
-        states = {p["id"]: p["state"] for p in proposals(db)}
-        assert states[first["proposal"]["id"]] == "superseded"
-        assert states[second["proposal"]["id"]] == "pending"
+        assert second["proposal"]["id"] == first["proposal"]["id"]
+        (row,) = proposals(db)
+        assert json.loads(row["payload"])["allow_incomplete"] is True
 
 
 async def test_existing_two_step_flow_still_works(db, spec_project):
@@ -251,3 +251,55 @@ async def test_existing_two_step_flow_still_works(db, spec_project):
         await setup_change(stdio, http, "move-root", goal="搬資料根")
         done = await _archive(http, "move-root")
         assert done["executed"] is True
+
+
+async def test_shell_renews_lease_and_reports_close_failure(
+    db, spec_project, monkeypatch
+):
+    """執行期間定期續租；結案失敗（租約已失效）不吞掉，明確回報在結果裡。"""
+    from lore_vault.tasks import mcp_tools, remote_ops
+
+    seen: list[str] = []
+    real_post_for = mcp_tools._post_for
+
+    def recording_post_for(shell):
+        inner = real_post_for(shell)
+
+        async def post(path, body):
+            seen.append(path)
+            if path == "/v1/proposal_close" and body.get("outcome") == "applied":
+                raise mcp_tools.rs.RemoteError(
+                    409, "租約已失效", {"error": {"code": "proposal_resolved"}}
+                )
+            return await inner(path, body)
+
+        return post
+
+    real_execute = remote_ops.archive_execute
+
+    async def slow_execute(*a, **k):
+        await asyncio.sleep(0.4)
+        return await real_execute(*a, **k)
+
+    monkeypatch.setattr(mcp_tools, "_post_for", recording_post_for)
+    monkeypatch.setattr(remote_ops, "archive_execute", slow_execute)
+    monkeypatch.setattr(mcp_tools, "RENEW_INTERVAL_SECONDS", 0.05)
+    app = make_app(db)
+    async with (
+        client_for(make_shell(app, spec_project)) as sc,
+        client_for(make_shell(app, spec_project, MODE_HTTP)) as hc,
+    ):
+        stdio, http = Tasks(sc), Tasks(hc)
+        await stdio.ok(action="init")
+        await setup_change(stdio, http, "move-root", goal="搬資料根")
+        plan = await http.ok(action="archive", vault=VAULT, name="move-root")
+        done = await http.ok(
+            action="archive",
+            vault=VAULT,
+            name="move-root",
+            confirm_token=plan["confirm_token"],
+        )
+    assert done["executed"] is True
+    assert done["proposal"]["close_error"]["code"] == "proposal_resolved"
+    assert "沒有成功結案" in done["warning"]
+    assert seen.count("/v1/proposal_renew") >= 1

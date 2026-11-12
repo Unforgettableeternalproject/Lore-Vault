@@ -326,8 +326,21 @@ def register_archive(
     proposer_author: str | None,
     change_version: int | None = None,
 ) -> store.Upserted:
-    """殼的 archive 在授權閘門與規劃之後登記（upsert）：同內容回既有提案（可能已
-    approved），內容不同則舊提案 superseded、新提案 pending。"""
+    """殼的 archive 在授權閘門與規劃之後登記（upsert）：同內容回既有提案（可能已被 UI
+    核准成 approved），規劃（plan_digest）不同則舊提案 superseded、新提案 pending。
+    plan_digest 相同、只有 reason 等欄位不同時，就地更新 payload、保留既有狀態
+    （使用者同意的是規劃，不是 agent 自填的措辭）。"""
+    with transaction(conn):
+        store.expire_due(conn)
+        existing = store.find_open(conn, vault, t.KIND_TASK_ARCHIVE, name)
+        if (
+            existing is not None
+            and existing.payload.get("plan_digest") == payload.get("plan_digest")
+            and existing.payload != payload
+        ):
+            return store.Upserted(
+                store.update_payload(conn, existing.id, payload), True
+            )
     return store.upsert_open(
         conn,
         space="dev",
@@ -358,6 +371,12 @@ def claim(
         store.expire_due(conn, now=stamp)
         row = _load(conn, proposal_id)
         _require_archive(row)
+        if row.state != expect:
+            # 終態的 payload 已清空，先判斷狀態再比對規劃雜湊
+            raise t.ProposalResolved(
+                f"提案 {row.id} 已被另一個通道處理（目前狀態 {row.state}）",
+                current_state=row.state,
+            )
         if row.payload.get("plan_digest") != plan_digest:
             raise t.ProposalStateConflict(
                 "規劃已變動，提案內容與這次要執行的不符；請重新規劃",
@@ -428,6 +447,35 @@ def close_claim(
             )
         if not ok:
             raise t.ProposalResolved("提案狀態剛被其他通道變更")
+        return _load(conn, row.id)
+
+
+def renew_claim(
+    conn: sqlite3.Connection,
+    proposal_id: str,
+    *,
+    claim_id: str,
+    now: str | None = None,
+) -> ProposalRow:
+    """殼執行期間續租：租約從現在起再給一整段。租約已失效（逾時被回復、被別的持有者
+    取得）回 `ProposalResolved`，呼叫端應停止執行。"""
+    stamp = now or utc_now()
+    with transaction(conn):
+        row = _load(conn, proposal_id)
+        _require_archive(row)
+        if row.state != t.EXECUTING or row.claim_id != claim_id:
+            raise t.ProposalResolved(
+                f"提案 {row.id} 的租約已失效（目前狀態 {row.state}）",
+                current_state=row.state,
+            )
+        expires = format_utc(
+            parse_utc(stamp) + timedelta(seconds=t.CLAIM_LEASE_SECONDS)
+        )
+        conn.execute(
+            "UPDATE review_proposals SET claim_expires_at = ?, updated_at = ? "
+            "WHERE id = ? AND claim_id = ? AND state = 'executing'",
+            (expires, stamp, row.id, claim_id),
+        )
         return _load(conn, row.id)
 
 

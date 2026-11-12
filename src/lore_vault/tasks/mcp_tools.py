@@ -32,6 +32,7 @@ server。
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -109,6 +110,8 @@ LIST_INIT_NEXT_STEP = (
     "config.yaml 的 remote: true）：呼叫 tasks(action='init')（冪等）"
 )
 ARCHIVE_OP = "tasks_archive"
+# 租約 300 秒，執行期間每 100 秒續租一次
+RENEW_INTERVAL_SECONDS = 100.0
 ARCHIVE_NEXT_STEP = (
     "這一步只規劃、沒有寫入。把 plan 給使用者看、取得明確同意後，才以完全相同的參數"
     "加上 confirm_token 再呼叫一次 archive；不要自動連打兩步。token 5 分鐘內有效"
@@ -1037,17 +1040,21 @@ class TaskOps:
             "id": proposal["id"],
             "claim_id": claim["claim_id"],
         }
+        renew_failed: list[str] = []
+        renewer = asyncio.create_task(self._renew_loop(closing, renew_failed))
         try:
             result = await self._archive_execute(
                 target, change, record, merged, mirrors, reason=reason, author=author
             )
         except BaseException:
+            renewer.cancel()
             # 釋放租約（封存本身可續跑）；釋放失敗交給租約逾時自動回復
             try:
                 await self.post("/v1/proposal_close", {**closing, "outcome": "release"})
             except Exception:  # noqa: BLE001
                 pass
             raise
+        renewer.cancel()
         via = "ui" if expect == "approved" else "token"
         try:
             await self.post("/v1/proposal_close", {**closing, "outcome": "applied"})
@@ -1058,14 +1065,34 @@ class TaskOps:
                 "resolved_via": via,
             }
         except (rs.RemoteError, rs.RemoteUnreachable) as exc:
-            # 封存已完成；提案稍後由租約逾時回復，doctor 會指出
+            # 封存已完成，但提案沒有結案（租約已被回復或被別的持有者取得）：
+            # 不吞掉，明確回報讓 agent 與使用者知道
+            code = getattr(exc, "code", None) or "proposal_close_failed"
             result["proposal"] = {
                 "id": proposal["id"],
                 "kind": "task_archive",
                 "state": "executing",
-                "close_error": str(exc),
+                "close_error": {"code": code, "message": str(exc)},
             }
+            result["warning"] = (
+                "封存已完成，但待審提案沒有成功結案"
+                f"（{code}：{exc}）。請告知使用者；提案會在租約逾時後自動回復，"
+                "doctor 的 proposals.integrity 會指出"
+            )
+        if renew_failed:
+            result.setdefault("warning", "執行期間續租曾失敗：" + renew_failed[0])
         return result
+
+    async def _renew_loop(self, closing: dict[str, Any], failed: list[str]) -> None:
+        """執行期間定期續租（間隔為租約的三分之一）；續租失敗只記下，不中斷封存
+        （封存可續跑），結尾的 close 會把失效的租約明確報出來。"""
+        while True:
+            await asyncio.sleep(RENEW_INTERVAL_SECONDS)
+            try:
+                await self.post("/v1/proposal_renew", closing)
+            except Exception as exc:  # noqa: BLE001
+                failed.append(str(exc))
+                return
 
     def _binding_key(self) -> str:
         try:

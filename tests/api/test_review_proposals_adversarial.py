@@ -471,7 +471,11 @@ def test_open_cap_blocks_delete_plan_and_partial_update_rolls_back(rig):
     plan = rig.owner.post(
         "/v1/note_delete", json={"space": "dev", "vault": DEV, "id": a["id"]}
     )
-    _code(plan, 429, "proposal_queue_full")
+    # 刪除第一步降級：不建提案，對話授權（confirm_token）照舊可用
+    assert plan.status_code == 200, plan.text
+    degraded = plan.json()
+    assert degraded["proposal_pending"] is False and "proposal" not in degraded
+    assert degraded["confirm_token"]
     # 部分套用：移除連結被攔、同時改標題。上限已滿 → 整筆 429，標題不能偷偷先寫入
     before = rig.row(linked["id"])
     _code(
@@ -573,15 +577,6 @@ def test_archive_register_while_executing_cannot_replace_the_leased_proposal(rig
     assert len(rig.proposals(kind="task_archive")) == 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "proposals/service.py register_archive 以整份 payload（含 reason）計算 digest："
-        "plan_digest 相同、只有 agent 自填的 reason 措辭不同時，舊的 approved 提案被 "
-        "superseded，使用者的核准被洗掉，需要重新核准。若認定 reason 屬於同意內容，"
-        "請把此測試改成反向斷言。"
-    ),
-)
 def test_archive_consent_survives_reason_rewording_with_same_plan_digest(rig):
     _archive_ready(rig)
     reg = _archive_register(rig, digest="d1", reason="第一次措辭").json()["proposal"]
@@ -590,15 +585,6 @@ def test_archive_consent_survives_reason_rewording_with_same_plan_digest(rig):
     assert again["id"] == reg["id"] and again["state"] == "approved"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "api/manage.py _two_phase 的 bind(upsert=False) 用 find_open 讀提案、沒有先 "
-        "expire_due：過期但尚未被掃到的刪除提案，帶 token 第二步直接執行並結案為 applied；"
-        "被佇列／upsert 掃過之後同一份 token 卻回 409 plan_changed。結果取決於有沒有人"
-        "先開過審核頁。"
-    ),
-)
 def test_expired_delete_proposal_token_outcome_does_not_depend_on_sweep_timing(rig):
     swept_note, swept_plan = _delete_flow(rig)
     lazy_note, lazy_plan = _delete_flow(rig)

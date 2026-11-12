@@ -138,13 +138,17 @@ def transition(
     sets = ["state = ?", "rev = rev + 1", "updated_at = ?"]
     args: list[Any] = [to_state, stamp]
     if terminal or (to_state == t.APPROVED and via is not None):
+        # by／via／reason 為 None 時不覆寫（保留核准者與原因）
         sets += [
-            "resolved_by = ?",
+            "resolved_by = COALESCE(?, resolved_by)",
             "resolved_at = ?",
-            "resolved_via = ?",
-            "resolution_reason = ?",
+            "resolved_via = COALESCE(?, resolved_via)",
+            "resolution_reason = COALESCE(?, resolution_reason)",
         ]
         args += [by, stamp, via, reason]
+    if terminal:
+        # 終態不留筆記原文：只保留 digest、kind、target 等稽核欄位
+        sets += ["payload = '{}'", "base_snapshot = NULL"]
     if superseded_by is not None:
         sets.append("superseded_by = ?")
         args.append(superseded_by)
@@ -169,6 +173,22 @@ def transition(
         f"UPDATE review_proposals SET {', '.join(sets)} WHERE {where}", args
     )
     return cursor.rowcount == 1
+
+
+def update_payload(
+    conn: sqlite3.Connection, proposal_id: str, payload: dict[str, Any]
+) -> ProposalRow:
+    """就地更新開放提案的 payload 與 digest（不動狀態與 rev）。task_archive 的同意
+    綁 plan_digest，reason 等欄位改了不該洗掉使用者的核准。"""
+    row = get(conn, proposal_id)
+    assert row is not None
+    conn.execute(
+        "UPDATE review_proposals SET payload = ?, payload_digest = ? WHERE id = ?",
+        (_dumps(payload), digest_of(row.kind, row.target_id, payload), proposal_id),
+    )
+    updated = get(conn, proposal_id)
+    assert updated is not None
+    return updated
 
 
 def expire_due(conn: sqlite3.Connection, *, now: str | None = None) -> int:

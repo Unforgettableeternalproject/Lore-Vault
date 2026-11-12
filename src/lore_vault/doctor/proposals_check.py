@@ -49,6 +49,7 @@ def proposals_integrity(ctx: DoctorContext) -> CheckResult:
        ui 來源，或目標比套用結果更舊（後續合法寫入讓 `updated` 前進則不算）
     5. executing 的租約已逾時（殼當掉且沒有被回復）
     6. task_archive 的 change 已不是 active（應已轉 obsolete 或 applied）
+    7. 終態提案仍含 payload／base_snapshot（筆記原文不該靜態保留）
     """
     db = _db(ctx)
     now = format_utc(_now(ctx))
@@ -85,6 +86,11 @@ def proposals_integrity(ctx: DoctorContext) -> CheckResult:
             WHERE p.state = 'applied' AND p.kind IN ('note_update', 'link_change')
               AND p.applied_updated IS NOT NULL AND n.updated < p.applied_updated
             ORDER BY p.id""",
+        "terminal_has_payload": """
+            SELECT id FROM review_proposals
+            WHERE state IN ('applied', 'rejected', 'superseded', 'expired', 'obsolete')
+              AND (payload != '{}' OR base_snapshot IS NOT NULL)
+            ORDER BY id""",
         "lease_expired": """
             SELECT id FROM review_proposals WHERE state = 'executing'
               AND (claim_expires_at IS NULL OR claim_expires_at <= ?) ORDER BY id""",

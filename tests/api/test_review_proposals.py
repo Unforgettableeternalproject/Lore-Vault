@@ -678,7 +678,8 @@ def test_vault_delete_obsoletes_open_proposals(rig):
         json={"space": "dev", "key": DEV, "confirm_token": planned["confirm_token"]},
     )
     assert done.status_code == 200, done.text
-    assert rig.proposals(id=held["id"])[0]["state"] == "obsolete"
+    # 提案 payload 含筆記原文：vault 刪除時連提案列一起刪，不留靜態副本
+    assert rig.proposals(id=held["id"]) == []
 
 
 def test_uep_deletes_and_writes_never_create_proposals(rig):
@@ -900,6 +901,9 @@ def test_task_auth_items_are_derived_and_vanish_after_ui_authorization(rig):
 
 
 def _archive_register(rig, name="arch", digest="d1", **extra):
+    # 服務端要求 change 存在且 active：沒有就先建（冪等）
+    rig.owner.post("/v1/vaults", json={"key": TASK_VAULT, "display": "t"})
+    _put_change(rig, name, requires=False)
     return rig.owner.post(
         "/v1/proposal_register",
         json={"vault": TASK_VAULT, "name": name, "plan_digest": digest, **extra},

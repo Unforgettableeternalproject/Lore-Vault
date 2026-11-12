@@ -413,6 +413,14 @@ def _read_change(conn: Any, vault: str, name: str) -> tuple[dict[str, Any], int]
     return _change_doc(blob.content, name), blob.version
 
 
+def check_change_name(name: str) -> None:
+    _check_name(name)
+
+
+def read_change(conn: Any, vault: str, name: str) -> tuple[dict[str, Any], int]:
+    return _read_change(conn, vault, name)
+
+
 def _check_name(name: str) -> None:
     if not NAME_RE.match(name) or name == "archive":
         raise ValueError(

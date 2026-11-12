@@ -23,7 +23,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Request
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from lore_vault.proposals import service as proposals_service
 from lore_vault.proposals import types as t
@@ -31,6 +31,8 @@ from lore_vault.proposals.types import ProposalRow
 from lore_vault.storage import proposals as storage_proposals
 from lore_vault.storage.vaults import resolve_write
 
+from . import tasks_admin
+from .errors import TaskAuthorizationRejected
 from .principals import principal_of
 from .state import AppState
 
@@ -46,12 +48,12 @@ def _state(request: Request) -> AppState:
 class _Req(BaseModel):
     model_config = ConfigDict(extra="forbid")
     space: str = TASK_SPACE
-    vault: str
+    vault: str = Field(min_length=1)
 
 
 class RegisterRequest(_Req):
-    name: str
-    plan_digest: str
+    name: str = Field(min_length=1)
+    plan_digest: str = Field(min_length=1)
     reason: str | None = None
     allow_incomplete: bool = False
     change_version: int | None = None
@@ -69,6 +71,11 @@ class CloseRequest(_Req):
     id: str
     claim_id: str
     outcome: str
+
+
+class RenewRequest(_Req):
+    id: str
+    claim_id: str
 
 
 class StatusRequest(_Req):
@@ -95,8 +102,17 @@ def _owned(conn: Any, vault: str, proposal_id: str) -> ProposalRow:
 @router.post("/proposal_register")
 def proposal_register(request: Request, req: RegisterRequest) -> dict[str, Any]:
     principal = principal_of(request)
+    tasks_admin.check_change_name(req.name)  # 格式錯誤 400，不會變 500
     with _state(request).connection() as conn:
         vault = _vault(conn, req)
+        # change 必須存在且 active：不替不存在的 change 開提案
+        doc, _ = tasks_admin.read_change(conn, vault, req.name)
+        if doc.get("state") != tasks_admin.STATE_ACTIVE:
+            raise TaskAuthorizationRejected(
+                "change_not_active",
+                f"change {req.name} 的狀態是 {doc.get('state')!r}，只有 active 的 "
+                "change 可以登記封存提案",
+            )
         up = proposals_service.register_archive(
             conn,
             vault=vault,
@@ -131,6 +147,16 @@ def proposal_claim(request: Request, req: ClaimRequest) -> dict[str, Any]:
         "claim_id": claim_id,
         "lease_expires_at": row.claim_expires_at,
     }
+
+
+@router.post("/proposal_renew")
+def proposal_renew(request: Request, req: RenewRequest) -> dict[str, Any]:
+    """殼執行 archive 期間定期續租（每次再給一整段租約）。"""
+    with _state(request).connection() as conn:
+        vault = _vault(conn, req)
+        _owned(conn, vault, req.id)
+        row = proposals_service.renew_claim(conn, req.id, claim_id=req.claim_id)
+    return {"proposal": _view(row), "lease_expires_at": row.claim_expires_at}
 
 
 @router.post("/proposal_close")
