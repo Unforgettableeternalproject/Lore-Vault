@@ -100,6 +100,26 @@ describe('審核佇列', () => {
     renderWithApp(<Review />, api);
     expect(await screen.findByTestId('review-empty')).toBeTruthy();
   });
+
+  it('personal space：顯示空狀態，不查 list、沒有 vault 選擇器，可切到 dev 的審核頁', () => {
+    const { api, calls } = makeApi({ '/v1/list': () => page([]) });
+    const { switchSpace } = renderWithApp(<Review />, api, { space: 'personal' });
+    const empty = screen.getByTestId('review-personal-none');
+    expect(empty.textContent).toContain('不經審核');
+    expect(screen.queryByTestId('vault-picker')).toBeNull();
+    expect(calls).toHaveLength(0);
+    fireEvent.click(screen.getByRole('button', { name: '切換到 DEV 檢視' }));
+    expect(switchSpace).toHaveBeenCalledWith('dev', '/ui/review');
+  });
+
+  it.each(['dev', 'lore'] as const)('%s space：照常查詢並顯示 vault 選擇器', async (space) => {
+    const { api, callsTo } = makeApi({ '/v1/list': () => page([]) });
+    renderWithApp(<Review />, api, { space });
+    await screen.findByTestId('review-empty');
+    expect(screen.queryByTestId('review-personal-none')).toBeNull();
+    expect(screen.getByTestId('vault-picker')).toBeTruthy();
+    expect(callsTo('/v1/list')).toHaveLength(2);
+  });
 });
 
 describe('Notes 列表', () => {

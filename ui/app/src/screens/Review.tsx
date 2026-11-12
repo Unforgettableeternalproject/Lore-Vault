@@ -14,7 +14,8 @@ import type { ListResult, NoteListItem, ReviewState } from '../lib/types';
 const QUEUE_STATES: ReviewState[] = ['pending', 'pending_delete'];
 
 export function Review() {
-  const { api, space, vault, vaults, navigate, limits } = useApp();
+  const { api, space, vault, vaults, navigate, limits, switchSpace } = useApp();
+  const personal = space.id === 'personal';
   const [items, setItems] = useState<NoteListItem[] | null>(null);
   const [total, setTotal] = useState(0);
   const [error, setError] = useState<unknown>(null);
@@ -22,6 +23,8 @@ export function Review() {
   const [tick, setTick] = useState(0);
 
   useEffect(() => {
+    // personal space 不經審核，不查詢佇列
+    if (personal) return;
     const ctrl = new AbortController();
     setLoading(true);
     setError(null);
@@ -46,7 +49,29 @@ export function Review() {
         setLoading(false);
       });
     return () => ctrl.abort();
-  }, [api, space.id, vault, limits.list_max_limit, tick]);
+  }, [api, space.id, vault, limits.list_max_limit, tick, personal]);
+
+  if (personal) {
+    return (
+      <section class="lv-screen lv-screen--wide" aria-labelledby="lv-review-title">
+        <div class="lv-eyebrow">REVIEW · {space.en}</div>
+        <h1 id="lv-review-title" class="lv-title">
+          審核佇列
+        </h1>
+        <EmptyState
+          testId="review-personal-none"
+          title={`${space.en} space 沒有審核`}
+          action={
+            <button type="button" class="btn-outline btn-outline--gold" onClick={() => switchSpace('dev', routePath('review'))}>
+              切換到 DEV 檢視
+            </button>
+          }
+        >
+          personal space 的內容不經審核，agent 的寫入直接生效。
+        </EmptyState>
+      </section>
+    );
+  }
 
   return (
     <section class="lv-screen lv-screen--wide" aria-labelledby="lv-review-title">
