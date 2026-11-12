@@ -12,6 +12,7 @@ import { UnverifiedTag } from '../components/ReviewBadge';
 import { Badge, Banner, EmptyState, ErrorState, Loading, SourceTag } from '../components/ui';
 import {
   ChipGroup,
+  FilterGroup,
   FilterPanel,
   queryChoice,
   queryDate,
@@ -183,18 +184,22 @@ export function Notes() {
           </>
         }
       >
-        <div class="lv-filter-panel__row">
-          <VaultPicker />
-          <DateRange value={range} onChange={setRange} />
-        </div>
-        <div class="lv-filter-panel__row">
-          <TagFilter options={tagOptions} value={tag} onChange={setTag} />
-        </div>
-        <div class="lv-filter-panel__row">
-          <TextFilter value={title} onApply={setTitle} inputLabel="標題關鍵字" placeholder="標題含…（不分大小寫）" submitLabel="套用標題" testId="filter-title" />
-          <ChipGroup label="作者" groupLabel="作者狀態" options={AUTHOR_STATES} value={authorState} onChange={setAuthorState} />
-          <TextFilter value={author} onApply={setAuthor} inputLabel="作者名稱" placeholder="作者含…（不分大小寫）" submitLabel="套用作者" testId="filter-author" />
-          <ChipGroup label="審核" groupLabel="審核狀態" options={REVIEW_STATES} value={reviewState} onChange={setReviewState} />
+        <div class="lv-filter-panel__grid" data-testid="filter-groups">
+          <FilterGroup title="範圍" testId="filter-group-scope">
+            <VaultPicker />
+            <DateRange value={range} onChange={setRange} />
+          </FilterGroup>
+          <FilterGroup title="文字條件" testId="filter-group-text">
+            <TextFilter label="標題" value={title} onApply={setTitle} inputLabel="標題關鍵字" placeholder="標題含…（不分大小寫）" submitLabel="套用標題" testId="filter-title" />
+            <TextFilter label="作者" value={author} onApply={setAuthor} inputLabel="作者名稱" placeholder="作者含…（不分大小寫）" submitLabel="套用作者" testId="filter-author" />
+          </FilterGroup>
+          <FilterGroup title="狀態" testId="filter-group-state">
+            <ChipGroup label="作者" groupLabel="作者狀態" options={AUTHOR_STATES} value={authorState} onChange={setAuthorState} />
+            <ChipGroup label="審核" groupLabel="審核狀態" options={REVIEW_STATES} value={reviewState} onChange={setReviewState} />
+          </FilterGroup>
+          <FilterGroup title="Tags" wide testId="filter-group-tags">
+            <TagFilter options={tagOptions} value={tag} onChange={setTag} />
+          </FilterGroup>
         </div>
       </FilterPanel>
       {topicsError && (

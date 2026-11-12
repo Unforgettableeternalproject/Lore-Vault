@@ -176,6 +176,22 @@ describe('筆記列表', () => {
       expect(screen.getByTestId('filter-panel').textContent).toContain('標題含「預算」');
     });
 
+    it('篩選依語意分四組：範圍、文字條件、狀態、Tags（Tags 佔滿一列）', async () => {
+      const { api } = makeApi({ '/v1/topics': topics, '/v1/list': emptyList });
+      renderWithApp(<Notes />, api);
+      await screen.findByTestId('filter-groups');
+      const g = (id: string) => screen.getByTestId(id);
+      expect(within(g('filter-group-scope')).getByTestId('vault-picker')).toBeTruthy();
+      expect(within(g('filter-group-scope')).getByTestId('date-range')).toBeTruthy();
+      expect(within(g('filter-group-text')).getByRole('textbox', { name: '標題關鍵字' })).toBeTruthy();
+      expect(within(g('filter-group-text')).getByRole('textbox', { name: '作者名稱' })).toBeTruthy();
+      expect(within(g('filter-group-state')).getByRole('group', { name: '作者狀態' })).toBeTruthy();
+      expect(within(g('filter-group-state')).getByRole('group', { name: '審核狀態' })).toBeTruthy();
+      expect(within(g('filter-group-tags')).getByRole('group', { name: '標籤篩選' })).toBeTruthy();
+      expect(g('filter-group-tags').classList.contains('lv-filter-group--wide')).toBe(true);
+      expect(g('filter-groups').classList.contains('lv-filter-panel__grid')).toBe(true);
+    });
+
     it('篩選後沒有結果：空狀態可一鍵清除全部篩選', async () => {
       window.history.replaceState(null, '', '/ui/notes?title=zzz&author_state=missing');
       const { api, callsTo } = makeApi({ '/v1/topics': topics, '/v1/list': emptyList });

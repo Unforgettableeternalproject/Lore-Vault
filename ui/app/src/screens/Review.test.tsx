@@ -81,6 +81,20 @@ describe('審核佇列', () => {
     expect(navigate).toHaveBeenCalledWith('/ui/notes/b');
   });
 
+  it('標頭用共用的 lv-screen__head，VAULT 選擇器在標頭之外的 lv-filters 列（與其他頁同一套間距）', async () => {
+    const { api } = makeApi({ '/v1/list': () => page([]) });
+    renderWithApp(<Review />, api);
+    await screen.findByTestId('review-empty');
+    const h1 = screen.getByRole('heading', { name: '審核佇列' });
+    const head = h1.closest('.lv-screen__head')!;
+    expect(head).toBeTruthy();
+    expect(head.querySelector('.lv-eyebrow')).toBeTruthy();
+    const picker = screen.getByTestId('vault-picker');
+    expect(head.contains(picker)).toBe(false);
+    expect(picker.closest('.lv-filters')).toBeTruthy();
+    expect(head.nextElementSibling?.classList.contains('lv-filters')).toBe(true);
+  });
+
   it('沒有待審項目時顯示空狀態', async () => {
     const { api } = makeApi({ '/v1/list': () => page([]) });
     renderWithApp(<Review />, api);
