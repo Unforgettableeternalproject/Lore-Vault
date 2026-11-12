@@ -45,6 +45,17 @@
   --lv-graph-other: #9a9585;
   --lv-graph-edge: rgba(236, 233, 223, .5);
 }
+/* personal（echoes）在專案內改為單一藍色系：設計系統原本的 tint 是亮橘、soft 是紫，與主色藍穿插刺眼。
+   ds/ 不改，這裡覆寫；深色要再宣告一次，否則 ds 的 [data-theme='dark'] 會被上面的 :root 蓋掉 */
+:root {
+  --echoes-soft: #5b86a8;
+  --echoes-tint: #d9e6f1;
+}
+[data-theme='dark'] {
+  --echoes-soft: #5b86a8;
+  --echoes-tint: rgba(90, 152, 204, .22);
+  --echoes-stroke: rgba(90, 152, 204, .75);
+}
 /* 自訂屬性在宣告處解析：zone 文字色要宣告在帶 data-zone 的元素上才吃得到該 zone 的色 */
 [data-zone] { --lv-zone-text: var(--zone-main); }
 [data-theme='dark'] [data-zone] { --lv-zone-text: var(--zone-soft); }
@@ -55,7 +66,7 @@
 .lv-doc__toc-item.is-on, .lv-drop.is-dragging, .lv-move-target {
   --ink-mute: var(--ink-soft);
 }
-/* 疊了兩層 tint 的目前選項、淺色 personal（echoes，底色偏亮橘）上的次要文字直接用主文字色 */
+/* 疊了兩層 tint 的目前選項、淺色 personal（echoes）上的次要文字直接用主文字色 */
 .lv-space__option.is-current { --ink-mute: var(--ink); }
 [data-theme='light'] [data-zone='echoes'] :is(.lv-space__trigger, .lv-write-target, .lv-write-to, .lv-chunk.is-on,
 .lv-nav__item.is-active, .lv-vaults__item.is-active, .lv-chip.is-on, .lv-from-recall, .lv-banner--info,
